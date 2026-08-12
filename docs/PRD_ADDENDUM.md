@@ -89,7 +89,54 @@ the caching rule the same signal.
 - **AI analysis / valuation / committee:** only re-run when A5's cache key
   changes, or on manual request from the dashboard.
 
-## A7. Deferred / explicitly not in Sprint 0-1
+## A7. Sprint 1 execution notes (added after running the real pipeline)
+
+Running ingestion against the full 518-company universe surfaced real data
+issues worth recording rather than re-discovering later.
+
+**Coverage achieved:** 505/518 companies (97.5%) with usable annual
+fundamentals; 518/518 (100%) with price history.
+
+**Bugs found and fixed:**
+- XBRL tags must be **merged across every candidate**, not just the first
+  one present. Companies switch tags over time — e.g. Apple reported
+  revenue under `Revenues` through fiscal 2017 and switched to
+  `RevenueFromContractWithCustomerExcludingAssessedTax` after adopting
+  ASC 606. Taking the first matching tag silently truncated Apple's
+  history to 3 years; merging recovered the full 19-year history.
+- SEC's `company_tickers.json` — the documented canonical ticker→CIK
+  file — is not actually complete. American Electric Power (AEP), an
+  S&P 500 utility that has filed 10-Ks for decades, is absent from it.
+  `lookup_cik` now falls back to EDGAR's `browse-edgar` company search,
+  which resolves tickers the bulk file misses.
+- Revenue and net-income XBRL tags vary more than the original candidate
+  list assumed: broker-dealers use `RevenuesNetOfInterestExpense` (Goldman
+  Sachs), several filers use `RevenueFromContractWithCustomerIncludingAssessedTax`
+  instead of the `Excluding` variant (CrowdStrike, Kraft Heinz, APA,
+  Alexandria RE), and some tag net income only as `ProfitLoss` rather than
+  `NetIncomeLoss` on their 10-K (PNC, Fox Corp). All added as candidates.
+
+**Remaining gaps (13 companies, ~2.5%) — real data limitations, not bugs:**
+- **8 foreign private issuers** (ASML, PDD, ARM, CCEP, NBIS, TRI, FER,
+  SPCX): file Form 20-F, not 10-K. Correctly out of scope for a 10-K-based
+  extractor — see §A1's US-only decision. Nothing to fix here; flagging so
+  it doesn't look like an oversight.
+- **2 banks/financial holding companies** (SYF, TFC): US bank GAAP income
+  statements lead with interest income/expense rather than a single
+  "revenue" line, and neither company tags a consolidated revenue XBRL
+  figure at all. A proper fix is a bank-specific revenue proxy (interest
+  income + noninterest income) — reasonable Sprint 2+ scope, tied to the
+  sector-relative screening work anyway since banks need different ratio
+  treatment regardless (§A2).
+- **3 recently-restructured entities** (XOM, APA, HONA): each trades under
+  a ticker now mapped to a newer holding-company CIK (post-reorganization
+  or recent spinoff) whose XBRL facts only go back through 10-Q filings —
+  the pre-restructuring operating company's longer 10-K history exists
+  under a different CIK. Resolving this requires tracking corporate
+  restructuring events, which isn't worth the complexity for 3 companies;
+  flagged as thin/insufficient data (§A4) rather than silently dropped.
+
+## A8. Deferred / explicitly not in Sprint 0-1
 
 - FTSE 350 / UK data, FX normalization (→ later sprint, see A1)
 - Sector-relative screening *implementation* (schema supports it now;

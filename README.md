@@ -10,10 +10,17 @@ during Sprint 0 — read this first, it overrides the PRD where they differ).
 
 ## Status
 
-**Sprint 0 — scaffolding.** Schema, repo structure, and pipeline skeleton
-are in place; every stage function is a documented stub raising
-`NotImplementedError` until its sprint lands. Nothing here fetches real
-data yet.
+**Sprint 1 — data foundation and company universe. Done.**
+- Universe: 518 unique US companies (S&P 500 + NASDAQ 100, deduplicated).
+- Fundamentals: 505/518 (97.5%) via SEC EDGAR XBRL. The 13 gaps are
+  explained, not bugs — see [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A7.
+- Prices: 518/518 (100%) via yfinance.
+- 8 tests passing (schema + offline extraction-logic regression tests).
+
+Run `python scripts/run_pipeline.py --init-db` to reproduce.
+
+Sprints 2-6 (screen/quality/ai/valuation/committee/monitor) are still
+documented stubs — see the sprint table below.
 
 ## Scope for now
 
@@ -32,9 +39,9 @@ data yet.
 
 | Sprint | Scope |
 |---|---|
-| 0 | Repo scaffold, schema, pipeline skeleton *(this)* |
-| 1 | Universe + price/fundamentals ingestion (US only) |
-| 2 | Sector-relative quant screen + ranked dashboard |
+| 0 | Repo scaffold, schema, pipeline skeleton — **done** |
+| 1 | Universe + price/fundamentals ingestion (US only) — **done** |
+| 2 | Sector-relative quant screen + ranked dashboard *(next)* |
 | 3 | AI business/moat/management/risk analysis (citation-enforced) |
 | 4 | Owner Earnings DCF + supporting valuation methods |
 | 5 | Investment Committee + one-page Investment Brief |

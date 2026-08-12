@@ -8,6 +8,9 @@ Full spec: `docs/Project_Moat_PRD_MVP.pdf` (original PRD) +
 [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) (scoping decisions made
 during Sprint 0 — read this first, it overrides the PRD where they differ).
 
+What actually happened each sprint — results, bugs found, scope calls — is
+in [`docs/sprints/`](docs/sprints/).
+
 ## Status
 
 **Sprint 1 — data foundation and company universe. Done.**
@@ -37,15 +40,15 @@ documented stubs — see the sprint table below.
 
 ## Sprint plan
 
-| Sprint | Scope |
-|---|---|
-| 0 | Repo scaffold, schema, pipeline skeleton — **done** |
-| 1 | Universe + price/fundamentals ingestion (US only) — **done** |
-| 2 | Sector-relative quant screen + ranked dashboard *(next)* |
-| 3 | AI business/moat/management/risk analysis (citation-enforced) |
-| 4 | Owner Earnings DCF + supporting valuation methods |
-| 5 | Investment Committee + one-page Investment Brief |
-| 6 | Watchlist monitoring |
+| Sprint | Scope | Summary |
+|---|---|---|
+| 0 | Repo scaffold, schema, pipeline skeleton — **done** | [sprint-0.md](docs/sprints/sprint-0.md) |
+| 1 | Universe + price/fundamentals ingestion (US only) — **done** | [sprint-1.md](docs/sprints/sprint-1.md) |
+| 2 | Sector-relative quant screen + ranked dashboard *(next)* | |
+| 3 | AI business/moat/management/risk analysis (citation-enforced) | |
+| 4 | Owner Earnings DCF + supporting valuation methods | |
+| 5 | Investment Committee + one-page Investment Brief | |
+| 6 | Watchlist monitoring | |
 
 ## Setup
 

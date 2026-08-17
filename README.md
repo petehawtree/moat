@@ -11,6 +11,13 @@ during Sprint 0 — read this first, it overrides the PRD where they differ).
 What actually happened each sprint — results, bugs found, scope calls — is
 in [`docs/sprints/`](docs/sprints/).
 
+## Architecture
+
+<img src="docs/img/architecture.svg" alt="Project Moat pipeline: three free data sources feed an ingestion stage that writes into one shared SQLite store; five stages read and write that same store in sequence, with a citation-enforcement rule at the AI Analysis stage; the output reaches a human who makes the final call, while a separate watchlist monitor loops back to re-trigger ingestion on its own." width="100%">
+
+Green = shipped (Sprint 0–1). Dashed = planned (Sprint 2–6, still stubs).
+Gold = the one thing no sprint replaces.
+
 ## Status
 
 **Sprint 1 — data foundation and company universe. Done.**

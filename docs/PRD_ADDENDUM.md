@@ -151,6 +151,19 @@ fundamentals; 518/518 (100%) with price history.
   restructuring events, which isn't worth the complexity for 3 companies;
   flagged as thin/insufficient data (§A4) rather than silently dropped.
 
+**Where this generalizes:** the traditional path for handling disclosure
+data like this is an SME or analyst defining the tagging/handling rules up
+front, before any extraction code gets written. What happened in Sprint 1
+inverted that - the agent ran directly against the golden source (SEC's
+own EDGAR filings, not a summary or documentation) across a representative
+sample spanning multiple industries, observed how the data actually
+structures itself, and adjusted its logic to match evidence rather than
+assumption. Not a replacement for that expertise - a way to compress what's
+normally days of manual filing review into a validation loop that runs in
+minutes and leaves a trail: one regression test per root cause, each
+traceable back to the specific company and tag that prompted it. Full
+write-up: [`docs/writeups/three-bugs-in-structured-financial-data.md`](writeups/three-bugs-in-structured-financial-data.md).
+
 ## A8. Deferred / explicitly not in Sprint 0-1
 
 - FTSE 350 / UK data, FX normalization (→ later sprint, see A1)

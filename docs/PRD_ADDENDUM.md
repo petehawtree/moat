@@ -107,8 +107,15 @@ fundamentals; 518/518 (100%) with price history.
 - SEC's `company_tickers.json` — the documented canonical ticker→CIK
   file — is not actually complete. American Electric Power (AEP), an
   S&P 500 utility that has filed 10-Ks for decades, is absent from it.
-  `lookup_cik` now falls back to EDGAR's `browse-edgar` company search,
-  which resolves tickers the bulk file misses.
+  Confirmed this isn't a stale/transient snapshot: re-fetched the file
+  fresh (no local cache) a few days after the initial finding — it had
+  grown from 10,387 to 10,396 entries in the interim (so it's actively
+  maintained), and AEP still wasn't among them. SEC's own `submissions`
+  API independently confirms CIK 4904 is "AMERICAN ELECTRIC POWER CO INC,"
+  ticker `AEP`, currently listed on Nasdaq — so this is a standing gap in
+  a file SEC represents as authoritative, not a glitch. `lookup_cik` now
+  falls back to EDGAR's `browse-edgar` company search, which resolves
+  tickers the bulk file misses.
 - Revenue and net-income XBRL tags vary more than the original candidate
   list assumed: broker-dealers use `RevenuesNetOfInterestExpense` (Goldman
   Sachs), several filers use `RevenueFromContractWithCustomerIncludingAssessedTax`

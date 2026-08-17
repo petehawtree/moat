@@ -36,19 +36,19 @@
 
       <!-- ================= SOURCES ================= -->
       <rect x="20" y="24" width="190" height="80" rx="3" class="box-source"></rect>
-      <text x="115" y="54" text-anchor="middle" class="node-title" font-size="13.5">SEC EDGAR</text>
-      <text x="115" y="74" text-anchor="middle" class="node-sub" font-size="10">10-K/10-Q XBRL</text>
-      <text x="115" y="88" text-anchor="middle" class="node-sub" font-size="10">~7 req/s, throttled</text>
+      <text x="115" y="52" text-anchor="middle" class="node-title" font-size="12">US FUNDAMENTALS</text>
+      <text x="115" y="72" text-anchor="middle" class="node-sub" font-size="10">source: SEC EDGAR</text>
+      <text x="115" y="88" text-anchor="middle" class="node-sub" font-size="10">10-K/10-Q, throttled</text>
 
       <rect x="225" y="24" width="190" height="80" rx="3" class="box-source"></rect>
-      <text x="320" y="54" text-anchor="middle" class="node-title" font-size="13.5">UNIVERSE LISTS</text>
-      <text x="320" y="74" text-anchor="middle" class="node-sub" font-size="10">S&amp;P 500 +</text>
+      <text x="320" y="54" text-anchor="middle" class="node-title" font-size="13.5">UNIVERSE</text>
+      <text x="320" y="74" text-anchor="middle" class="node-sub" font-size="10">source: S&amp;P 500,</text>
       <text x="320" y="88" text-anchor="middle" class="node-sub" font-size="10">NASDAQ-100</text>
 
       <rect x="430" y="24" width="190" height="80" rx="3" class="box-source"></rect>
-      <text x="525" y="54" text-anchor="middle" class="node-title" font-size="13.5">YFINANCE</text>
-      <text x="525" y="74" text-anchor="middle" class="node-sub" font-size="10">daily close</text>
-      <text x="525" y="88" text-anchor="middle" class="node-sub" font-size="10">incremental</text>
+      <text x="525" y="54" text-anchor="middle" class="node-title" font-size="13.5">PRICES</text>
+      <text x="525" y="74" text-anchor="middle" class="node-sub" font-size="10">source: yfinance</text>
+      <text x="525" y="88" text-anchor="middle" class="node-sub" font-size="10">daily, incremental</text>
 
       <!-- convergence into INGEST -->
       <line x1="115" y1="104" x2="335" y2="146" class="flow-line"></line>

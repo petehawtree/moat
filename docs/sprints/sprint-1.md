@@ -44,10 +44,14 @@ fixing them turned out to be fully explainable rather than a mystery.
    history to 3 years; merging recovered the full 19-year history.
 2. **SEC's own canonical ticker→CIK file is incomplete.** American
    Electric Power (AEP) — an S&P 500 utility that's filed 10-Ks for
-   decades — is simply absent from `company_tickers.json`. Re-verified
-   with a fresh fetch days later (no cache): the file had grown from
-   10,387 to 10,396 entries, confirming it's actively maintained, and AEP
-   still wasn't in it — a standing gap, not a stale snapshot. Added a
+   decades — is simply absent from `company_tickers.json`. Confirmed at
+   the raw-response level (direct text search for "american electric" and
+   for CIK `4904` as a value — zero matches for either), ruling out a
+   parsing bug on our end. Re-verified with a fresh fetch days later (no
+   cache): the file had grown from 10,387 to 10,396 entries, confirming
+   it's actively maintained, and AEP still wasn't in it — a standing gap
+   in that specific file, confirmed by direct text search rather than a
+   lookup artifact on our end. Added a
    fallback lookup via EDGAR's `browse-edgar` company search, which
    resolves tickers the bulk file misses.
 3. **Revenue/net-income tags vary more than expected.** Broker-dealers use

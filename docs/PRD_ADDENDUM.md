@@ -107,15 +107,23 @@ fundamentals; 518/518 (100%) with price history.
 - SEC's `company_tickers.json` — the documented canonical ticker→CIK
   file — is not actually complete. American Electric Power (AEP), an
   S&P 500 utility that has filed 10-Ks for decades, is absent from it.
-  Confirmed this isn't a stale/transient snapshot: re-fetched the file
-  fresh (no local cache) a few days after the initial finding — it had
-  grown from 10,387 to 10,396 entries in the interim (so it's actively
-  maintained), and AEP still wasn't among them. SEC's own `submissions`
-  API independently confirms CIK 4904 is "AMERICAN ELECTRIC POWER CO INC,"
-  ticker `AEP`, currently listed on Nasdaq — so this is a standing gap in
-  a file SEC represents as authoritative, not a glitch. `lookup_cik` now
-  falls back to EDGAR's `browse-edgar` company search, which resolves
-  tickers the bulk file misses.
+  Confirmed at the raw-response level, not just via our parsed lookup
+  dict: searched the raw file text directly for "american electric"
+  (case-insensitive) and for AEP's CIK as a `cik_str` value (`4904`,
+  unpadded, as SEC stores it) — zero matches for either, ruling out a
+  parsing artifact on our end (case/whitespace mismatch, a duplicate-key
+  overwrite, truncated download). Also confirmed this isn't a
+  stale/transient snapshot: re-fetched the file fresh (no local cache) a
+  few days after the initial finding — it had grown from 10,387 to 10,396
+  entries in the interim (so it's actively maintained), and AEP still
+  wasn't among them. SEC's own `submissions` API independently confirms
+  CIK 4904 is "AMERICAN ELECTRIC POWER CO INC," ticker `AEP`, currently
+  listed on Nasdaq. So: absent from this specific derived file at the
+  byte level, confirmed by direct text search rather than a lookup
+  artifact on our end — we can't see SEC's internal generation process,
+  so we can't say *why* it's missing, only that it demonstrably is.
+  `lookup_cik` now falls back to EDGAR's `browse-edgar` company search,
+  which resolves tickers the bulk file misses.
 - Revenue and net-income XBRL tags vary more than the original candidate
   list assumed: broker-dealers use `RevenuesNetOfInterestExpense` (Goldman
   Sachs), several filers use `RevenueFromContractWithCustomerIncludingAssessedTax`

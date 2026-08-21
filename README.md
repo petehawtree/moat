@@ -20,17 +20,28 @@ Gold = the one thing no sprint replaces.
 
 ## Status
 
+**Sprint 2 — sector-relative quant screen + ranked dashboard. Done.**
+- Screen: all 8 PRD §4 metrics scored against each company's own GICS
+  sector, not a flat bar — see [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A2/§A9.
+- Results: 111/505 companies (22.0%) pass the screen. Top of the ranked
+  table is recognizable moat businesses (Adobe, Mastercard, Meta,
+  Moody's, MSCI, Nvidia, Verisk) — see
+  [`docs/sprints/sprint-2.md`](docs/sprints/sprint-2.md).
+- Dashboard: ranked table + per-company metric breakdown showing *why* a
+  company passed or failed each metric.
+- 16 tests passing.
+
 **Sprint 1 — data foundation and company universe. Done.**
 - Universe: 518 unique US companies (S&P 500 + NASDAQ 100, deduplicated).
 - Fundamentals: 505/518 (97.5%) via SEC EDGAR XBRL. The 13 gaps are
   explained, not bugs — see [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A7.
 - Prices: 518/518 (100%) via yfinance.
-- 8 tests passing (schema + offline extraction-logic regression tests).
 
-Run `python scripts/run_pipeline.py --init-db` to reproduce.
+Run `python scripts/run_pipeline.py --init-db` then
+`python scripts/run_pipeline.py --from-stage screen` to reproduce.
 
-Sprints 2-6 (screen/quality/ai/valuation/committee/monitor) are still
-documented stubs — see the sprint table below.
+Sprints 3-6 (ai/valuation/committee/monitor) are still documented stubs —
+see the sprint table below.
 
 ## Scope for now
 
@@ -51,7 +62,7 @@ documented stubs — see the sprint table below.
 |---|---|---|
 | 0 | Repo scaffold, schema, pipeline skeleton — **done** | [sprint-0.md](docs/sprints/sprint-0.md) |
 | 1 | Universe + price/fundamentals ingestion (US only) — **done** | [sprint-1.md](docs/sprints/sprint-1.md) |
-| 2 | Sector-relative quant screen + ranked dashboard *(next)* | |
+| 2 | Sector-relative quant screen + ranked dashboard — **done** | [sprint-2.md](docs/sprints/sprint-2.md) |
 | 3 | AI business/moat/management/risk analysis (citation-enforced) | |
 | 4 | Owner Earnings DCF + supporting valuation methods | |
 | 5 | Investment Committee + one-page Investment Brief | |

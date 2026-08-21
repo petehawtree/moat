@@ -171,3 +171,124 @@ write-up: [`docs/writeups/three-bugs-in-structured-financial-data.md`](writeups/
   logic lands in Sprint 2)
 - Any alerting channel beyond a dashboard panel (email/push is a nice-to-have,
   not required for §11's success criteria)
+
+## A9. Sprint 2 — sector-relative screen implementation
+
+A2 described the mechanism; this records the choices made turning it into
+code (`moat/screen/quant_screen.py`, `moat/quality/quality_score.py`).
+
+**Absolute floors are deliberately much looser than PRD §4's flat
+criteria.** §4 lists e.g. "ROIC > 15%" as the flat bar; `config.py`'s
+`ABSOLUTE_FLOORS` uses 0.0 for ROIC/ROE/operating margin. That's
+intentional, not a bug: the old flat bar is where sector-relative
+comparison now lives (a top-tercile bar within the company's own GICS
+sector), and the absolute floor's only job is to disqualify outright
+regardless of sector (e.g. negative free cash flow) per A2's own wording.
+
+**Percentile formula:** for each metric, `compute_sector_percentile`
+ranks a company against same-sector peers as "% of peers this company is
+at least as good as" (ties favor the company — the "weak" percentile-rank
+convention), direction-aware per metric (`debt` and `share_dilution` are
+lower-is-better; everything else is higher-is-better). The sector-relative
+bar is the 66.7th percentile — A2's "top tercile" made literal.
+
+**Combining floor + sector-relative into `overall_pass`:** a metric passes
+only if it clears *both* the absolute floor and the sector-relative bar,
+falling back to floor-only when a sector comparison isn't available —
+missing GICS sector, or a peer group smaller than
+`MIN_SECTOR_PEER_GROUP` (5). 15 NASDAQ-100-only companies have no sector
+at all (Wikipedia's NASDAQ-100 source doesn't carry GICS, flagged in
+Sprint 1 — see `moat/ingest/universe.py`); those get floor-only scoring
+rather than being silently failed for a comparison we can't compute (same
+"flag, don't guess" rule as A4).
+
+**Per-metric value definitions** (what's actually compared, not the raw
+DB column — company size shouldn't dominate a peer comparison):
+- `roic`, `roe`, `operating_margin`, `gross_margin`: the ratio as stored,
+  latest fiscal year.
+- `free_cash_flow`: FCF **margin** (FCF / revenue), not raw dollar FCF.
+- `debt`: total debt / latest free cash flow. Debt outstanding against
+  zero-or-negative FCF is an explicit absolute-floor fail (can't be
+  serviced from operations), not a missing value.
+- `revenue_eps_growth`: revenue CAGR across all available fiscal years;
+  EPS trend (latest vs. earliest available) is a secondary floor-only
+  gate, not part of the ranked value, since EPS is noisier and can be
+  negative (CAGR undefined off a negative base).
+- `share_dilution`: CAGR of diluted share count across available years
+  (negative = buybacks = good; this is a lower-is-better metric).
+
+**Bug found and fixed: stock splits misread as dilution/EPS collapse —
+and a correction to how this was first diagnosed.** Running the real
+screen surfaced Walmart failing both `share_dilution` and
+`revenue_eps_growth` outright: `shares_diluted` jumps 2.85B → 8.42B
+between our stored FY2021 and FY2022 rows, with EPS dropping 4.75 → 1.62
+to match. The first pass at this write-up said "Walmart's 3-for-1 split
+(FY2022)" — that's wrong on the date, and wrong in exactly the way §A7
+warns about: pattern-matching a known corporate action ("WMT did a 3-for-1
+split, this looks like one") without checking it against a primary
+source. Walmart's real split was effective **Feb 23, 2024**, not FY2022.
+
+What's actually happening, confirmed directly against SEC's raw XBRL
+`filed` timestamps: a 10-K filed after a split restates its comparative
+income statement (current year + ~2 priors) onto the post-split share
+basis, and `_annual_entries`' "most-recently-filed value wins" rule
+(added in Sprint 1 for ordinary restatements) picks those up. Walmart's
+FY2024 10-K (filed 2024-03-15, after the split) restates FY2022 as its
+oldest comparative — jumping that period's shares from the originally
+filed 2.805B to 8.415B — but never touches FY2021, which falls outside
+that filing's 3-year comparative window and stays on the pre-split basis
+forever (no later filing's comparative window reaches back that far).
+The jump we see is real, but it marks the edge of a restatement window,
+not the split's actual date — confirmed with the same ~2-year offset on
+Apple (real split Aug 2020; FY2020 10-K, filed 2020-10-30, restates the
+FY2018 comparative from 5,000,109,000 to exactly 20,000,435,000 — a clean
+4.0x — so the jump lands at FY2018, two years early) and Nvidia (real
+splits 2021 and 2024; jumps land at FY2020 and FY2023 respectively, same
+~2-year pattern both times).
+
+This doesn't change the fix, only the explanation: `_detect_split_factors`
+treats a ≥40%-in-one-year jump in diluted share count as a split/reverse-
+split (real buybacks/issuance essentially never move that fast in a
+single year) and rescales every year before the jump onto the latest
+year's basis — shares multiplied by the detected ratio, EPS divided by it
+(they move inversely). It doesn't need to know the real split date; it
+only needs to find wherever the basis actually changes in the merged
+series, which it does regardless of why the jump is positioned where it
+is. After the fix, WMT's split-adjusted dilution CAGR is -2.2%/yr
+(buybacks, correctly), and it now passes both metrics it previously
+failed on the artifact alone. AAPL and NVDA both compute a small, real,
+sub-3% dilution CAGR post-fix rather than a split-inflated number.
+Trade-off: a real, non-split share issuance that happens to jump ≥40% in
+one year (e.g. a large stock-funded acquisition) would be misread as a
+split too and under-penalized — rare in practice, and a false-negative
+(missed dilution) rather than a crash, so accepted for Sprint 2 rather
+than building full corporate-action tracking for it.
+
+**Quality score and pass threshold:** `compute_quality_score` is the
+% of the 8 metrics a company's `overall_pass` cleared (0-100). The pass
+threshold is `QUALITY_SCORE_PASS_THRESHOLD = 50.0` — at least half.
+Against the real 505-company universe this produces **111/505 (22.0%)**
+passing. That's a higher rate than PRD §13's "~50-100 out of ~850"
+target, but §13's ~850-company figure was scoped for the full US+UK
+universe including FTSE 350; S&P 500 + NASDAQ 100 is already a
+pre-filtered set of large, established businesses, so a higher pass-through
+rate here is expected rather than a sign the bar is too loose. Revisit
+once FTSE 350 is added (A1) and the denominator grows to match §13's
+original assumption.
+
+**Known limitation, not fixed this sprint: ROIC noise for near-zero
+invested capital.** Adobe (this run's #1, 100/100) computes ROIC = 111%.
+Real cause, not a bug: Adobe carries zero debt and a large cash balance
+against modest equity (years of buybacks), so ROIC's denominator
+(`total_debt + equity - cash`, from `fundamentals_edgar.py`) is small
+enough that the ratio becomes noisy — a real characteristic of Adobe's
+balance sheet, not a miscalculation, but a company can land at the top of
+the ranked list substantially on the back of one noisy metric. This is
+exactly what A4's `confidence='medium'` tag on ROIC already exists to
+flag (it's tagged medium precisely because it's "always an estimate"),
+but the Sprint 2 screen doesn't yet *use* that tag — every fundamentals
+value is compared identically regardless of confidence. Folding
+confidence into the screen (e.g. discounting or footnoting medium/low
+values rather than ranking them at face value) is reasonable Sprint 3+
+scope, flagged here rather than silently left for a future session to
+rediscover.

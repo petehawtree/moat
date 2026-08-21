@@ -111,7 +111,7 @@ CREATE TABLE IF NOT EXISTS quant_scores (
     run_id              TEXT NOT NULL REFERENCES pipeline_runs(run_id),
     ticker              TEXT NOT NULL REFERENCES companies(ticker),
     sector_peer_group   TEXT,                -- sector used for relative comparison
-    metric              TEXT NOT NULL,       -- 'roic' | 'roe' | 'fcf' | 'growth' | 'operating_margin' | 'debt' | 'dilution' | 'gross_margin'
+    metric              TEXT NOT NULL,       -- 'roic' | 'roe' | 'free_cash_flow' | 'revenue_eps_growth' | 'operating_margin' | 'debt' | 'share_dilution' | 'gross_margin' — see moat/screen/quant_screen.py METRICS
     value               REAL,
     absolute_floor_pass INTEGER,             -- 0/1
     sector_percentile   REAL,                -- 0-100, null if not applicable

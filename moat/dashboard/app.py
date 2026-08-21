@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pandas as pd
 import streamlit as st
 
+from moat.config import QUALITY_SCORE_PASS_THRESHOLD
 from moat.db.connection import get_connection
 
 st.set_page_config(page_title="Project Moat", layout="wide")
@@ -41,11 +42,6 @@ else:
     prices_count = conn.execute("SELECT COUNT(DISTINCT ticker) AS n FROM price_history").fetchone()["n"]
     col3.metric("With price history", prices_count)
 
-    st.caption(
-        "Ranking/scoring lands in Sprint 2 (sector-relative quant screen, §A2) — "
-        "this view is raw data coverage only."
-    )
-
     coverage = pd.read_sql_query(
         """
         SELECT
@@ -67,5 +63,65 @@ else:
     if not thin.empty:
         with st.expander(f"{len(thin)} companies with fewer than 3 years of fundamentals"):
             st.dataframe(thin, use_container_width=True)
+
+    st.divider()
+    st.subheader("Sprint 2 — quant screen ranking")
+    st.caption(
+        "Sector-relative screen (docs/PRD_ADDENDUM.md §A2/§A9): each of the 8 "
+        "PRD §4 metrics passes only if it clears both an absolute floor and "
+        "the top-tercile bar within its own GICS sector. composite_score is "
+        "the % of those 8 metrics passed."
+    )
+
+    latest_run = conn.execute(
+        """
+        SELECT run_id FROM pipeline_runs
+        WHERE run_id IN (SELECT DISTINCT run_id FROM quality_scores)
+        ORDER BY started_at DESC LIMIT 1
+        """
+    ).fetchone()
+
+    if latest_run is None:
+        st.info(
+            "No screen results yet. Run "
+            "`python scripts/run_pipeline.py --from-stage screen` after ingest."
+        )
+    else:
+        run_id = latest_run["run_id"]
+        ranked = pd.read_sql_query(
+            """
+            SELECT q.ticker, c.name, c.sector, c.universe,
+                   ROUND(q.composite_score, 1) AS composite_score, q.passed_screen
+            FROM quality_scores q
+            JOIN companies c ON c.ticker = q.ticker
+            WHERE q.run_id = ?
+            ORDER BY q.composite_score DESC, q.ticker
+            """,
+            conn,
+            params=(run_id,),
+        )
+        passed_n = int(ranked["passed_screen"].sum())
+        st.caption(
+            f"Run `{run_id}` — {passed_n}/{len(ranked)} companies passed "
+            f"(composite_score >= {QUALITY_SCORE_PASS_THRESHOLD})."
+        )
+        st.dataframe(ranked, use_container_width=True, height=500)
+
+        st.markdown("**Why did a company pass or fail?** Pick a ticker for the per-metric breakdown.")
+        pick = st.selectbox("Ticker", ranked["ticker"].tolist())
+        if pick:
+            detail = pd.read_sql_query(
+                """
+                SELECT metric, ROUND(value, 4) AS value, absolute_floor_pass,
+                       ROUND(sector_percentile, 1) AS sector_percentile,
+                       sector_relative_pass, overall_pass, sector_peer_group
+                FROM quant_scores
+                WHERE run_id = ? AND ticker = ?
+                ORDER BY metric
+                """,
+                conn,
+                params=(run_id, pick),
+            )
+            st.dataframe(detail, use_container_width=True)
 
 conn.close()

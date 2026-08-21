@@ -6,7 +6,9 @@ Stage order mirrors PRD §3:
   ai_analysis -> valuation -> committee -> monitor
 
 Sprint 1: 'universe' and 'ingest' are real (US-only, docs/PRD_ADDENDUM.md
-§A1). 'screen' onward still raise NotImplementedError until Sprint 2+.
+§A1). Sprint 2: 'screen' and 'quality' are real (sector-relative screen,
+§A2/§A9). 'ai_analysis' onward still raise NotImplementedError until
+Sprint 3+.
 """
 from __future__ import annotations
 
@@ -18,8 +20,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from moat import config
 from moat.db.connection import get_connection, init_db
 from moat.ingest import fundamentals_edgar, prices, universe
+from moat.quality import quality_score
+from moat.screen import quant_screen
 
 STAGES = [
     "universe",
@@ -102,6 +107,25 @@ def run_ingest_stage(conn, tickers: list[str], limit: int | None) -> None:
     print(f"  Failures (first 15): {prices_failed[:15]}")
 
 
+def run_screen_stage(conn, run_id: str) -> None:
+    quant_screen.run_screen(run_id, conn)
+    n = conn.execute("SELECT COUNT(*) AS n FROM quant_scores WHERE run_id = ?", (run_id,)).fetchone()["n"]
+    n_tickers = conn.execute("SELECT COUNT(DISTINCT ticker) AS n FROM quant_scores WHERE run_id = ?", (run_id,)).fetchone()["n"]
+    print(f"  screen: {n} quant_scores rows written across {n_tickers} companies ({len(quant_screen.METRICS)} metrics each)")
+
+
+def run_quality_stage(conn, run_id: str) -> None:
+    quality_score.run_quality(run_id, conn)
+    row = conn.execute(
+        "SELECT COUNT(*) AS total, SUM(passed_screen) AS passed FROM quality_scores WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    total, passed = row["total"], row["passed"] or 0
+    print(
+        f"  quality: {passed}/{total} companies passed the screen "
+        f"(composite_score >= {config.QUALITY_SCORE_PASS_THRESHOLD})"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Project Moat pipeline")
     parser.add_argument("--from-stage", choices=STAGES, default=STAGES[0])
@@ -121,6 +145,7 @@ def main() -> None:
     start_index = STAGES.index(args.from_stage)
     stages_to_run = STAGES[start_index:]
 
+    last_completed_stage = None
     try:
         tickers: list[str] = []
         for stage in stages_to_run:
@@ -132,12 +157,19 @@ def main() -> None:
                 if not tickers:
                     tickers = [row["ticker"] for row in conn.execute("SELECT ticker FROM companies WHERE is_active = 1")]
                 run_ingest_stage(conn, tickers, args.limit)
+            elif stage == "screen":
+                print("-> stage 'screen'")
+                run_screen_stage(conn, run_id)
+            elif stage == "quality":
+                print("-> stage 'quality'")
+                run_quality_stage(conn, run_id)
             else:
                 print(f"-> stage '{stage}': not yet implemented (see docs/PRD_ADDENDUM.md sprint plan)")
                 raise NotImplementedError(f"Stage '{stage}' lands in a later sprint")
+            last_completed_stage = stage
     except NotImplementedError as exc:
-        complete_run(conn, run_id, stage_reached="ingest", status="failed")
-        print(f"\nRun {run_id} stopped at screening: {exc}")
+        complete_run(conn, run_id, stage_reached=last_completed_stage or "none", status="failed")
+        print(f"\nRun {run_id} stopped: {exc}")
         return
     finally:
         conn.close()

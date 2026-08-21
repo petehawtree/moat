@@ -30,6 +30,21 @@ if company_count == 0:
         "to load the universe and ingest fundamentals/prices."
     )
 else:
+    sectors_raw = pd.read_sql_query(
+        "SELECT DISTINCT sector FROM companies WHERE is_active = 1 ORDER BY sector", conn
+    )["sector"]
+    # 15 NASDAQ-100-only companies have no GICS sector at all (docs/PRD_ADDENDUM.md
+    # §A9's floor-only fallback) — surfaced as its own filterable option rather
+    # than silently dropped from the grids.
+    sector_options = sorted(s for s in sectors_raw if s is not None)
+    if sectors_raw.isnull().any():
+        sector_options.append("(no sector)")
+
+    selected_sectors = st.multiselect("Filter by sector", sector_options, default=sector_options)
+
+    def _filter_by_sector(df: pd.DataFrame) -> pd.DataFrame:
+        return df[df["sector"].fillna("(no sector)").isin(selected_sectors)]
+
     st.subheader("Sprint 1 — ingest coverage")
     col1, col2, col3 = st.columns(3)
     col1.metric("Companies in universe", company_count)
@@ -57,6 +72,7 @@ else:
         """,
         conn,
     )
+    coverage = _filter_by_sector(coverage)
     st.dataframe(coverage, use_container_width=True, height=500)
 
     thin = coverage[coverage["years_of_fundamentals"] < 3]
@@ -100,6 +116,7 @@ else:
             conn,
             params=(run_id,),
         )
+        ranked = _filter_by_sector(ranked)
         passed_n = int(ranked["passed_screen"].sum())
         st.caption(
             f"Run `{run_id}` — {passed_n}/{len(ranked)} companies passed "
@@ -108,7 +125,7 @@ else:
         st.dataframe(ranked, use_container_width=True, height=500)
 
         st.markdown("**Why did a company pass or fail?** Pick a ticker for the per-metric breakdown.")
-        pick = st.selectbox("Ticker", ranked["ticker"].tolist())
+        pick = st.selectbox("Ticker", ranked["ticker"].tolist()) if not ranked.empty else None
         if pick:
             detail = pd.read_sql_query(
                 """

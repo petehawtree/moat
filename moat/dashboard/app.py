@@ -43,6 +43,8 @@ else:
     selected_sectors = st.multiselect("Filter by sector", sector_options, default=sector_options)
 
     def _filter_by_sector(df: pd.DataFrame) -> pd.DataFrame:
+        if not selected_sectors:  # nothing checked reads as "no filter", not "show nothing"
+            return df
         return df[df["sector"].fillna("(no sector)").isin(selected_sectors)]
 
     st.subheader("Sprint 1 — ingest coverage")

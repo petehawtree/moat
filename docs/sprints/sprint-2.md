@@ -3,6 +3,50 @@
 **Status:** Done, with one metric since found defective — see
 [Known defects](#known-defects-found-after-this-sprint-shipped) below.
 
+## Sprint review
+
+Sprint 2's output was validated **externally** — an independent AI review
+checked the sample data against the PRD and the addendum. The result was
+mixed in a useful way, so it's recorded rather than summarised away.
+
+| Area | Verdict |
+|---|---|
+| Sector-relative architecture (§A2) | ✅ Sound — stays as designed |
+| FCF margin, debt/FCF, operating margin, revenue CAGR | ✅ Verified correct |
+| Percentile direction, 66.7% tercile, scoring, 50% threshold | ✅ Verified correct |
+| `share_dilution` | 🔴 Defective — do not trust until Sprint 2.1 |
+| Missing data treated as failure | ⚠️ Design limitation — Sprint 2.2 |
+| Bank/financial metrics | ⚠️ Needs sector-specific definitions — deferred |
+
+**What held.** Every numeric claim in the review reproduced exactly against
+the database. Seven of the eight metrics are confirmed working, and the
+core design decision this sprint existed to test — sector-relative bars
+instead of flat thresholds — came through unchallenged.
+
+**What didn't.** The split detector fires on **189/505 companies (37.4%)**,
+not the "rare" case assumed when it shipped, and conflates genuine splits
+with IPOs/mergers and with unit errors in the source data. **67 companies'**
+dilution result depends on the treatment and **10 cross the screen
+threshold** — while the headline total stays 111 either way.
+
+**Where the review was itself wrong.** Four of its nine examples (MA, CTAS,
+SMCI, AME) are genuine splits that we handle correctly; reverting to raw
+share counts, as its framing implied, would have introduced new errors. It
+had analysed an Excel extract rather than the filings, so it inferred causes
+it couldn't check — the same mistake made in this sprint's own first
+write-up of the Walmart bug.
+
+**Root cause of both.** The pipeline discards its own evidence: raw XBRL is
+never cached, the `filings` table is empty, and no fundamentals row records
+which filing it came from. Verification required a throwaway script both
+times, and verification that costs a script gets skipped
+([§A11](../PRD_ADDENDUM.md#a11-provenance-and-verification-extends-a3)).
+
+**Next.** Sprint 2.1 fixes detection at ingest (keyed on restatement, not
+jump size), adds an `EPS × shares ≈ net income` sanity check, retains filing
+provenance, and ships a one-command `verify` tool. It also unblocks Sprint 3,
+which needs the same `filings` table for §A3 citation enforcement.
+
 ## Goal
 
 Turn the `quant_scores`/`quality_scores` stubs from Sprint 0 into a real
@@ -98,27 +142,23 @@ failed for a sector comparison we can't compute.
 
 ## Known defects (found after this sprint shipped)
 
-**`share_dilution` is not currently trustworthy.** An independent review of
-the Sprint 2 output, checked and largely confirmed, found that the split
-detector fires on **189/505 companies (37.4%)** — not the "rare" case §A9
-originally assumed — and conflates three different things: genuine stock
-splits (handled correctly), real corporate events like IPOs and mergers
-(wrongly adjusted away), and unit-of-measure errors in the source data
-(silently laundered into plausible-looking numbers).
+`share_dilution` is not currently trustworthy — summary in
+[Sprint review](#sprint-review) above. Mechanically, `_detect_split_factors`
+treats any ≥40% one-year jump in diluted share count as a stock split, but
+three different things produce that jump and each needs different handling:
 
-Impact: **67 companies'** dilution result changes depending on the
-treatment, and **10 cross the 50% screen threshold**. The headline total
-is coincidentally 111 either way — which is itself the lesson: the summary
-statistic looked stable while ten companies swapped in and out.
+| Phenomenon | Correct treatment | Currently |
+|---|---|---|
+| Genuine stock split | Rebase prior years | ✅ correct |
+| Real corporate event (IPO, merger) | **Don't adjust** — dilution is real | ❌ adjusted away |
+| Unit-of-measure error in source data | **Reject at ingest** | ❌ silently normalised |
 
-The other seven metrics verified correct, including FCF margin, debt/FCF,
-operating margin, revenue CAGR, the 66.7% tercile boundary and the scoring
-arithmetic.
-
-Fix is Sprint 2.1: move split detection to ingest keyed on *restatement*
-(a genuine split rebases prior periods across filings; real issuance does
-not), add an `EPS × shares ≈ net income` sanity check, and retain the
-filing provenance the pipeline currently discards. Full detail:
+The separator is *restatement*: a genuine split rebases prior periods across
+filings (SMCI `10.00x`, CTAS `4.00x`, MA `10.01x`, AME `1.50x`), while real
+issuance restates nothing (TKO, CRWV, ALAB, CHTR, KHC). Sprint 2.1 keys
+detection on that signature at ingest, adds an `EPS × shares ≈ net income`
+sanity check, and retains the filing provenance needed to check either.
+Full detail:
 [PRD_ADDENDUM.md §A10](../PRD_ADDENDUM.md#a10-sprint-2-post-review-findings--the-dilution-metric-is-defective)
 and [§A11](../PRD_ADDENDUM.md#a11-provenance-and-verification-extends-a3).
 

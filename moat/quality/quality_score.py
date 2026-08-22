@@ -32,7 +32,7 @@ def compute_quality_score(quant_score_rows: list[dict]) -> tuple[float, int, int
     """
     if not quant_score_rows:
         raise ValueError("compute_quality_score requires at least one quant_scores row")
-    assessable = [r for r in quant_score_rows if r.get("status") != "unavailable"]
+    assessable = [r for r in quant_score_rows if r.get("status") in ("pass", "fail")]
     if not assessable:
         return 0.0, 0, 0
     passed = sum(1 for r in assessable if r["overall_pass"])
@@ -55,7 +55,12 @@ def run_quality(run_id: str, conn) -> None:
         # anything. A company measured on two metrics that happens to clear
         # both is not a better candidate than one measured on all eight.
         clears_bar = score >= QUALITY_SCORE_PASS_THRESHOLD and assessed >= MIN_METRICS_ASSESSED
-        notes = None if assessed >= MIN_METRICS_ASSESSED else f"insufficient coverage: only {assessed}/8 metrics assessable"
+        notes = None
+        if assessed < MIN_METRICS_ASSESSED:
+            n_na = sum(1 for r in ticker_rows if r.get("status") == "not_applicable")
+            notes = f"insufficient coverage: only {assessed}/8 metrics assessable"
+            if n_na:
+                notes += f" ({n_na} not applicable to this sector — see PRD_ADDENDUM §A14)"
         quality_rows.append(
             {
                 "run_id": run_id,

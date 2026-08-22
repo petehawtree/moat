@@ -43,8 +43,10 @@ Gold = the one thing no sprint replaces.
 - Metrics now report **pass / fail / unavailable**, and the score is the
   % of *assessable* metrics — a company we couldn't measure is no longer
   indistinguishable from one that did badly.
-- **98/505** pass, down from 111: 38 were passing on substituted cash flow.
-- 30 tests passing. See [sprint-2-2.md](docs/sprints/sprint-2-2.md).
+- **93/505** pass, down from 111: 38 were passing on substituted cash flow,
+  and financials are now excluded as unscreenable rather than mis-ranked on
+  metrics that don't describe a bank (§A14).
+- 31 tests passing. See [sprint-2-2.md](docs/sprints/sprint-2-2.md).
 
 **Sprint 2.1 — ingest data integrity + filing provenance. Done.**
 - Stock-split detection now keyed on **filing restatement** rather than

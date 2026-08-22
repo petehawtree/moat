@@ -25,7 +25,7 @@ the database.
 
 ## Results
 
-**98 of 505** companies pass, against 111 before — and the fall is the point:
+**93 of 505** companies pass, against 111 before (98 before the §A14 follow-up) — and the fall is the point:
 38 were passing on substituted operating cash flow, and **205** are now
 correctly reported as insufficiently measurable rather than silently marked as
 failures.
@@ -55,12 +55,36 @@ its own company. Because a percentile is relative, CPT's bad revenue moved all
 30 of its sector peers and pushed one across the pass bar. That's why bad rows
 are now quarantined from peer groups rather than merely flagged.
 
+## Follow-up review of this sprint
+
+A code review of Sprint 2.2 itself found two issues, both verified exactly
+([§A14](../PRD_ADDENDUM.md#a14-sprint-22-follow-up--status-inversion-and-sector-applicability)):
+
+**The fail/unavailable distinction was inverted in one case.** A company with
+debt and no positive cash flow to service it fails `debt` outright, but the
+debt/FCF *ratio* is deliberately `None` — and the status keyed on the value,
+not the verdict. 109 rows; **9 companies passed that should not have** (CBRE,
+DLTR, ETR, FCX, KMB, PEP, ROK, URI, VLO). Status now keys on whether a verdict
+was reached. An unknown *value* and an unknown *verdict* are different things —
+conflating them caused both this bug and the one this sprint was written to fix.
+
+**Deferring a fix is not the same as continuing to emit the output.** §A8
+deferred sector-specific metrics for financials; the screen kept scoring banks
+on them anyway. Metrics that don't describe a business model are now marked
+`not_applicable` — a definitional exclusion, separate from "couldn't measure."
+**All 74 financials now fall out of the screen** (15 previously passed), total
+passing 98 → 93. The tool does not have a valid bank screen, and now says so
+instead of producing a number.
+
 ## Still open
 
-- **Financial-sector metrics are definitionally wrong** (§A8). FCF margin,
-  debt/FCF and gross margin do not describe a bank, and sector-*relative*
-  ranking cannot rescue an invalid metric *definition*. Needs per-sector
-  metric selection.
+- **Financial-sector metrics** still need real definitions (book value
+  growth, net interest margin, efficiency ratio, tangible common equity).
+  Financials are now excluded from the screen rather than mis-ranked (§A14),
+  but excluded is not solved.
+- **Real Estate is the next candidate** for the same treatment — REIT capex
+  is property acquisition, so FCF and debt/FCF misdescribe them; FFO/AFFO is
+  the right basis.
 - **`filings.content_hash` / `local_path` are NULL**, so §A5's AI cache key is
   unavailable — the XBRL payload carries accessions, not document text.
 - **No-sector companies** still get floor-only scoring (§A9).

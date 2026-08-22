@@ -675,3 +675,71 @@ installed requirements, not a repository defect.
 **98 of 505** companies now pass, against 111 before. The fall is the point:
 38 were passing on substituted OCF, and 205 are now correctly reported as
 insufficiently measurable rather than as failures.
+
+## A14. Sprint 2.2 follow-up — status inversion and sector applicability
+
+A code review of Sprint 2.2 itself found two issues. Both verified exactly.
+
+### 1. A determined failure was relabelled "unavailable"
+
+Sprint 2.2 introduced `pass`/`fail`/`unavailable` precisely to stop
+"we couldn't measure this" being scored as "this company did badly." It then
+inverted that distinction in the one case where a **failure is expressed
+without a value**.
+
+A company carrying debt with no positive free cash flow to service it fails
+`debt` outright — `_absolute_floor_pass` returns 0, disqualifying regardless
+of sector. But debt/FCF is deliberately `None` there, because dividing by
+non-positive cash flow is meaningless. `_metric_status` tested `value is None`
+*first*, so the explicit failure became `unavailable`, was dropped from the
+denominator, and effectively vanished.
+
+**Impact:** 109 rows; 17 companies that passed the screen were affected and
+**9 should not have passed at all** (CBRE, DLTR, ETR, FCX, KMB, PEP, ROK, URI,
+VLO — all now 42.9 and correctly excluded).
+
+**Fix:** status keys on `absolute_floor_pass`, not on `value`. A verdict was
+reached or it wasn't; whether it can be expressed as a comparable ratio is a
+separate question. The lesson generalises — an "unknown value" and an
+"unknown verdict" are different things, and conflating them is what caused
+both this defect and the one Sprint 2.2 was written to fix.
+
+### 2. Deferring a fix is not the same as continuing to emit the output
+
+§A8 deferred sector-specific metric definitions, and §A13 restated that
+sector-*relative* ranking cannot rescue an invalid metric *definition*. Both
+are still true. But the shipped screen went on scoring financials with those
+metrics and publishing the resulting ranks — which is what the review objected
+to, correctly. Deferring the *fix* is a scheduling decision; continuing to
+emit a number computed from inputs we have documented as meaningless is a
+correctness decision, and we had quietly made the second one by not deciding.
+
+**Mechanism:** `SECTOR_INAPPLICABLE_METRICS` marks a metric
+`not_applicable` for a sector — a *definitional* exclusion, distinct from
+`unavailable` (we tried to measure it and couldn't). For `Financials`:
+
+- `gross_margin` — a bank has no cost of goods sold.
+- `free_cash_flow` — a bank's operating cash flow mixes operating and
+  financing activity, so FCF/revenue is not an operating margin. The data bore
+  this out with "margins" of 49x (FITB) and 29x (RF).
+- `debt` — debt is a bank's raw material, not a solvency signal. Scoring
+  debt/FCF penalises the balance sheet a bank is supposed to have.
+
+Not-applicable metrics are excluded from peer groups and from the score
+denominator. With 3 of 8 metrics gone, financials fall below
+`MIN_METRICS_ASSESSED` and are reported as **unscreenable**, carrying an
+explicit note, rather than being mis-ranked.
+
+**Consequence, stated plainly:** **all 74 financials now fall out of the
+screen** (15 previously passed). Total passing drops 98 → 93. That is a real
+reduction in coverage of the largest sector in the universe, and it is the
+correct position: the tool does not currently have a valid screen for banks,
+insurers or brokers, and should say so rather than produce a number. Restoring
+them requires financial-sector metrics (book value growth, net interest
+margin, efficiency ratio, loan-loss provisioning, tangible common equity) —
+still deferred, now visibly rather than silently.
+
+**Real Estate is the obvious next candidate** for the same treatment: REIT
+capex is property acquisition, so FCF and debt/FCF misdescribe them too, and
+FFO/AFFO is the right basis. Not done here — flagged rather than quietly
+extended beyond what the review evidenced.

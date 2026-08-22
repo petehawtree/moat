@@ -275,6 +275,29 @@ def _absolute_floor_pass(metric: str, value: float | None, extra: dict) -> int |
 
 
 STATUS_PASS, STATUS_FAIL, STATUS_UNAVAILABLE = "pass", "fail", "unavailable"
+STATUS_NOT_APPLICABLE = "not_applicable"
+
+# Metrics that do not describe a business model, regardless of data quality
+# (docs/PRD_ADDENDUM.md §A14). This is a *definitional* exclusion, distinct
+# from 'unavailable' (we tried to measure it and couldn't):
+#
+#   - gross_margin: a bank has no cost of goods sold.
+#   - free_cash_flow: a bank's operating cash flow mixes operating and
+#     financing activity, so FCF/revenue isn't an operating margin. The
+#     current data shows "FCF margins" of 49x (FITB) and 29x (RF), which are
+#     not margins in any sense.
+#   - debt: debt is a bank's raw material, not a solvency risk. Scoring
+#     debt/FCF penalises the balance sheet a bank is supposed to have.
+#
+# §A8 deferred fixing this. Deferring the *fix* is reasonable; continuing to
+# emit a score computed from metrics we've documented as meaningless is not,
+# which is what the second review correctly objected to. Marking them
+# not-applicable means financials now fall below MIN_METRICS_ASSESSED and are
+# reported as unscreenable rather than mis-ranked — the honest position until
+# per-sector metrics exist.
+SECTOR_INAPPLICABLE_METRICS = {
+    "Financials": {"gross_margin", "free_cash_flow", "debt"},
+}
 
 
 def _metric_status(value: float | None, absolute_floor_pass: int | None, overall_pass: int) -> str:
@@ -285,8 +308,18 @@ def _metric_status(value: float | None, absolute_floor_pass: int | None, overall
     metrics, so 257 companies were scored as failing ROIC when the truth was
     that ROIC wasn't computable from their filings. That produces false
     rejects and, worse, makes them indistinguishable from real ones.
+
+    **The determination, not the ratio, decides the status.** A metric can
+    reach a verdict without producing a comparable number: a company carrying
+    debt with no positive free cash flow to service it fails `debt` outright,
+    yet debt/FCF is deliberately left None because dividing by non-positive
+    cash flow is meaningless. Sprint 2.2's first version keyed on `value is
+    None` and so relabelled 109 of those explicit failures as "unavailable" —
+    inverting, in the one case where a failure is expressed without a value,
+    the exact distinction this function exists to make. 17 passing companies
+    were affected and 9 should not have passed at all.
     """
-    if value is None or absolute_floor_pass is None:
+    if absolute_floor_pass is None:
         return STATUS_UNAVAILABLE
     return STATUS_PASS if overall_pass else STATUS_FAIL
 
@@ -370,9 +403,10 @@ def run_screen(run_id: str, conn) -> None:
         sector = sector_by_ticker[ticker]
         if sector is None or ticker in quarantined:
             continue
+        inapplicable = SECTOR_INAPPLICABLE_METRICS.get(sector, frozenset())
         for metric in METRICS:
             v = values[metric]
-            if v is not None:
+            if v is not None and metric not in inapplicable:
                 peer_values[metric].setdefault(sector, {})[ticker] = v
 
     rows = []
@@ -386,6 +420,8 @@ def run_screen(run_id: str, conn) -> None:
             srp = None if pct is None else int(pct >= SECTOR_RELATIVE_TOP_TERCILE_PCT)
             overall = _combine_pass(afp, srp)
             status = _metric_status(value, afp, overall)
+            if metric in SECTOR_INAPPLICABLE_METRICS.get(sector or "", frozenset()):
+                status, overall = STATUS_NOT_APPLICABLE, 0
             if ticker in quarantined:
                 # Its own values are not trustworthy either — report them as
                 # unmeasurable rather than scoring a number we don't believe.

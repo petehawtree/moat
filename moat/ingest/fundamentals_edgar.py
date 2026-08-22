@@ -17,7 +17,7 @@ from pathlib import Path
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from moat.config import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, DATA_DIR, SEC_USER_AGENT
+from moat.config import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, DATA_DIR, FILINGS_CACHE_DIR, SEC_USER_AGENT
 
 COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 TICKER_CIK_LOOKUP_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -123,9 +123,28 @@ def lookup_cik(ticker: str) -> str | None:
     return cik
 
 
-def fetch_company_facts(cik: str) -> dict:
-    """Fetch the full XBRL company facts payload for one company. {} if none filed."""
-    return _get_json(COMPANY_FACTS_URL.format(cik=cik))
+def _facts_cache_path(cik: str) -> Path:
+    return FILINGS_CACHE_DIR / f"CIK{cik}.json"
+
+
+def fetch_company_facts(cik: str, use_cache: bool = True) -> dict:
+    """Fetch the full XBRL company facts payload for one company. {} if none filed.
+
+    Caches the raw payload under FILINGS_CACHE_DIR (docs/PRD_ADDENDUM.md §A11
+    step 1). This is the project's "receipt": every derived number can be
+    re-checked against the exact bytes it came from, offline and without
+    SEC's live data having drifted underneath us (§A7 documents that drift
+    happening mid-project). It also makes scripts/verify.py instant.
+    """
+    cache_path = _facts_cache_path(cik)
+    if use_cache and cache_path.exists():
+        return json.loads(cache_path.read_text())
+
+    facts = _get_json(COMPANY_FACTS_URL.format(cik=cik))
+    if facts:
+        FILINGS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(facts))
+    return facts
 
 
 # Metric -> (candidate XBRL tags in priority order, unit key, 'duration'|'instant')
@@ -228,6 +247,241 @@ def _annual_entries(tag_data: dict | None, unit_key: str, kind: str) -> dict[str
     return by_end
 
 
+SHARES_TAG = "WeightedAverageNumberOfDilutedSharesOutstanding"
+
+# A restatement this large is a share-basis change (split / reverse split),
+# not a revision. Ordinary restatements move a figure by a few percent.
+_BASIS_CHANGE_MIN_RATIO = 1.4
+
+# eps_diluted * shares_diluted should reconstruct net income. Wider than it
+# looks deliberately: the numerator of EPS is net income *available to common*,
+# so preferred dividends, noncontrolling interests and participating
+# securities legitimately move this ratio (banks especially). Outside this
+# band the row is not "slightly off" — it is a different unit or a corrupt
+# value. See docs/PRD_ADDENDUM.md §A10.
+_EPS_CONSISTENCY_LOW, _EPS_CONSISTENCY_HIGH = 0.5, 2.0
+
+FLAG_EPS_SHARES_MISMATCH = "eps_shares_ni_mismatch"
+
+# Powers of 1000 are units (thousands/millions/billions), not splits — no
+# company runs a 1,000,000-for-1 split. Southwest's FY2009 diluted shares
+# were filed as `741` and later restated to `741,000,000`: the filer
+# correcting a unit, which happens to look identical to a split in the
+# merged series. Same numeric treatment, different label, because the label
+# is what tells a reader whether to trust the underlying row (§A10).
+_UNIT_SCALES = (1e3, 1e6, 1e9)
+_UNIT_TOLERANCE = 0.02
+
+# Deliberately looser than _UNIT_TOLERANCE. The eps*shares/net_income ratio
+# carries the same structural noise that separates net income from the EPS
+# numerator, so a genuine thousands-unit row can land a few percent off a
+# clean 1000x — Northern Trust's corrupt FY2008 value comes out at 9.78e5,
+# 2.2% shy of 1e6. Nothing structural is ever within 10% of a power of 1000,
+# so widening this costs no precision.
+_UNIT_RATIO_TOLERANCE = 0.10
+
+
+def classify_basis_change(ratio: float) -> str:
+    """'unit_correction' if the restatement is a power-of-1000 rescale, else 'split'."""
+    magnitude = ratio if ratio >= 1 else 1 / ratio
+    for scale in _UNIT_SCALES:
+        if abs(magnitude - scale) / scale <= _UNIT_TOLERANCE:
+            return "unit_correction"
+    return "split"
+
+
+def detect_share_basis_changes(facts: dict) -> list[dict]:
+    """Find periods whose diluted share count was RESTATED by a later filing.
+
+    This is the evidence that separates a genuine stock split from real
+    dilution (docs/PRD_ADDENDUM.md §A10). A split rebases prior-period
+    comparatives, so the same period-end carries two different values across
+    two filings — e.g. Walmart's FY2022 was filed as 2.805B, then restated to
+    8.415B by the post-split FY2024 10-K. A real share issuance (IPO, merger,
+    recapitalisation) restates nothing: the count genuinely grew and every
+    filing agrees on every period.
+
+    Sprint 2 inferred splits from a >=40% jump in the *merged* series, which
+    cannot tell those apart and fired on 37.4% of the universe. This looks at
+    the disagreement between filings instead, which is only visible here at
+    ingest — the merge in _annual_entries discards the losing value.
+    """
+    rows = facts.get("facts", {}).get("us-gaap", {}).get(SHARES_TAG, {}).get("units", {}).get("shares", [])
+
+    by_period: dict[str, dict[str, dict]] = {}
+    for row in rows:
+        if row.get("form") != "10-K" or "start" not in row or "end" not in row:
+            continue
+        filed = row.get("filed")
+        if filed is None:
+            continue
+        # Annual durations only. A 10-K's XBRL also carries quarterly figures
+        # tagged identically (the Sprint 1 lesson, see _annual_entries) — and
+        # those restate around a split too, which would otherwise register
+        # four bogus "basis changes" per split event.
+        try:
+            days = (date.fromisoformat(row["end"]) - date.fromisoformat(row["start"])).days
+        except (ValueError, TypeError):
+            continue
+        if not (350 <= days <= 380):
+            continue
+        by_period.setdefault(row["end"], {})[filed] = row
+
+    changes = []
+    for period_end, filings in sorted(by_period.items()):
+        ordered = [filings[f] for f in sorted(filings)]
+        first, last = ordered[0], ordered[-1]
+        original, restated = first.get("val"), last.get("val")
+        if not original or not restated or original <= 0:
+            continue
+        ratio = restated / original
+        if ratio >= _BASIS_CHANGE_MIN_RATIO or ratio <= 1 / _BASIS_CHANGE_MIN_RATIO:
+            changes.append(
+                {
+                    "period_end_date": period_end,
+                    "original_value": original,
+                    "restated_value": restated,
+                    "ratio": ratio,
+                    "change_type": classify_basis_change(ratio),
+                    "original_accession": first.get("accn"),
+                    "original_filed": first.get("filed"),
+                    "restated_accession": last.get("accn"),
+                    "restated_filed": last.get("filed"),
+                }
+            )
+    return changes
+
+
+def check_row_quality(row: dict) -> list[str]:
+    """Internal-consistency checks on one extracted fundamentals row.
+
+    Returns flag names, empty when clean. Flags rather than rejects: some
+    failures are legitimate, and silently dropping a row would hide a data
+    problem instead of surfacing it (§A4).
+
+    `eps_diluted * shares_diluted` should reconstruct `net_income`. When it
+    misses, the *size* of the miss says which figure to distrust:
+
+    - **a power of 1000** -> the share count is in the wrong unit. Southwest
+      filed FY2007 diluted shares as `768`, ConocoPhillips filed FY2010-2019
+      in thousands. The share count is unusable; EPS and net income are fine.
+    - **anything else** -> a structural difference between net income and the
+      EPS numerator: preferred dividends, noncontrolling interests,
+      participating securities. TKO (UFC/WWE, large NCI) lands here. EPS is
+      not comparable across years, but the *share count is perfectly good* —
+      which matters, because TKO's real merger dilution is exactly what the
+      Sprint 2 defect erased (§A10).
+
+    Distinguishing them keeps a structural quirk from discarding a sound
+    share count, and vice versa.
+    """
+    flags = []
+    eps, shares, net_income = row.get("eps_diluted"), row.get("shares_diluted"), row.get("net_income")
+    if eps and shares and net_income:
+        ratio = (eps * shares) / net_income
+        if _is_power_of_1000(ratio):
+            flags.append(FLAG_SHARE_UNIT_OUTLIER)
+        elif not (_EPS_CONSISTENCY_LOW < ratio < _EPS_CONSISTENCY_HIGH):
+            flags.append(FLAG_EPS_SHARES_MISMATCH)
+    return flags
+
+
+def _is_power_of_1000(ratio: float) -> bool:
+    """True when `ratio` is ~1000^n for some non-zero integer n (either
+    direction) — the signature of a unit-of-measure error rather than an
+    accounting difference.
+    """
+    if ratio <= 0:
+        return False
+    magnitude = ratio if ratio >= 1 else 1 / ratio
+    for scale in _UNIT_SCALES:
+        if abs(magnitude - scale) / scale <= _UNIT_RATIO_TOLERANCE:
+            return True
+    return False
+
+
+FLAG_SHARE_UNIT_OUTLIER = "share_count_unit_outlier"
+
+
+def persist_share_basis_changes(ticker: str, changes: list[dict], conn) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.executemany(
+        """
+        INSERT INTO share_basis_changes (
+            ticker, period_end_date, original_value, restated_value, ratio, change_type,
+            original_accession, original_filed, restated_accession, restated_filed, detected_at
+        ) VALUES (
+            :ticker, :period_end_date, :original_value, :restated_value, :ratio, :change_type,
+            :original_accession, :original_filed, :restated_accession, :restated_filed, :detected_at
+        )
+        ON CONFLICT(ticker, period_end_date) DO UPDATE SET
+            original_value=excluded.original_value, restated_value=excluded.restated_value,
+            ratio=excluded.ratio, change_type=excluded.change_type,
+            original_accession=excluded.original_accession,
+            original_filed=excluded.original_filed, restated_accession=excluded.restated_accession,
+            restated_filed=excluded.restated_filed, detected_at=excluded.detected_at
+        """,
+        [{**c, "ticker": ticker, "detected_at": now} for c in changes],
+    )
+    conn.commit()
+
+
+def _accession_url(cik: str, accession: str) -> str:
+    """EDGAR filing-index URL for an accession number (A11 step 4)."""
+    return (
+        f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
+        f"{accession.replace('-', '')}/{accession}-index.htm"
+    )
+
+
+def extract_filings(facts: dict, cik: str) -> list[dict]:
+    """Distinct 10-K filings referenced anywhere in the XBRL payload.
+
+    Populates the `filings` table, which has existed since Sprint 0 and sat
+    empty — it's what §A3's citation enforcement resolves against in Sprint 3,
+    and what makes any number in fundamentals_annual traceable to a real
+    EDGAR document today.
+    """
+    gaap = facts.get("facts", {}).get("us-gaap", {})
+    seen: dict[str, dict] = {}
+    for tag_data in gaap.values():
+        for unit_rows in tag_data.get("units", {}).values():
+            for row in unit_rows:
+                accn, filed = row.get("accn"), row.get("filed")
+                if row.get("form") != "10-K" or not accn or not filed:
+                    continue
+                if accn not in seen or row.get("end", "") > seen[accn]["period_of_report"]:
+                    seen[accn] = {
+                        "accession_number": accn,
+                        "form_type": "10-K",
+                        "filing_date": filed,
+                        "period_of_report": row.get("end", ""),
+                        "document_url": _accession_url(cik, accn),
+                    }
+    return list(seen.values())
+
+
+def persist_filings(ticker: str, filings: list[dict], conn) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.executemany(
+        """
+        INSERT INTO filings (
+            accession_number, ticker, form_type, filing_date, period_of_report,
+            document_url, retrieved_at
+        ) VALUES (
+            :accession_number, :ticker, :form_type, :filing_date, :period_of_report,
+            :document_url, :retrieved_at
+        )
+        ON CONFLICT(accession_number) DO UPDATE SET
+            form_type=excluded.form_type, filing_date=excluded.filing_date,
+            period_of_report=excluded.period_of_report, document_url=excluded.document_url,
+            retrieved_at=excluded.retrieved_at
+        """,
+        [{**f, "ticker": ticker, "retrieved_at": now} for f in filings],
+    )
+    conn.commit()
+
+
 def extract_annual_fundamentals(facts: dict) -> list[dict]:
     """Pull the metrics in PRD §4 out of the raw XBRL facts payload.
 
@@ -289,28 +543,35 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
                 roic = nopat / invested_capital
                 confidence = CONFIDENCE_MEDIUM  # always an estimate — bakes in ASSUMED_TAX_RATE
 
-        rows.append(
-            {
-                "fiscal_year": date.fromisoformat(end).year,
-                "period_end_date": end,
-                "revenue": revenue,
-                "eps_diluted": val["eps_diluted"],
-                "net_income": net_income,
-                "operating_income": operating_income,
-                "operating_margin": operating_margin,
-                "gross_margin": gross_margin,
-                "roic": roic,
-                "roe": roe,
-                "free_cash_flow": free_cash_flow,
-                "capex": val["capex"],
-                "total_debt": total_debt,
-                "cash_and_equiv": val["cash_and_equiv"],
-                "shares_diluted": val["shares_diluted"],
-                "source": "sec_edgar",
-                "confidence": confidence,
-                "retrieved_at": now_iso,
-            }
-        )
+        # Provenance (A11): which filing these figures came from. Taken from
+        # the revenue entry, falling back to net income — whichever anchored
+        # this fiscal year in the first place (see period_ends above).
+        anchor = series["revenue"].get(end) or series["net_income"].get(end) or {}
+
+        row = {
+            "fiscal_year": date.fromisoformat(end).year,
+            "period_end_date": end,
+            "revenue": revenue,
+            "eps_diluted": val["eps_diluted"],
+            "net_income": net_income,
+            "operating_income": operating_income,
+            "operating_margin": operating_margin,
+            "gross_margin": gross_margin,
+            "roic": roic,
+            "roe": roe,
+            "free_cash_flow": free_cash_flow,
+            "capex": val["capex"],
+            "total_debt": total_debt,
+            "cash_and_equiv": val["cash_and_equiv"],
+            "shares_diluted": val["shares_diluted"],
+            "source": "sec_edgar",
+            "confidence": confidence,
+            "accession_number": anchor.get("accn"),
+            "filed": anchor.get("filed"),
+            "retrieved_at": now_iso,
+        }
+        row["quality_flags"] = ",".join(check_row_quality(row)) or None
+        rows.append(row)
 
     return rows
 
@@ -321,11 +582,13 @@ def persist_annual_fundamentals(ticker: str, rows: list[dict], conn) -> None:
         INSERT INTO fundamentals_annual (
             ticker, fiscal_year, period_end_date, revenue, eps_diluted, net_income,
             operating_income, operating_margin, gross_margin, roic, roe, free_cash_flow,
-            capex, total_debt, cash_and_equiv, shares_diluted, source, confidence, retrieved_at
+            capex, total_debt, cash_and_equiv, shares_diluted, source, confidence,
+            accession_number, filed, quality_flags, retrieved_at
         ) VALUES (
             :ticker, :fiscal_year, :period_end_date, :revenue, :eps_diluted, :net_income,
             :operating_income, :operating_margin, :gross_margin, :roic, :roe, :free_cash_flow,
-            :capex, :total_debt, :cash_and_equiv, :shares_diluted, :source, :confidence, :retrieved_at
+            :capex, :total_debt, :cash_and_equiv, :shares_diluted, :source, :confidence,
+            :accession_number, :filed, :quality_flags, :retrieved_at
         )
         ON CONFLICT(ticker, fiscal_year) DO UPDATE SET
             period_end_date=excluded.period_end_date, revenue=excluded.revenue,
@@ -334,7 +597,9 @@ def persist_annual_fundamentals(ticker: str, rows: list[dict], conn) -> None:
             gross_margin=excluded.gross_margin, roic=excluded.roic, roe=excluded.roe,
             free_cash_flow=excluded.free_cash_flow, capex=excluded.capex, total_debt=excluded.total_debt,
             cash_and_equiv=excluded.cash_and_equiv, shares_diluted=excluded.shares_diluted,
-            source=excluded.source, confidence=excluded.confidence, retrieved_at=excluded.retrieved_at
+            source=excluded.source, confidence=excluded.confidence,
+            accession_number=excluded.accession_number, filed=excluded.filed,
+            quality_flags=excluded.quality_flags, retrieved_at=excluded.retrieved_at
         """,
         [{**r, "ticker": ticker} for r in rows],
     )
@@ -356,4 +621,6 @@ def run_for_ticker(ticker: str, conn) -> tuple[int, str | None]:
         return 0, "filings found but no usable annual revenue/income tags"
 
     persist_annual_fundamentals(ticker, rows, conn)
+    persist_share_basis_changes(ticker, detect_share_basis_changes(facts), conn)
+    persist_filings(ticker, extract_filings(facts, cik), conn)
     return len(rows), None

@@ -56,6 +56,9 @@ CREATE TABLE IF NOT EXISTS fundamentals_annual (
     shares_diluted      REAL,
     source              TEXT NOT NULL,        -- 'sec_edgar' | 'yfinance' | 'derived'
     confidence          TEXT NOT NULL,        -- 'high' | 'medium' | 'low' (A4)
+    accession_number    TEXT,                 -- filing this row's figures came from (A11)
+    filed               TEXT,                 -- that filing's date, for restatement ordering (A11)
+    quality_flags       TEXT,                 -- comma-separated ingest validation failures (A10), null if clean
     retrieved_at        TEXT NOT NULL,
     PRIMARY KEY (ticker, fiscal_year)
 );
@@ -74,6 +77,32 @@ CREATE TABLE IF NOT EXISTS fundamentals_quarterly (
     confidence          TEXT NOT NULL,
     retrieved_at        TEXT NOT NULL,
     PRIMARY KEY (ticker, fiscal_year, fiscal_quarter)
+);
+
+-- ---------------------------------------------------------------------
+-- Share-basis changes (A10/A11)
+--
+-- A genuine stock split RESTATES prior-period share counts: the same
+-- period-end carries a different value in a later 10-K, because the filer
+-- rebased its comparatives. A real share issuance (IPO, merger, recap)
+-- restates nothing — the count genuinely grew and every filing agrees.
+-- That distinction is only visible while we still hold every filing's
+-- version of a fact, which is why this is captured at ingest and not
+-- inferred later from a jump in the merged series (the Sprint 2 mistake).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS share_basis_changes (
+    ticker              TEXT NOT NULL REFERENCES companies(ticker),
+    period_end_date     TEXT NOT NULL,       -- the period whose value was restated
+    original_value      REAL NOT NULL,       -- as originally filed
+    restated_value      REAL NOT NULL,       -- as restated by a later filing
+    ratio               REAL NOT NULL,       -- restated / original (≈ the split ratio)
+    change_type         TEXT NOT NULL,       -- 'split' | 'unit_correction' (a 1000x/1e6x "restatement" is the filer fixing a unit, not a split)
+    original_accession  TEXT,
+    original_filed      TEXT,
+    restated_accession  TEXT,
+    restated_filed      TEXT,
+    detected_at         TEXT NOT NULL,
+    PRIMARY KEY (ticker, period_end_date)
 );
 
 -- ---------------------------------------------------------------------

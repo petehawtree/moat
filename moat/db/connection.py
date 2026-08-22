@@ -21,12 +21,52 @@ def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
     return conn
 
 
-def init_db(db_path: Path = DB_PATH, schema_path: Path = SCHEMA_PATH) -> None:
-    """Create all tables from schema.sql if they don't already exist."""
+# Columns added to existing tables after their first release. SQLite's
+# CREATE TABLE IF NOT EXISTS won't add these to a database created by an
+# earlier schema version, so they're applied separately — see _migrate.
+_ADDED_COLUMNS = {
+    "share_basis_changes": {
+        "change_type": "TEXT",        # A10 split vs unit-correction
+    },
+    "fundamentals_annual": {
+        "accession_number": "TEXT",   # A11 provenance
+        "filed": "TEXT",              # A11 provenance
+        "quality_flags": "TEXT",      # A10 ingest validation
+    },
+}
+
+
+def _migrate(conn) -> list[str]:
+    """Add any columns missing from an existing database. Returns what it added.
+
+    Deliberately additive only: no drops, no type changes, no backfill. A
+    column added here is NULL on existing rows, which is the honest state —
+    those rows were ingested before we retained the information, and we
+    can't invent it retroactively (docs/PRD_ADDENDUM.md §A4).
+    """
+    applied = []
+    for table, columns in _ADDED_COLUMNS.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # table doesn't exist yet; schema.sql will create it with the columns
+        for name, decl in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                applied.append(f"{table}.{name}")
+    conn.commit()
+    return applied
+
+
+def init_db(db_path: Path = DB_PATH, schema_path: Path = SCHEMA_PATH) -> list[str]:
+    """Create all tables from schema.sql if missing, then apply column migrations.
+
+    Returns the list of migrated columns (empty when already up to date).
+    """
     conn = get_connection(db_path)
     try:
         conn.executescript(schema_path.read_text())
         conn.commit()
+        return _migrate(conn)
     finally:
         conn.close()
 

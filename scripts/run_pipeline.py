@@ -7,7 +7,8 @@ Stage order mirrors PRD §3:
 
 Sprint 1: 'universe' and 'ingest' are real (US-only, docs/PRD_ADDENDUM.md
 §A1). Sprint 2: 'screen' and 'quality' are real (sector-relative screen,
-§A2/§A9). 'ai_analysis' onward still raise NotImplementedError until
+§A2/§A9); Sprint 2.1 adds ingest provenance + share-basis detection
+(§A10/§A11). 'ai_analysis' onward still raise NotImplementedError until
 Sprint 3+.
 """
 from __future__ import annotations
@@ -105,6 +106,22 @@ def run_ingest_stage(conn, tickers: list[str], limit: int | None) -> None:
     print(f"  Failures (first 15): {fundamentals_failed[:15]}")
     print(f"Prices: {len(prices_ok)} ok, {len(prices_failed)} failed")
     print(f"  Failures (first 15): {prices_failed[:15]}")
+
+    # Sprint 2.1 provenance/validation (docs/PRD_ADDENDUM.md §A10, §A11)
+    basis = conn.execute(
+        "SELECT change_type, COUNT(*) AS n FROM share_basis_changes GROUP BY change_type"
+    ).fetchall()
+    flagged = conn.execute(
+        "SELECT COUNT(*) AS n FROM fundamentals_annual WHERE quality_flags IS NOT NULL"
+    ).fetchone()["n"]
+    filings_n = conn.execute("SELECT COUNT(*) AS n FROM filings").fetchone()["n"]
+    print(f"Provenance: {filings_n} filings recorded")
+    print(f"  Share-basis changes: {_basis_summary(basis)}")
+    print(f"  Rows failing ingest validation (flagged, not dropped): {flagged}")
+
+
+def _basis_summary(rows) -> str:
+    return ", ".join(f"{r['n']} {r['change_type']}" for r in rows) or "none"
 
 
 def run_screen_stage(conn, run_id: str) -> None:

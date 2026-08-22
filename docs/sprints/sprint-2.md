@@ -1,7 +1,8 @@
 # Sprint 2 — Sector-relative quant screen + ranked dashboard
 
-**Status:** Done, with one metric since found defective — see
-[Known defects](#known-defects-found-after-this-sprint-shipped) below.
+**Status:** Done. One metric was later found defective and has since been
+fixed in [Sprint 2.1](sprint-2-1.md) — see
+[Known defects](#known-defects-found-after-this-sprint-shipped).
 
 ## Sprint review
 
@@ -140,7 +141,7 @@ in [PRD_ADDENDUM.md §A9](../PRD_ADDENDUM.md#a9-sprint-2--sector-relative-screen
 fall back to absolute-floor-only scoring rather than being silently
 failed for a sector comparison we can't compute.
 
-## Known defects (found after this sprint shipped)
+## Known defects (found after this sprint shipped — fixed in [Sprint 2.1](sprint-2-1.md))
 
 `share_dilution` is not currently trustworthy — summary in
 [Sprint review](#sprint-review) above. Mechanically, `_detect_split_factors`

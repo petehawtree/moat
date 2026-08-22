@@ -30,13 +30,19 @@ Gold = the one thing no sprint replaces.
 - Dashboard: ranked table + per-company metric breakdown showing *why* a
   company passed or failed each metric.
 - 16 tests passing.
-- ⚠️ **Known defect:** one of the eight metrics (`share_dilution`) is not
-  currently trustworthy — the stock-split detector conflates genuine splits
-  with IPOs/mergers and with unit errors in the source data. 10 companies
-  sit on the wrong side of the screen threshold as a result. Being fixed in
-  Sprint 2.1; see [§A10](docs/PRD_ADDENDUM.md) and
-  [sprint-2.md](docs/sprints/sprint-2.md). The other seven metrics verified
-  correct.
+- A `share_dilution` defect found by external review has been fixed in
+  Sprint 2.1 below.
+
+**Sprint 2.1 — ingest data integrity + filing provenance. Done.**
+- Stock-split detection now keyed on **filing restatement** rather than
+  inferred from a jump — fixes real dilution being erased at IPOs and
+  mergers (TKO 6.2% → 53.1%/yr, CRWV 6.6% → 50.7%/yr).
+- Ingest validation catches share counts filed in the wrong unit.
+- Every fundamentals row is traceable to a filing; `filings` table
+  populated (0 → 7,497 rows), raw SEC payloads cached (re-ingest 353s → 11s).
+- `python scripts/verify.py WMT shares_diluted` shows any stored number
+  beside every filing that reported it.
+- 25 tests passing. See [sprint-2-1.md](docs/sprints/sprint-2-1.md).
 
 **Sprint 1 — data foundation and company universe. Done.**
 - Universe: 518 unique US companies (S&P 500 + NASDAQ 100, deduplicated).
@@ -70,7 +76,8 @@ see the sprint table below.
 | 0 | Repo scaffold, schema, pipeline skeleton — **done** | [sprint-0.md](docs/sprints/sprint-0.md) |
 | 1 | Universe + price/fundamentals ingestion (US only) — **done** | [sprint-1.md](docs/sprints/sprint-1.md) |
 | 2 | Sector-relative quant screen + ranked dashboard — **done** (one metric defective, see 2.1) | [sprint-2.md](docs/sprints/sprint-2.md) |
-| 2.1 | Ingest data integrity + filing provenance *(next)* | |
+| 2.1 | Ingest data integrity + filing provenance — **done** | [sprint-2-1.md](docs/sprints/sprint-2-1.md) |
+| 2.2 | Distinguish FAIL from UNAVAILABLE in scoring *(next)* | |
 | 3 | AI business/moat/management/risk analysis (citation-enforced) | |
 | 4 | Owner Earnings DCF + supporting valuation methods | |
 | 5 | Investment Committee + one-page Investment Brief | |

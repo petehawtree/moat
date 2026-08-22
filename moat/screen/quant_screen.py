@@ -73,50 +73,34 @@ def compute_sector_percentile(ticker: str, metric: str, sector: str | None, all_
     return 100.0 * at_least_as_good / len(peers)
 
 
-_SPLIT_JUMP_RATIO = 1.4  # a single-year share-count move this large is a split, not real issuance/buybacks
+_SPLIT_JUMP_RATIO = 1.4  # a single-year share-count move this large is a basis change, not real issuance
 
 
-def _detect_split_factors(shares_series: list[tuple[int, float | None]]) -> dict[int, float]:
+def _detect_split_factors(
+    shares_series: list[tuple[int, float | None]],
+    corroborated_years: set[int] | None = None,
+) -> dict[int, float]:
     """Cumulative adjustment factor per fiscal year to express that year's
     diluted share count on the *latest* fiscal year's basis (>1.0 for years
-    before a forward split, <1.0 before a reverse split, 1.0 with no split
-    in between). Detected from >=40%-in-a-single-year jumps in diluted
-    share count — real buybacks/issuance essentially never move that fast
-    in one year, but splits do by definition.
+    before a forward split, <1.0 before a reverse split, 1.0 with no basis
+    change in between).
 
-    Not theoretical: Walmart's shares_diluted jumps 2.85B -> 8.42B between
-    our stored FY2021 and FY2022 rows. That is NOT when Walmart's real
-    3-for-1 split happened (Feb 2024) — verified directly against SEC's
-    raw XBRL "filed" timestamps, the jump is a side effect of how 10-Ks
-    restate history: a 10-K filed after a split restates its comparative
-    income statement (current year + ~2 priors) to the post-split share
-    basis, and our merge logic (correctly, for ordinary restatements)
-    always prefers the most-recently-filed value for a given period end.
-    So the jump lands wherever a later filing's comparative window first
-    reaches back far enough to carry a restated figure — for Walmart,
-    that's the FY2024 10-K (filed 2024-03-15, after the split) restating
-    FY2022 as its oldest comparative; FY2021 is never restated by any
-    later filing, so it's stuck on the pre-split basis. Confirmed the same
-    ~2-year offset between the visible jump and the real split date on
-    Apple (real split Aug 2020; jump lands at FY2018, restated in the
-    FY2020 10-K filed 2020-10-30 — the FY2018 comparative moves from
-    5,000,109,000 to exactly 20,000,435,000, a clean 4.0x) and Nvidia
-    (real splits 2021 and 2024; jumps land at FY2020 and FY2023
-    respectively). The detector doesn't need to know the real split date
-    to work — it just needs to find wherever the basis actually changes in
-    our merged series, which this does regardless of why. Left unadjusted,
-    a naive CAGR across a jump like this reads as heavy dilution — inverted
-    from Walmart's real story (steady buybacks for over a decade) — and
-    the matching EPS collapse (eps_diluted / shares_diluted) reads as an
-    earnings crash that never happened. Apply the same factor inversely to
-    eps_diluted (divide rather than multiply) since EPS moves opposite to
-    share count.
+    A jump is only treated as a basis change when it is **corroborated by an
+    actual restatement in the filings** — `corroborated_years` holds the
+    fiscal years for which `share_basis_changes` records that a later 10-K
+    restated the same period's share count (see
+    `moat.ingest.fundamentals_edgar.detect_share_basis_changes`).
 
-    Trade-off: a real, non-split issuance that happens to jump >=40% in one
-    year (e.g. a large stock-funded acquisition) would be misread as a
-    split too — treated as cosmetic rather than real dilution, which
-    understates the effect. Rare in practice and a false-negative (missed
-    dilution) rather than a false-positive, so left as-is for Sprint 2.
+    Sprint 2 inferred a split from jump size alone and fired on 37.4% of the
+    universe, silently erasing real dilution at TKO (WWE/UFC merger), CRWV
+    and ALAB (IPOs), CHTR and KHC (mergers) — none of which restate anything,
+    because their share counts genuinely grew. Requiring the restatement is
+    what separates "the filer rebased this period" from "this company issued
+    a lot of stock" (docs/PRD_ADDENDUM.md §A10).
+
+    Passing `corroborated_years=None` disables the gate and restores the old
+    jump-only behaviour — used only to reproduce the Sprint 2 numbers for
+    regression comparison, never in the pipeline.
     """
     points = sorted((y, v) for y, v in shares_series if v is not None and v > 0)
     if len(points) < 2:
@@ -125,10 +109,12 @@ def _detect_split_factors(shares_series: list[tuple[int, float | None]]) -> dict
     factors = {points[-1][0]: 1.0}
     cume = 1.0
     for i in range(len(points) - 1, 0, -1):
-        _, v_next = points[i]
+        year_next, v_next = points[i]
         y_prev, v_prev = points[i - 1]
         ratio = v_next / v_prev
-        if ratio >= _SPLIT_JUMP_RATIO or ratio <= 1 / _SPLIT_JUMP_RATIO:
+        jumped = ratio >= _SPLIT_JUMP_RATIO or ratio <= 1 / _SPLIT_JUMP_RATIO
+        corroborated = corroborated_years is None or year_next in corroborated_years
+        if jumped and corroborated:
             cume *= ratio
         factors[y_prev] = cume
     return factors
@@ -168,22 +154,46 @@ def _cagr(series: list[tuple[int, float | None]]) -> float | None:
     return (last_val / first_val) ** (1 / (last_year - first_year)) - 1
 
 
-def _compute_raw_metrics(history: list) -> tuple[dict[str, float | None], dict]:
+def _usable_share_row(row) -> bool:
+    """Exclude share counts the ingest validation found to be in the wrong unit.
+
+    Only `share_count_unit_outlier` disqualifies a share count (Southwest
+    filing `768` diluted shares, ConocoPhillips filing a decade in
+    thousands). `eps_shares_ni_mismatch` is deliberately NOT excluded here:
+    it flags a structural gap between net income and the EPS numerator
+    (noncontrolling interests, preferred dividends), which says nothing about
+    the share count — and dropping those rows would erase exactly the real
+    merger dilution at TKO that this sprint exists to restore (§A10).
+
+    Sprint 2 rescaled bad units into plausible-looking numbers; dropping them
+    means the metric is computed from data we can stand behind, or reported
+    as unavailable (docs/PRD_ADDENDUM.md §A4).
+    """
+    flags = row["quality_flags"] if "quality_flags" in row.keys() else None
+    return not (flags and "share_count_unit_outlier" in flags)
+
+
+def _compute_raw_metrics(history: list, corroborated_years: set[int] | None = None) -> tuple[dict[str, float | None], dict]:
     """From one ticker's `fundamentals_annual` rows (ascending fiscal_year),
     compute the 8 METRICS values plus a little extra context the absolute
     floor checks need but that isn't itself sector-comparable (e.g. the
     first/last gross margin points behind the trend check).
+
+    `corroborated_years` gates the split adjustment on filing evidence — see
+    _detect_split_factors.
     """
     latest = history[-1]
 
     revenue_series = [(r["fiscal_year"], r["revenue"]) for r in history]
     gross_margin_series = [(r["fiscal_year"], r["gross_margin"]) for r in history]
 
-    # Share count and EPS need split-adjusting before any cross-year
-    # comparison — see _detect_split_factors.
-    raw_shares_series = [(r["fiscal_year"], r["shares_diluted"]) for r in history]
-    raw_eps_series = [(r["fiscal_year"], r["eps_diluted"]) for r in history]
-    split_factors = _detect_split_factors(raw_shares_series)
+    # Share count and EPS need basis-adjusting before any cross-year
+    # comparison — see _detect_split_factors. Rows whose share/EPS figures
+    # failed ingest validation are dropped rather than adjusted.
+    share_history = [r for r in history if _usable_share_row(r)]
+    raw_shares_series = [(r["fiscal_year"], r["shares_diluted"]) for r in share_history]
+    raw_eps_series = [(r["fiscal_year"], r["eps_diluted"]) for r in share_history]
+    split_factors = _detect_split_factors(raw_shares_series, corroborated_years)
     shares_series = _split_adjust(raw_shares_series, split_factors, invert=False)
     eps_series = _split_adjust(raw_eps_series, split_factors, invert=True)
 
@@ -296,13 +306,34 @@ def run_screen(run_id: str, conn) -> None:
     for row in conn.execute("SELECT * FROM fundamentals_annual ORDER BY ticker, fiscal_year"):
         history_by_ticker.setdefault(row["ticker"], []).append(row)
 
+    # Fiscal years whose share count a later filing actually restated — the
+    # evidence that a jump is a basis change rather than real issuance (§A10).
+    # Only genuine splits corroborate an adjustment. A 'unit_correction' is a
+    # data error, not a share-basis event: rescaling on it assumes one clean
+    # switchover, but the bad unit can occupy a *middle* segment of the
+    # history (ConocoPhillips filed FY2010-2019 in thousands, actual units
+    # either side), so rescaling everything before the boundary corrupts the
+    # years that were already right. Those rows are excluded instead — §A10's
+    # "reject at ingest", not "silently normalise".
+    corroborated: dict[str, set[int]] = {}
+    for row in conn.execute(
+        "SELECT ticker, period_end_date FROM share_basis_changes WHERE change_type = 'split'"
+    ):
+        try:
+            year = int(row["period_end_date"][:4])
+        except (TypeError, ValueError):
+            continue
+        corroborated.setdefault(row["ticker"], set()).add(year)
+
     values_by_ticker: dict[str, dict] = {}
     extra_by_ticker: dict[str, dict] = {}
     for ticker in sector_by_ticker:
         history = history_by_ticker.get(ticker)
         if not history:
             continue  # no fundamentals at all — same 13-company gap as Sprint 1 (§A7)
-        values_by_ticker[ticker], extra_by_ticker[ticker] = _compute_raw_metrics(history)
+        values_by_ticker[ticker], extra_by_ticker[ticker] = _compute_raw_metrics(
+            history, corroborated.get(ticker, set())
+        )
 
     # Sector peer groups, built once per metric so compute_sector_percentile
     # doesn't re-scan every company per call.

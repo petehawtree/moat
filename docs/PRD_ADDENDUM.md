@@ -501,3 +501,71 @@ error rate rose at each remove. The architecture quietly encouraged exactly
 what the documentation warned against — because the golden source was
 fetched and then thrown away. Documented principles don't survive contact
 with a pipeline that makes following them expensive.
+
+## A12. Sprint 2.1 execution notes (ingest integrity + provenance)
+
+Implements §A10's fix and §A11's provenance layers.
+
+**What was built:**
+- **Raw `companyfacts` cached** under `FILINGS_CACHE_DIR` (502 files, ~2GB,
+  gitignored). Re-running the full ingest dropped from **353s to 11s**, which
+  is the point: verification and re-analysis are now cheap enough to actually
+  do (§A11's "grounding has to be cheaper than guessing").
+- **`share_basis_changes`** — restatement evidence captured at ingest, where
+  every filing's version of a fact is still visible. **360 changes across 129
+  companies**: 284 splits (108 companies) and 76 unit corrections (33).
+- **Provenance columns** on `fundamentals_annual` (`accession_number`,
+  `filed`, `quality_flags`) — 8,210 rows now traceable to a filing.
+- **`filings` table populated**: 0 → **7,497 rows** with resolvable EDGAR
+  URLs. This is what Sprint 3's §A3 citation enforcement resolves against.
+- **`scripts/verify.py`** — one command to show a stored number beside every
+  filing that reported it.
+- **Screen gated on evidence**: a share-count jump is only adjusted when a
+  filing actually restated that period.
+
+**Result.** Holding data constant and toggling only the gate: **20 of 505
+companies** get a different dilution verdict and **4 cross the screen
+threshold** (CI, LNT leave; CPRT, GE enter). All five known false positives
+now report their real dilution — TKO 6.2% → **53.1%**, CRWV 6.6% → **50.7%**,
+ALAB 14.1% → **73.9%**, KHC −0.3% → **11.0%**, CHTR −4.5% → **3.1%** — while
+genuine splits still adjust correctly (WMT −2.2%, AAPL −2.6%, CTAS −2.5%,
+MA −2.1%: buybacks, as they should be).
+
+**Two bugs found in the fix itself, both caught by `verify.py`** — worth
+recording, because the tool earned its cost during the sprint that built it:
+
+1. **Unit corrections must not drive rescaling.** Treating a 1000x
+   "restatement" as a basis change assumes one clean switchover. But the bad
+   unit can occupy the *middle* of a history: ConocoPhillips filed FY2010-2019
+   in thousands with actual units either side. Rescaling everything before the
+   boundary multiplied the already-correct FY2007-2009 rows by 1000, producing
+   a -32.6%/yr dilution CAGR. Only `change_type='split'` now corroborates an
+   adjustment; unit errors exclude the affected rows instead — §A10's "reject",
+   not "normalise".
+2. **A median-based outlier check inverts when bad rows are the majority.**
+   Flagging share counts far from the company's own median flagged COP's and
+   EG's *correct* rows, because ten bad years outnumbered nine good ones and
+   dragged the median into the wrong unit. Replaced with a self-evidencing
+   per-row test: `eps × shares / net_income` landing on a power of 1000 means
+   the share count is in the wrong unit; any other miss means net income and
+   the EPS numerator differ structurally (noncontrolling interests, preferred
+   dividends). That distinction matters — an earlier version dropped TKO's
+   share counts as "inconsistent" when its NCI structure was the cause,
+   erasing the very merger dilution this sprint set out to restore.
+
+**Validation split by cause:** 125 flagged rows — 66 `share_count_unit_outlier`
+across 27 companies (genuinely unusable share counts), 59
+`eps_shares_ni_mismatch` across 39 companies (EPS not comparable, share count
+sound).
+
+**Note on the regression method.** The first comparison against the Sprint 2
+run showed 11 threshold crossings, but re-ingesting had also pulled fresh
+filings — SanDisk's FY2026 10-K appeared in the interim and moved it 0 → 87.5
+on its own. Isolating the fix (same data, gate on vs off) gives the honest
+figure of 4. Worth remembering: a regression run against re-fetched data
+measures the fix *and* the data drift together.
+
+**Still open:** `SNDK`'s FY2026 figures (revenue $7.4B → $20.2B, net income
+−$1.6B → +$11.4B post-spinoff) look like predecessor/combined reporting rather
+than standalone results. Not investigated — flagged here rather than left to
+be rediscovered.

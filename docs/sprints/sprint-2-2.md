@@ -2,6 +2,46 @@
 
 **Status:** Done
 
+## Sprint review
+
+Two external code reviews drove this sprint: one that audited the shipped
+Sprint 2/2.1 system, and a second that reviewed the fixes themselves. **Every
+verifiable claim in both reproduced exactly against the database** — the
+155/73/38 FCF counts, Camden's $12.967m, the 773 mislabelled nulls, and the
+follow-up's 109/17/9 debt figures.
+
+| Finding | Disposition |
+|---|---|
+| OCF scored as free cash flow (155 companies) | 🔴 **Fixed** |
+| REIT revenue missing ASC 842 lease income | 🔴 **Fixed** |
+| Unavailable data scored as failure (773 nulls) | 🔴 **Fixed** |
+| Implausible rows contaminating peer percentiles | 🔴 **Fixed** |
+| Cache never expiring (froze §A6 refresh) | 🔴 **Fixed** |
+| Successful runs marked `failed`; `--init-db` side effects | 🟠 **Fixed** |
+| Debt failures relabelled `unavailable` (109 rows, 9 false passes) | 🔴 **Fixed** (§A14) |
+| Financials scored on definitionally invalid metrics | 🟠 **Excluded from screen** (§A14) — not solved |
+| `filings.content_hash` NULL, so §A5 AI cache key unavailable | ⚪ Accepted — Sprint 3 work |
+| No-sector companies get floor-only scoring | ⚪ Accepted, disclosed (§A9) |
+| Unimplemented AI/valuation/committee/monitoring stages | ⚫ **Disputed** — see below |
+
+**The verdict "not investment-ready" was correct**, and the reason is the
+data-integrity defects above rather than the unbuilt sprints.
+
+### Where the reviews were challenged
+
+The first review graded the unimplemented AI, valuation, committee, brief and
+monitoring stages as **High severity** while acknowledging they are declared
+future sprints. They are Sprints 3–6 of a documented six-sprint plan; grouping
+them with live calculation defects overstates the position. The honest
+statement is "at Sprint 2.2 of 6," not "High severity issue." The same applies
+to its list of missing tests for unbuilt features, and to FTSE/FX (deferred by
+§A1). Separately, its note that the test suite was "not independently
+reproducible" reflected an environment that hadn't installed requirements —
+`pytest>=8.2` is in `requirements.txt` and the suite runs clean.
+
+Recorded in [§A13](../PRD_ADDENDUM.md#a13-sprint-22--data-integrity-second-external-review)
+so the distinction between *disputed* and *accepted* survives the sprint.
+
 ## Goal
 
 Act on a second external code review, which audited the shipped system against
@@ -21,14 +61,18 @@ the database.
 | Successful runs | marked **`failed`** | `partial`; dashboard ignores failed runs |
 | `--init-db` | started a full network pipeline | `--init-only` creates schema and exits |
 
-30 tests (5 new).
+31 tests (6 new).
 
 ## Results
 
-**93 of 505** companies pass, against 111 before (98 before the §A14 follow-up) — and the fall is the point:
-38 were passing on substituted operating cash flow, and **205** are now
-correctly reported as insufficiently measurable rather than silently marked as
-failures.
+**93 of 505** companies pass, against 111 before — and the fall is the point.
+38 were passing on substituted operating cash flow, 9 on debt failures that
+had been relabelled "unavailable", and **187** companies are now reported as
+insufficiently measurable rather than silently marked as failures (69 of those
+because metrics don't apply to their sector at all).
+
+Metric verdicts across the run: **994 pass, 2,038 fail, 801 unavailable, 207
+not applicable** — four outcomes where Sprint 2 had two.
 
 The dashboard now shows `passed / assessed` alongside the score, so "6/6
 assessable" and "3/8 assessable" are no longer indistinguishable.

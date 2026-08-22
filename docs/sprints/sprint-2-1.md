@@ -79,7 +79,7 @@ filled the gap.
 | Raw SEC payload | fetched, parsed, **discarded** | **cached** (502 files, ~2GB, gitignored) |
 | Which filing a number came from | not recorded | `accession_number` + `filed` on **100% of 8,210 rows** |
 | `filings` table | **0 rows** (schema'd Sprint 0, never populated) | **7,497 rows**, 502 companies, 2009–2026 |
-| Link from a number to an EDGAR document | none | **0 broken chains** — every cited accession resolves |
+| Link from a number to an EDGAR document | none | **0 broken chains** — every cited accession resolves, and a random sample of 14 constructed EDGAR URLs returned HTTP 200 |
 | Disagreements between filings | silently discarded by "latest wins" | preserved in `share_basis_changes` (360) |
 | Data-validation state | invisible | `quality_flags` on the row (125 flagged) |
 | Cost to verify one number | write a script + network call | `python scripts/verify.py TICKER FIELD` |
@@ -96,6 +96,15 @@ SEC 10-K  ──►  cached companyfacts  ──►  fundamentals_annual  ──
 
 Every hop is now traversable. Given a number on the dashboard you can reach
 the filing; given a filing you can find every number derived from it.
+
+Two precision notes, since these numbers get quoted:
+- **Join on `accession_number`, not `ticker`.** Dual-class pairs share one
+  CIK, so FOXA/GOOGL/NWSA carry filings keyed to their sibling (FOX/GOOG/NWS).
+  That's why `filings` covers 502 tickers against 505 with fundamentals — not
+  a gap: **0** fundamentals rows have an accession that fails to resolve.
+- **The URLs were checked against SEC, not just constructed.** A random
+  sample of 14 across different CIKs and filing years (2011–2026) all
+  returned HTTP 200.
 
 ### What it looks like in practice
 
@@ -136,12 +145,57 @@ on), and the share-count restatement history behind the dilution metric.
   don't yet feed the confidence tiers in §A4. Wiring those together is
   Sprint 2.2 scope, alongside FAIL-vs-UNAVAILABLE.
 
+### What provenance does *not* do
+
+Worth stating explicitly, because it's the easiest thing to overclaim.
+
+**Provenance does not make data correct.** It makes errors *findable,
+attributable, and cheap to diagnose*. Those are different properties, and
+conflating them would be exactly the kind of unearned confidence this sprint
+was about removing.
+
+An external code review run immediately after this sprint proves the point. It
+found defects provenance did nothing to prevent:
+
+- operating cash flow being stored and scored as free cash flow on **155 of
+  505** companies, 38 of which pass the screen on the inflated figure;
+- Camden Property Trust ingesting **$12.967m** of revenue against a real
+  ~$1.6bn, producing a 6,375% "FCF margin" that took the 100th percentile in
+  Real Estate and shifted all 30 of its sector peers' percentiles — moving one
+  of them (KIM) across the top-tercile bar.
+
+Every one of those numbers was wrong *and* fully traceable. Provenance is
+orthogonal to accuracy.
+
+What it did buy is the speed and certainty of the response. CPT's root cause
+took minutes to pin from the cached payload: Camden's rental income is tagged
+`OperatingLeaseLeaseIncome` (ASC 842, leases), and our candidate list only
+carried ASC 606 contract-revenue tags, so we picked up non-lease fee income
+and missed 99% of revenue. That is a specific, testable defect with a specific
+fix — not a vague "the revenue looks wrong."
+
+The same held inside this sprint: `verify.py` caught **two bugs in the fix it
+was built alongside** (see below). And the reviewer's own opening notes they
+read the *cached SEC payloads* — the audit was possible because the evidence
+had been kept.
+
+So the honest claim is narrow: **provenance is what makes an audit possible,
+and what makes a finding actionable once someone does audit.** It is not a
+correctness guarantee, and this project is not investment-ready on the
+strength of it — the data-integrity defects above land in Sprint 2.2.
+
 ### What this unblocks
 
 Sprint 3 requires every AI claim to carry a resolvable citation (§A3). That
 needs a populated `filings` table with real document URLs — which is precisely
 what shipped here. The requirement was always in the plan; a quantitative bug
 just surfaced it two sprints early, which is the cheaper way to find out.
+
+**Half of Sprint 3's dependency, not all of it.** §A5's AI cache is keyed on a
+filing *content hash*, and `filings.content_hash` and `local_path` are still
+NULL on all 7,497 rows — the XBRL payload carries accessions and dates, not
+document text. Citation *resolution* is unblocked; citation-keyed *caching*
+still needs the filing documents themselves fetched.
 
 ## What we found
 

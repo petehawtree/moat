@@ -146,13 +146,16 @@ def run_quality_stage(conn, run_id: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Project Moat pipeline")
     parser.add_argument("--from-stage", choices=STAGES, default=STAGES[0])
-    parser.add_argument("--init-db", action="store_true", help="Create schema if missing")
+    parser.add_argument("--init-db", action="store_true", help="Create schema if missing, then run the pipeline")
+    parser.add_argument("--init-only", action="store_true", help="With --init-db: create the schema and exit without running the pipeline")
     parser.add_argument("--limit", type=int, default=None, help="Only ingest the first N tickers (testing)")
     args = parser.parse_args()
 
     if args.init_db:
-        init_db()
-        print("Database schema initialized.")
+        migrated = init_db()
+        print("Database schema initialized." + (f" Migrated columns: {', '.join(migrated)}" if migrated else ""))
+        if args.init_only:
+            return
 
     conn = get_connection()
     run_id = new_run_id()
@@ -185,9 +188,16 @@ def main() -> None:
                 raise NotImplementedError(f"Stage '{stage}' lands in a later sprint")
             last_completed_stage = stage
     except NotImplementedError as exc:
-        complete_run(conn, run_id, stage_reached=last_completed_stage or "none", status="failed")
-        print(f"\nRun {run_id} stopped: {exc}")
+        # Reaching an unbuilt stage is the expected end of a run today, not a
+        # failure — Sprint 2 marked these 'failed', so every successful screen
+        # was recorded as a failure and the dashboard read its results from
+        # runs labelled failed (§A13). 'failed' is reserved for real errors.
+        complete_run(conn, run_id, stage_reached=last_completed_stage or "none", status="partial")
+        print(f"\nRun {run_id} complete through '{last_completed_stage}' (stopped: {exc})")
         return
+    except Exception:
+        complete_run(conn, run_id, stage_reached=last_completed_stage or "none", status="failed")
+        raise
     finally:
         conn.close()
 

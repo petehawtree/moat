@@ -88,13 +88,16 @@ else:
         "Sector-relative screen (docs/PRD_ADDENDUM.md §A2/§A9): each of the 8 "
         "PRD §4 metrics passes only if it clears both an absolute floor and "
         "the top-tercile bar within its own GICS sector. composite_score is "
-        "the % of those 8 metrics passed."
+        "the % of *assessable* metrics passed — metrics we couldn't measure are "
+        "excluded rather than counted as failures (§A13), so `assessed` shows "
+        "how much of the company we could actually see."
     )
 
     latest_run = conn.execute(
         """
         SELECT run_id FROM pipeline_runs
         WHERE run_id IN (SELECT DISTINCT run_id FROM quality_scores)
+          AND status != 'failed'
         ORDER BY started_at DESC LIMIT 1
         """
     ).fetchone()
@@ -109,7 +112,10 @@ else:
         ranked = pd.read_sql_query(
             """
             SELECT q.ticker, c.name, c.sector, c.universe,
-                   ROUND(q.composite_score, 1) AS composite_score, q.passed_screen
+                   ROUND(q.composite_score, 1) AS composite_score,
+                   q.metrics_passed AS passed, q.metrics_assessed AS assessed,
+                   q.passed_screen, q.notes,
+                   (SELECT MAX(f.confidence) FROM fundamentals_annual f WHERE f.ticker = q.ticker) AS confidence
             FROM quality_scores q
             JOIN companies c ON c.ticker = q.ticker
             WHERE q.run_id = ?
@@ -131,9 +137,9 @@ else:
         if pick:
             detail = pd.read_sql_query(
                 """
-                SELECT metric, ROUND(value, 4) AS value, absolute_floor_pass,
+                SELECT metric, status, ROUND(value, 4) AS value, absolute_floor_pass,
                        ROUND(sector_percentile, 1) AS sector_percentile,
-                       sector_relative_pass, overall_pass, sector_peer_group
+                       sector_relative_pass, sector_peer_group
                 FROM quant_scores
                 WHERE run_id = ? AND ticker = ?
                 ORDER BY metric

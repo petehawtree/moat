@@ -274,6 +274,23 @@ def _absolute_floor_pass(metric: str, value: float | None, extra: dict) -> int |
     raise ValueError(f"unknown metric: {metric}")
 
 
+STATUS_PASS, STATUS_FAIL, STATUS_UNAVAILABLE = "pass", "fail", "unavailable"
+
+
+def _metric_status(value: float | None, absolute_floor_pass: int | None, overall_pass: int) -> str:
+    """'pass' | 'fail' | 'unavailable' (docs/PRD_ADDENDUM.md §A13).
+
+    "We couldn't measure this" is not "this company did badly." Sprint 2
+    collapsed both into overall_pass = 0 and then divided by all eight
+    metrics, so 257 companies were scored as failing ROIC when the truth was
+    that ROIC wasn't computable from their filings. That produces false
+    rejects and, worse, makes them indistinguishable from real ones.
+    """
+    if value is None or absolute_floor_pass is None:
+        return STATUS_UNAVAILABLE
+    return STATUS_PASS if overall_pass else STATUS_FAIL
+
+
 def _combine_pass(absolute_floor_pass: int | None, sector_relative_pass: int | None) -> int:
     """Per A2: a company passes a metric if it clears the absolute floor,
     with the sector-relative bar as an additional, stricter gate on top of
@@ -337,10 +354,21 @@ def run_screen(run_id: str, conn) -> None:
 
     # Sector peer groups, built once per metric so compute_sector_percentile
     # doesn't re-scan every company per call.
+    # Companies whose latest row failed plausibility validation are excluded
+    # from *everyone's* peer group (§A13). A percentile is relative, so one
+    # nonsense value doesn't just mis-score its own company — Camden Property
+    # Trust's 6,375% "FCF margin" shifted all 30 Real Estate peers and pushed
+    # one of them across the top-tercile bar. Quarantining is what keeps a bad
+    # row's blast radius to itself.
+    quarantined = {
+        ticker for ticker, history in history_by_ticker.items()
+        if history and (history[-1]["quality_flags"] or "") and "implausible_ratio" in (history[-1]["quality_flags"] or "")
+    }
+
     peer_values: dict[str, dict[str, dict[str, float]]] = {m: {} for m in METRICS}
     for ticker, values in values_by_ticker.items():
         sector = sector_by_ticker[ticker]
-        if sector is None:
+        if sector is None or ticker in quarantined:
             continue
         for metric in METRICS:
             v = values[metric]
@@ -356,6 +384,12 @@ def run_screen(run_id: str, conn) -> None:
             afp = _absolute_floor_pass(metric, value, extra)
             pct = compute_sector_percentile(ticker, metric, sector, peer_values[metric]) if value is not None else None
             srp = None if pct is None else int(pct >= SECTOR_RELATIVE_TOP_TERCILE_PCT)
+            overall = _combine_pass(afp, srp)
+            status = _metric_status(value, afp, overall)
+            if ticker in quarantined:
+                # Its own values are not trustworthy either — report them as
+                # unmeasurable rather than scoring a number we don't believe.
+                status, overall = STATUS_UNAVAILABLE, 0
             rows.append(
                 {
                     "run_id": run_id,
@@ -366,7 +400,8 @@ def run_screen(run_id: str, conn) -> None:
                     "absolute_floor_pass": afp,
                     "sector_percentile": pct,
                     "sector_relative_pass": srp,
-                    "overall_pass": _combine_pass(afp, srp),
+                    "overall_pass": overall,
+                    "status": status,
                 }
             )
 
@@ -374,10 +409,10 @@ def run_screen(run_id: str, conn) -> None:
         """
         INSERT INTO quant_scores (
             run_id, ticker, sector_peer_group, metric, value,
-            absolute_floor_pass, sector_percentile, sector_relative_pass, overall_pass
+            absolute_floor_pass, sector_percentile, sector_relative_pass, overall_pass, status
         ) VALUES (
             :run_id, :ticker, :sector_peer_group, :metric, :value,
-            :absolute_floor_pass, :sector_percentile, :sector_relative_pass, :overall_pass
+            :absolute_floor_pass, :sector_percentile, :sector_relative_pass, :overall_pass, :status
         )
         """,
         rows,

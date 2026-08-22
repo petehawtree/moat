@@ -569,3 +569,109 @@ measures the fix *and* the data drift together.
 −$1.6B → +$11.4B post-spinoff) look like predecessor/combined reporting rather
 than standalone results. Not investigated — flagged here rather than left to
 be rediscovered.
+
+## A13. Sprint 2.2 — data integrity (second external review)
+
+A second external code review audited the shipped Sprint 2/2.1 system against
+the PRD and this addendum. Its verdict — **"not investment-ready"** — was
+correct, and every verifiable claim it made reproduced exactly against the
+database. Findings and dispositions:
+
+### Fixed in Sprint 2.2
+
+**1. Operating cash flow was stored and scored as free cash flow.** When capex
+was missing, `extract_annual_fundamentals` substituted OCF for FCF. That
+inflates both FCF margin and debt/FCF, and inverts the metric's meaning for
+exactly the capital-intensive businesses where capex matters most. It affected
+**155 of 505** companies; 73 passed the FCF metric on the substituted figure
+and **38 passed the whole screen**. FCF is now `None` when capex is unknown,
+and `operating_cash_flow` is stored in its own column so the figure we do have
+isn't lost.
+
+**2. REIT revenue was understated by two orders of magnitude.** Rental income
+is ASC 842 (leases); our candidate tags covered only ASC 606 (contracts with
+customers). Camden Property Trust ingested **$12.967m** against a real
+**~$1.6bn**, producing a 6,375% "FCF margin" that took the 100th percentile in
+Real Estate. Because percentiles are relative, that one row shifted **all 30**
+Real Estate peers and pushed one (KIM) across the top-tercile bar — a single
+bad row was never contained to its own company. The two standards cover
+mutually exclusive revenue streams, so the correct treatment is **additive**,
+not precedence: total revenue = contract revenue + lease income, short-circuited
+when the figure already came from a consolidated tag (`Revenues`). CPT now
+reads $1,586,511,000.
+
+**3. Unavailable data was scored as failure.** `_combine_pass` turned `None`
+into `0` and `compute_quality_score` divided by all eight metrics, so
+"we couldn't measure this" was indistinguishable from "this company did
+badly" — mislabelling **257 ROIC, 202 gross-margin, 201 debt and 113
+operating-margin** results as failures. `quant_scores.status` is now
+`pass`/`fail`/`unavailable`, and the composite score is the percentage of
+**assessable** metrics passed. Since that would let a company measured on one
+metric score 100, `MIN_METRICS_ASSESSED = 6` is required to pass at all;
+companies below it carry an explicit coverage note. **205 companies** are now
+excluded on coverage rather than silently marked as failures.
+
+**4. Quarantine for implausible rows.** A row whose income exceeds the revenue
+it was supposedly earned on has a fragmentary revenue tag (DTE: $61m revenue
+against $2.37bn operating income, real revenue ~$13bn; Fifth Third: $80m
+against $2.52bn net income). Such rows are excluded from **every** peer group,
+and their own metrics report as `unavailable` — values still stored so the
+problem stays diagnosable.
+
+**5. The cache never expired — a regression introduced by Sprint 2.1.** §A11's
+provenance cache shipped with no TTL and no refresh path, so fundamentals were
+frozen permanently while prices kept updating: a silent violation of §A6's
+quarterly refresh. `FUNDAMENTALS_CACHE_MAX_AGE_DAYS = 90` now applies, with
+`max_age_days=None` for verification reads (so re-checking a past claim isn't
+disturbed by SEC having since revised the data). Worth noting how this
+happened: the cache was added for *provenance*, measured on a 353s → 11s
+speedup, and nobody asked what it did to *freshness*.
+
+**6. Successful runs were marked `failed`.** Running into a deliberately
+unbuilt stage raised `NotImplementedError` and marked the whole run failed —
+so every successful screen was recorded as a failure, and the dashboard read
+its results from runs labelled `failed`. Reaching a planned sprint boundary is
+now `partial`; `failed` is reserved for real errors. The dashboard also
+excludes failed runs, and `--init-db --init-only` creates the schema without
+starting a full network pipeline.
+
+### A false positive caught while fixing it
+
+The first version of the plausibility rule flagged any margin outside ±100%.
+That quarantined **Moderna** (−158% operating margin) and **MicroStrategy**
+(−1141%) — both *genuine* losses on real revenue, not data errors. Excluding
+distressed companies from peer comparison as "bad data" would be a worse
+failure than the one being fixed, and would systematically flatter the
+remaining peer group. The rule now keys on *positive* income exceeding
+revenue, which separates a fragmentary revenue tag from a large real loss.
+
+### Accepted but not fixed
+
+- **Financial-sector metrics remain definitionally wrong** (§A8). FCF margin,
+  debt/FCF and gross margin don't describe a bank. Sector-*relative* ranking
+  cannot rescue an invalid metric *definition* — this needs per-sector metric
+  selection, and is deferred rather than patched.
+- **`filings.content_hash` / `local_path` are still NULL**, so §A5's
+  filing-hash AI cache key is unavailable. The XBRL payload carries accessions
+  and dates, not document text; fetching the documents themselves is Sprint 3
+  work.
+- **No-sector companies still get floor-only scoring** (§A9). Disclosed, and
+  their scores remain less comparable than sector-ranked ones.
+
+### Disputed
+
+The review listed the unimplemented AI, valuation, committee, brief and
+monitoring stages as **High severity** while acknowledging they are declared
+future sprints. They are Sprints 3–6 of a documented six-sprint plan, and
+grouping them with live calculation defects overstates the position: the
+honest statement is "at Sprint 2.2 of 6," not "High severity issue." The same
+applies to its "missing tests" for unbuilt features, and to FTSE/FX (deferred
+by §A1). Separately, `pytest>=8.2` is in `requirements.txt` and the suite runs
+clean — the reviewer's inability to execute it was an environment that hadn't
+installed requirements, not a repository defect.
+
+### Result
+
+**98 of 505** companies now pass, against 111 before. The fall is the point:
+38 were passing on substituted OCF, and 205 are now correctly reported as
+insufficiently measurable rather than as failures.

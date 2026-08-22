@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS fundamentals_annual (
     gross_margin        REAL,
     roic                REAL,
     roe                 REAL,
-    free_cash_flow      REAL,
+    free_cash_flow      REAL,                 -- OCF minus capex; NULL when capex unavailable (A13) — never substituted with OCF
+    operating_cash_flow REAL,                 -- kept separately so a missing-capex company still has its cash-flow figure
     capex               REAL,
     total_debt          REAL,
     cash_and_equiv      REAL,
@@ -129,7 +130,7 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     started_at      TEXT NOT NULL,
     completed_at    TEXT,
     stage_reached   TEXT,                    -- last stage completed
-    status          TEXT NOT NULL DEFAULT 'running',  -- 'running'|'complete'|'failed'
+    status          TEXT NOT NULL DEFAULT 'running',  -- 'running'|'complete'|'partial'|'failed' ('partial' = ran cleanly up to an unbuilt stage, A13)
     notes           TEXT
 );
 
@@ -145,7 +146,8 @@ CREATE TABLE IF NOT EXISTS quant_scores (
     absolute_floor_pass INTEGER,             -- 0/1
     sector_percentile   REAL,                -- 0-100, null if not applicable
     sector_relative_pass INTEGER,            -- 0/1
-    overall_pass        INTEGER NOT NULL,    -- combines the two per A2
+    overall_pass        INTEGER NOT NULL,    -- combines the two per A2; 0 for 'unavailable' — read `status` to tell them apart
+    status              TEXT,                -- 'pass' | 'fail' | 'unavailable' (A13): "we couldn't measure this" is not "this company did badly"
     PRIMARY KEY (run_id, ticker, metric)
 );
 
@@ -153,7 +155,9 @@ CREATE TABLE IF NOT EXISTS quality_scores (
     run_id          TEXT NOT NULL REFERENCES pipeline_runs(run_id),
     ticker          TEXT NOT NULL REFERENCES companies(ticker),
     passed_screen   INTEGER NOT NULL,        -- did it clear enough of quant_scores to proceed
-    composite_score REAL,                    -- deterministic pre-AI quality score
+    composite_score REAL,                    -- % of ASSESSABLE metrics passed (A13), not % of all 8
+    metrics_assessed INTEGER,                -- how many of the 8 could actually be measured
+    metrics_passed  INTEGER,                 -- how many of those passed
     notes           TEXT,
     PRIMARY KEY (run_id, ticker)
 );

@@ -17,7 +17,14 @@ from pathlib import Path
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from moat.config import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, DATA_DIR, FILINGS_CACHE_DIR, SEC_USER_AGENT
+from moat.config import (
+    CONFIDENCE_HIGH,
+    CONFIDENCE_MEDIUM,
+    DATA_DIR,
+    FILINGS_CACHE_DIR,
+    FUNDAMENTALS_CACHE_MAX_AGE_DAYS,
+    SEC_USER_AGENT,
+)
 
 COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 TICKER_CIK_LOOKUP_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -127,7 +134,7 @@ def _facts_cache_path(cik: str) -> Path:
     return FILINGS_CACHE_DIR / f"CIK{cik}.json"
 
 
-def fetch_company_facts(cik: str, use_cache: bool = True) -> dict:
+def fetch_company_facts(cik: str, use_cache: bool = True, max_age_days: int | None = None) -> dict:
     """Fetch the full XBRL company facts payload for one company. {} if none filed.
 
     Caches the raw payload under FILINGS_CACHE_DIR (docs/PRD_ADDENDUM.md §A11
@@ -135,10 +142,21 @@ def fetch_company_facts(cik: str, use_cache: bool = True) -> dict:
     re-checked against the exact bytes it came from, offline and without
     SEC's live data having drifted underneath us (§A7 documents that drift
     happening mid-project). It also makes scripts/verify.py instant.
+
+    The cache **expires** after `max_age_days` (default
+    FUNDAMENTALS_CACHE_MAX_AGE_DAYS). Sprint 2.1 shipped this cache with no
+    expiry at all, which silently broke §A6's quarterly refresh — prices kept
+    updating while fundamentals were frozen forever (§A13). Verification reads
+    should pass `max_age_days=None` to force the cached copy, so re-checking a
+    past claim isn't affected by SEC having since revised the data.
     """
     cache_path = _facts_cache_path(cik)
     if use_cache and cache_path.exists():
-        return json.loads(cache_path.read_text())
+        if max_age_days is None:
+            return json.loads(cache_path.read_text())
+        age_days = (time.time() - cache_path.stat().st_mtime) / 86400
+        if age_days <= max_age_days:
+            return json.loads(cache_path.read_text())
 
     facts = _get_json(COMPANY_FACTS_URL.format(cik=cik))
     if facts:
@@ -159,6 +177,18 @@ TAG_CANDIDATES: dict[str, tuple[list[str], str, str]] = {
             "SalesRevenueGoodsNet",
             "SalesRevenueServicesNet",  # e.g. Old Dominion Freight Line
         ],
+        "USD",
+        "duration",
+    ),
+    # ASC 842 lease income. Kept separate from `revenue` (ASC 606) rather than
+    # added to the candidate list, because the two standards cover mutually
+    # exclusive revenue streams — a filer reporting both is reporting two
+    # disjoint components of one top line, so they must be SUMMED, not ranked.
+    # Camden Property Trust tags $1.573bn of rental income here while its ASC
+    # 606 tag carries only $12.967m of non-lease fee income; taking either
+    # alone misstates the company (§A13).
+    "lease_income": (
+        ["OperatingLeaseLeaseIncome", "OperatingLeasesIncomeStatementLeaseRevenue"],
         "USD",
         "duration",
     ),
@@ -203,7 +233,11 @@ def _merged_annual_entries(gaap: dict, names: list[str], unit_key: str, kind: st
     for name in names:
         entries = _annual_entries(gaap.get(name), unit_key, kind)
         for end, row in entries.items():
-            merged.setdefault(end, row)
+            # Record which tag supplied the value: callers need to know
+            # whether a figure is a consolidated total or one component of
+            # one (see the ASC 606 + ASC 842 revenue combination in
+            # extract_annual_fundamentals).
+            merged.setdefault(end, {**row, "_tag": name})
     return merged
 
 
@@ -401,6 +435,50 @@ def _is_power_of_1000(ratio: float) -> bool:
 
 
 FLAG_SHARE_UNIT_OUTLIER = "share_count_unit_outlier"
+FLAG_IMPLAUSIBLE_RATIO = "implausible_ratio"
+
+# Net income exceeding revenue means the "revenue" figure is a fragment, not
+# a consolidated top line — the tag we picked measures something narrower
+# than the business. A small tolerance allows genuine one-off gains (asset
+# sales, tax benefits) to exceed revenue without tripping the flag.
+_NET_INCOME_OVER_REVENUE_LIMIT = 1.0
+
+# Deliberately NOT a margin-magnitude check. A margin worse than -100% is
+# perfectly real for a loss-making company: Moderna posted a -158% operating
+# margin on collapsing revenue, MicroStrategy -1141% on bitcoin impairments.
+# Flagging those would quarantine genuine distress as a data error and
+# exclude it from peer comparison — the opposite of what a quality screen
+# wants. The reliable signal for a *wrong revenue tag* is an income figure
+# exceeding the revenue it was supposedly earned on.
+
+
+def check_ratio_plausibility(row: dict) -> list[str]:
+    """Cross-field sanity checks that catch a wrong *revenue* tag (§A13).
+
+    The unit checks in check_row_quality validate one figure against another
+    of the same kind. This catches a different failure: a revenue tag that
+    parses cleanly and is internally consistent but measures the wrong scope.
+    Camden Property Trust ingested $12.967m of revenue against a real ~$1.6bn,
+    producing a 6,375% "FCF margin" that took the 100th percentile in Real
+    Estate — and, because percentiles are relative, shifted all 30 of its
+    sector peers and pushed one of them across the top-tercile bar. A single
+    bad row is not contained to its own company, which is why these are
+    quarantined from peer groups rather than merely flagged.
+    """
+    revenue = row.get("revenue")
+    if not revenue or revenue <= 0:
+        return []
+    # Income exceeding the revenue that produced it means the revenue figure
+    # is a fragment of the top line, not the top line. DTE Energy ingested
+    # $61m of revenue against $2.37bn of operating income (real revenue
+    # ~$13bn); Fifth Third $80m against $2.52bn of net income (real ~$8bn).
+    # Only positive income counts — a large *loss* says nothing about
+    # whether revenue was captured correctly.
+    for field in ("net_income", "operating_income"):
+        value = row.get(field)
+        if value and value > 0 and value / revenue > _NET_INCOME_OVER_REVENUE_LIMIT:
+            return [FLAG_IMPLAUSIBLE_RATIO]
+    return []
 
 
 def persist_share_basis_changes(ticker: str, changes: list[dict], conn) -> None:
@@ -482,6 +560,34 @@ def persist_filings(ticker: str, filings: list[dict], conn) -> None:
     conn.commit()
 
 
+# Tags that are already a consolidated top line — lease income is inside them
+# and must not be added again.
+_CONSOLIDATED_REVENUE_TAGS = {"Revenues", "RevenuesNetOfInterestExpense", "SalesRevenueNet"}
+
+
+def _total_revenue(contract_revenue: float | None, lease_income: float | None, revenue_tag: str | None) -> float | None:
+    """Combine ASC 606 contract revenue with ASC 842 lease income (§A13).
+
+    The two standards cover mutually exclusive revenue streams, so a filer
+    reporting both is reporting two disjoint components of one top line and
+    they must be summed. A REIT is the common case: Camden Property Trust
+    tags $1.573bn of rental income as lease income and only $12.967m of
+    non-lease fee income as contract revenue — taking either alone misstates
+    the business by two orders of magnitude.
+
+    When the figure already came from a consolidated tag (`Revenues` and
+    friends), it includes lease income by construction and is returned
+    untouched — double-counting would be just as wrong as under-counting.
+    """
+    if revenue_tag in _CONSOLIDATED_REVENUE_TAGS:
+        return contract_revenue
+    if lease_income is None:
+        return contract_revenue
+    if contract_revenue is None:
+        return lease_income
+    return contract_revenue + lease_income
+
+
 def extract_annual_fundamentals(facts: dict) -> list[dict]:
     """Pull the metrics in PRD §4 out of the raw XBRL facts payload.
 
@@ -506,7 +612,11 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
     for end in sorted(period_ends):
         val = {metric: series[metric].get(end, {}).get("val") for metric in series}
 
-        revenue = val["revenue"]
+        revenue = _total_revenue(
+            contract_revenue=val["revenue"],
+            lease_income=val["lease_income"],
+            revenue_tag=series["revenue"].get(end, {}).get("_tag"),
+        )
         net_income = val["net_income"]
         operating_income = val["operating_income"]
         if revenue is None or (net_income is None and operating_income is None):
@@ -520,13 +630,19 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
 
         operating_margin = operating_income / revenue if operating_income is not None and revenue else None
 
+        # Free cash flow is operating cash flow MINUS capex. Never substitute
+        # OCF when capex is missing (docs/PRD_ADDENDUM.md §A13): that inflates
+        # both FCF margin and debt/FCF, and it inverts the meaning of the
+        # metric for exactly the capital-intensive businesses where capex
+        # matters most. Sprint 2 substituted it on 155 of 505 companies, 38 of
+        # which passed the screen on the inflated figure. An unknown FCF is
+        # now reported as unknown; `operating_cash_flow` is stored separately
+        # so the number we *do* have isn't lost.
         confidence = CONFIDENCE_HIGH
+        operating_cash_flow = val["operating_cash_flow"]
         free_cash_flow = None
-        if val["operating_cash_flow"] is not None and val["capex"] is not None:
-            free_cash_flow = val["operating_cash_flow"] - val["capex"]
-        elif val["operating_cash_flow"] is not None:
-            free_cash_flow = val["operating_cash_flow"]  # capex unavailable; less conservative
-            confidence = CONFIDENCE_MEDIUM
+        if operating_cash_flow is not None and val["capex"] is not None:
+            free_cash_flow = operating_cash_flow - val["capex"]
 
         equity = val["stockholders_equity"]
         roe = net_income / equity if net_income is not None and equity else None
@@ -560,6 +676,7 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
             "roic": roic,
             "roe": roe,
             "free_cash_flow": free_cash_flow,
+            "operating_cash_flow": operating_cash_flow,
             "capex": val["capex"],
             "total_debt": total_debt,
             "cash_and_equiv": val["cash_and_equiv"],
@@ -570,7 +687,7 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
             "filed": anchor.get("filed"),
             "retrieved_at": now_iso,
         }
-        row["quality_flags"] = ",".join(check_row_quality(row)) or None
+        row["quality_flags"] = ",".join(check_row_quality(row) + check_ratio_plausibility(row)) or None
         rows.append(row)
 
     return rows
@@ -582,12 +699,12 @@ def persist_annual_fundamentals(ticker: str, rows: list[dict], conn) -> None:
         INSERT INTO fundamentals_annual (
             ticker, fiscal_year, period_end_date, revenue, eps_diluted, net_income,
             operating_income, operating_margin, gross_margin, roic, roe, free_cash_flow,
-            capex, total_debt, cash_and_equiv, shares_diluted, source, confidence,
+            operating_cash_flow, capex, total_debt, cash_and_equiv, shares_diluted, source, confidence,
             accession_number, filed, quality_flags, retrieved_at
         ) VALUES (
             :ticker, :fiscal_year, :period_end_date, :revenue, :eps_diluted, :net_income,
             :operating_income, :operating_margin, :gross_margin, :roic, :roe, :free_cash_flow,
-            :capex, :total_debt, :cash_and_equiv, :shares_diluted, :source, :confidence,
+            :operating_cash_flow, :capex, :total_debt, :cash_and_equiv, :shares_diluted, :source, :confidence,
             :accession_number, :filed, :quality_flags, :retrieved_at
         )
         ON CONFLICT(ticker, fiscal_year) DO UPDATE SET
@@ -595,7 +712,8 @@ def persist_annual_fundamentals(ticker: str, rows: list[dict], conn) -> None:
             eps_diluted=excluded.eps_diluted, net_income=excluded.net_income,
             operating_income=excluded.operating_income, operating_margin=excluded.operating_margin,
             gross_margin=excluded.gross_margin, roic=excluded.roic, roe=excluded.roe,
-            free_cash_flow=excluded.free_cash_flow, capex=excluded.capex, total_debt=excluded.total_debt,
+            free_cash_flow=excluded.free_cash_flow, operating_cash_flow=excluded.operating_cash_flow,
+            capex=excluded.capex, total_debt=excluded.total_debt,
             cash_and_equiv=excluded.cash_and_equiv, shares_diluted=excluded.shares_diluted,
             source=excluded.source, confidence=excluded.confidence,
             accession_number=excluded.accession_number, filed=excluded.filed,
@@ -606,13 +724,18 @@ def persist_annual_fundamentals(ticker: str, rows: list[dict], conn) -> None:
     conn.commit()
 
 
-def run_for_ticker(ticker: str, conn) -> tuple[int, str | None]:
-    """Fetch + persist one company's fundamentals. Returns (years_written, error)."""
+def run_for_ticker(ticker: str, conn, max_age_days: int | None = FUNDAMENTALS_CACHE_MAX_AGE_DAYS) -> tuple[int, str | None]:
+    """Fetch + persist one company's fundamentals. Returns (years_written, error).
+
+    Re-fetches from SEC when the cached payload is older than `max_age_days`
+    (§A6 refresh cadence). Pass 0 to force a refresh, None to work purely
+    offline from cache.
+    """
     cik = lookup_cik(ticker)
     if cik is None:
         return 0, "no CIK found (not SEC-registered under this ticker)"
 
-    facts = fetch_company_facts(cik)
+    facts = fetch_company_facts(cik, max_age_days=max_age_days)
     if not facts:
         return 0, "no filings found at SEC EDGAR for this CIK"
 

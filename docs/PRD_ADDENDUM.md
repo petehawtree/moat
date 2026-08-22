@@ -172,6 +172,19 @@ write-up: [`docs/writeups/three-bugs-in-structured-financial-data.md`](writeups/
 - Any alerting channel beyond a dashboard panel (email/push is a nice-to-have,
   not required for §11's success criteria)
 
+**Added after the Sprint 2 review (§A10) — deferred beyond Sprint 2.1:**
+- **Sector-specific metric configuration**, principally for banks and
+  financial holding companies. `debt` (debt/FCF), `gross_margin` and
+  `free_cash_flow` are close to meaningless for STT/USB/SPGI-type filers
+  regardless of whether the data is present — a bank's balance sheet
+  isn't a capital structure in the industrial sense. This extends §A7's
+  bank-revenue-proxy note from a data problem to a *metric-definition*
+  problem: the right fix is per-sector metric selection, not per-sector
+  thresholds (which A2 already handles). Sprint 4-ish, own slice.
+- **Distinguishing FAIL from UNAVAILABLE** in scoring (§A10). Cheap and
+  separable from the ingest work — the data is already stored correctly,
+  only the scoring collapses it. Sprint 2.2.
+
 ## A9. Sprint 2 — sector-relative screen implementation
 
 A2 described the mechanism; this records the choices made turning it into
@@ -258,11 +271,22 @@ is. After the fix, WMT's split-adjusted dilution CAGR is -2.2%/yr
 (buybacks, correctly), and it now passes both metrics it previously
 failed on the artifact alone. AAPL and NVDA both compute a small, real,
 sub-3% dilution CAGR post-fix rather than a split-inflated number.
-Trade-off: a real, non-split share issuance that happens to jump ≥40% in
-one year (e.g. a large stock-funded acquisition) would be misread as a
-split too and under-penalized — rare in practice, and a false-negative
+Trade-off, **as originally assessed — this assessment was wrong, see
+§A10**: a real, non-split share issuance that happens to jump ≥40% in one
+year (e.g. a large stock-funded acquisition) would be misread as a split
+too and under-penalized — assumed rare in practice, and a false-negative
 (missed dilution) rather than a crash, so accepted for Sprint 2 rather
 than building full corporate-action tracking for it.
+
+**Correction (measured after Sprint 2 shipped):** "rare in practice" was
+asserted without measuring it. The detector fires on **189 of 505
+companies (37.4%)**. It is not detecting stock splits; it is detecting
+*any* large discontinuity in reported diluted share count, which turns
+out to be three distinct phenomena with three different correct
+treatments — genuine splits (adjust, as we do), real corporate events
+such as IPOs and mergers (must not adjust), and unit-of-measure errors in
+the source data (must be rejected at ingest, not silently normalized).
+Full findings, evidence, and the fix in §A10.
 
 **Quality score and pass threshold:** `compute_quality_score` is the
 % of the 8 metrics a company's `overall_pass` cleared (0-100). The pass
@@ -292,3 +316,188 @@ confidence into the screen (e.g. discounting or footnoting medium/low
 values rather than ranking them at face value) is reasonable Sprint 3+
 scope, flagged here rather than silently left for a future session to
 rediscover.
+
+## A10. Sprint 2 post-review findings — the dilution metric is defective
+
+An independent AI review of the Sprint 2 sample output against this
+addendum and the PRD flagged the share-dilution metric as unreliable.
+The claim was checked rather than accepted, and it holds. **Every
+numeric assertion in that review reproduced exactly** against the
+database — the nine dilution figures, the 12.5-points-per-metric
+scoring, the 66.7% tercile boundary, and spot-checks of FCF margin,
+debt/FCF, operating margin and revenue CAGR. Those parts of Sprint 2 are
+confirmed working.
+
+**Status: `share_dilution` should not be trusted until Sprint 2.1 lands.**
+The other seven metrics are unaffected.
+
+### What the detector actually detects
+
+`_detect_split_factors` treats a ≥40% one-year jump in diluted share
+count as a stock split. It fires on **189 of 505 companies (37.4%)** —
+§A9's "rare in practice" was asserted without measurement and is wrong.
+
+The jump is real; the *interpretation* is what fails. Three different
+phenomena produce it, needing three different treatments:
+
+| Phenomenon | Correct treatment | Currently |
+|---|---|---|
+| Genuine stock split | Adjust prior years to latest basis | ✅ correct |
+| Real corporate event (IPO, merger, recap) | **Do not adjust** — dilution is real | ❌ adjusted away |
+| Unit-of-measure error in source data | **Reject at ingest** | ❌ silently normalized |
+
+### The decisive test: restatement
+
+A genuine split **restates prior-period share counts across filings** —
+the same period-end carries a different value in a later 10-K, because
+the filer rebased its comparatives. A real share issuance restates
+nothing: the count genuinely grew, and every filing agrees on every
+period. This is directly checkable in the raw XBRL we already fetch.
+
+Verified against the review's own nine examples:
+
+- **Genuine splits** (restated; our adjustment is correct):
+  SMCI `10.00x`, CTAS `4.00x`, MA `10.01x`, AME `1.50x`
+- **Real dilution** (no restatement anywhere; false positives):
+  TKO (WWE/UFC merger), CRWV (IPO), ALAB (IPO), CHTR (Time Warner Cable
+  merger), KHC (Kraft-Heinz merger)
+
+So the review was right that false positives exist, but wrong to
+attribute all nine to corporate events — four are genuine splits, and
+reverting to raw share counts (which its framing implies) would
+*introduce* errors on those. The restatement signature separates the two
+exactly, with no heuristic tuning, and is a stronger test than the
+review's proposal (EPS moving inversely + price data + filing text),
+which needs new data sources and still fuzzy-matches.
+
+### The larger problem the review missed: unit errors
+
+The most extreme detected "splits" are not splits or corporate events —
+they are **unit-of-measure inconsistencies in the source data**:
+
+- Southwest (LUV) FY2007: `768` diluted shares → FY2009: `741,000,000`
+- Agilent (A) FY2007: `406` → FY2008: `371,000,000`
+- Hershey (HSY) FY2009: `228,995` → FY2010: `230,313,000`
+- Northern Trust (NTRS) FY2008: `224,053,430,000,000` — 224 *trillion*
+  shares; a plainly corrupt value
+
+The split detector **launders these into plausible-looking metrics**.
+That is worse than either other failure mode: a corrupt input produces a
+clean-looking output with nothing downstream able to detect it, which is
+precisely the silent-deterministic-error class this project exists to
+avoid (PRD §14 — "the numbers determine which companies deserve
+attention").
+
+A cheap internal-consistency check catches them at ingest:
+`eps_diluted × shares_diluted ≈ net_income` flags **125 of 7,573 rows
+(1.7%)**, including every case above. Intended as a *flag*, not an
+auto-reject — some failures are legitimate (banks' preferred dividends
+sit between net income and EPS; pre-IPO share structures).
+
+### Materiality
+
+Comparing current (split-adjusted) against raw-unadjusted dilution
+across all 505 companies:
+
+| | |
+|---|---|
+| Dilution pass/fail differs | **67 / 505** (36 adjusted-pass, 31 adjusted-fail) |
+| Companies crossing the 50% screen threshold | **10** |
+| Total passing the screen | **111 either way** |
+
+Gaining screen pass under adjustment: BALL, CI, LNT, NEE, UNP.
+Losing it: CTVA, DUK, GE, LLY, PEP.
+
+**The identical headline (111) is a trap**, and worth recording as a
+lesson in its own right: a check on the summary statistic alone would
+conclude "no impact" while ten companies silently swap in and out of the
+investable universe. Aggregate stability is not evidence of per-company
+correctness.
+
+### Fix (Sprint 2.1)
+
+Detection moves to **ingest**, keyed on restatement rather than jump
+size. The screen then consumes a known split factor instead of inferring
+one. This requires provenance the pipeline currently destroys — see §A11.
+
+Note that reverting to raw share counts is *not* the fix: raw is wrong
+for genuine splits and wrong for unit errors. Both current worlds are
+wrong, just differently.
+
+## A11. Provenance and verification (extends A3)
+
+**Decision:** derived fundamentals must retain a resolvable link back to
+the filing they came from, and the raw source payload must be kept.
+
+**Why:** §A10's defect went unnoticed, and was then *mis-diagnosed twice*
+— once in §A9's original write-up (a stock split attributed to the wrong
+year without checking filing dates) and once by the external review (four
+genuine splits attributed to corporate events). Neither was carelessness.
+Both had the same structural cause: **the pipeline destroys its own
+evidence.**
+
+As of Sprint 2:
+
+- `fetch_company_facts()` fetches raw XBRL, uses it, and discards it — no cache
+- `FILINGS_CACHE_DIR` is declared in `config.py` and never used
+- the `filings` table has existed since Sprint 0 and holds **0 rows**
+- `fundamentals_annual` carries no `accession_number` and no `filed` date
+- the merge rule ("most recently filed wins") deletes the losing value —
+  which is exactly the restatement evidence §A10 needs
+
+Every number in the database is an orphan. Verifying any claim about one
+required writing a throwaway script and re-fetching from SEC. **Verification
+that costs a custom script gets skipped**, and confident prose fills the gap.
+
+**Mechanism (Sprint 2.1):**
+1. **Keep the receipt** — cache raw `companyfacts` JSON per CIK under
+   `FILINGS_CACHE_DIR`, with retrieval date. Makes later checks offline,
+   instant, and reproducible. SEC's data drifts (§A7: `company_tickers.json`
+   grew mid-project), so a dated snapshot is what makes a claim
+   re-checkable later.
+2. **Provenance as a column** — `accession_number` + `filed` on every
+   `fundamentals_annual` row. Both are already parsed from the XBRL and
+   thrown away.
+3. **Keep the contradictions** — record when filings disagree on the same
+   period rather than silently resolving. This is what makes §A10's
+   restatement test possible, and generalizes to ordinary restatements,
+   which matter to a quality screen regardless.
+4. **Populate the `filings` table** — already schema'd with `document_url`;
+   once populated, any number joins to a real EDGAR URL.
+5. **One-command verification** — `scripts/verify.py TICKER FIELD --year N`,
+   printing every filing that reported that fact for that period with
+   values, filed dates, accessions and URLs. Both misdiagnoses above would
+   have died in seconds against that output. The point is not novelty:
+   **grounding has to be cheaper than guessing, or guessing wins.**
+
+**Scope extension to A3:** §A3 requires a resolvable citation for every
+*AI-generated* claim. Both failures here were **quantitative** claims about
+corporate events, which sat outside that fence entirely. A3's rule is
+widened: any claim about *why a number looks the way it does* — written by
+a model or a person, in code comments, sprint docs or this addendum —
+needs an accession number. "WMT split in FY2022" should have been
+unwriteable without a filing reference to hang it on.
+
+**Sequencing note:** this is not merely Sprint 2.1 hygiene. Sprint 3's
+citation enforcement (§A3) needs exactly the populated `filings` table and
+`document_url` that step 4 provides. Doing this now **unblocks** Sprint 3
+rather than delaying it — the requirement was always there; a quantitative
+bug simply surfaced it before the AI work did.
+
+**Supporting habits:**
+- **Exports carry provenance.** The review analyzed a workbook with no
+  accession columns, so its chain dead-ended at derived values and it
+  inferred causes instead. Extracts should carry source columns.
+- **Claims in docs get tests.** We already write one regression test per
+  root cause; a claim like "this jump is a split" is testable against
+  primary source. Same habit, applied to prose.
+
+### Where this generalizes
+
+§A7 drew the lesson: *run against the golden source, not a summary.*
+Sprint 2's own analysis then ran against the database (a summary), and the
+external review ran against an Excel extract (a summary of a summary). The
+error rate rose at each remove. The architecture quietly encouraged exactly
+what the documentation warned against — because the golden source was
+fetched and then thrown away. Documented principles don't survive contact
+with a pipeline that makes following them expensive.

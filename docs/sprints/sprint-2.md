@@ -1,6 +1,7 @@
 # Sprint 2 — Sector-relative quant screen + ranked dashboard
 
-**Status:** Done
+**Status:** Done, with one metric since found defective — see
+[Known defects](#known-defects-found-after-this-sprint-shipped) below.
 
 ## Goal
 
@@ -38,8 +39,11 @@ Run against the full Sprint 1 universe (505 companies with fundamentals):
 | | |
 |---|---|
 | Companies scored | 505 / 505 |
-| Passed the screen (composite_score ≥ 50) | **111 (22.0%)** |
+| Passed the screen (composite_score ≥ 50) | **111 (22.0%)** ⚠️ |
 | Top-scoring company | Adobe (100/100 — every metric cleared) |
+
+⚠️ These rankings are affected by the dilution defect below — 10 companies
+sit on the wrong side of the threshold because of it.
 
 Higher than PRD §13's "~50-100 out of ~850" — but that figure was scoped
 for the full US+UK universe; S&P 500 + NASDAQ 100 is already a pre-filtered
@@ -92,7 +96,37 @@ in [PRD_ADDENDUM.md §A9](../PRD_ADDENDUM.md#a9-sprint-2--sector-relative-screen
 fall back to absolute-floor-only scoring rather than being silently
 failed for a sector comparison we can't compute.
 
+## Known defects (found after this sprint shipped)
+
+**`share_dilution` is not currently trustworthy.** An independent review of
+the Sprint 2 output, checked and largely confirmed, found that the split
+detector fires on **189/505 companies (37.4%)** — not the "rare" case §A9
+originally assumed — and conflates three different things: genuine stock
+splits (handled correctly), real corporate events like IPOs and mergers
+(wrongly adjusted away), and unit-of-measure errors in the source data
+(silently laundered into plausible-looking numbers).
+
+Impact: **67 companies'** dilution result changes depending on the
+treatment, and **10 cross the 50% screen threshold**. The headline total
+is coincidentally 111 either way — which is itself the lesson: the summary
+statistic looked stable while ten companies swapped in and out.
+
+The other seven metrics verified correct, including FCF margin, debt/FCF,
+operating margin, revenue CAGR, the 66.7% tercile boundary and the scoring
+arithmetic.
+
+Fix is Sprint 2.1: move split detection to ingest keyed on *restatement*
+(a genuine split rebases prior periods across filings; real issuance does
+not), add an `EPS × shares ≈ net income` sanity check, and retain the
+filing provenance the pipeline currently discards. Full detail:
+[PRD_ADDENDUM.md §A10](../PRD_ADDENDUM.md#a10-sprint-2-post-review-findings--the-dilution-metric-is-defective)
+and [§A11](../PRD_ADDENDUM.md#a11-provenance-and-verification-extends-a3).
+
 ## Next up
 
-Sprint 3 — AI business/moat/management/risk analysis, citation-enforced
+**Sprint 2.1 — ingest data integrity + provenance** (§A10, §A11), which
+also unblocks Sprint 3: the populated `filings` table it adds is exactly
+what §A3's citation enforcement needs.
+
+Then Sprint 3 — AI business/moat/management/risk analysis, citation-enforced
 (PRD §5, [PRD_ADDENDUM.md §A3](../PRD_ADDENDUM.md#a3-evidence-and-citation-requirement-hardened-from-prd-1)).

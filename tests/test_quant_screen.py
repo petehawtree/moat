@@ -45,9 +45,24 @@ def test_percentile_none_when_peer_group_too_small():
     assert compute_sector_percentile("AAA", "roic", "Energy", {"Energy": peers}) is None
 
 
-def test_compute_quality_score_is_pct_of_metrics_passed():
-    rows = [{"overall_pass": 1}, {"overall_pass": 1}, {"overall_pass": 0}, {"overall_pass": 0}]
-    assert compute_quality_score(rows) == 50.0
+def test_compute_quality_score_is_pct_of_assessable_metrics_passed():
+    rows = [{"overall_pass": 1, "status": "pass"}, {"overall_pass": 1, "status": "pass"},
+            {"overall_pass": 0, "status": "fail"}, {"overall_pass": 0, "status": "fail"}]
+    assert compute_quality_score(rows) == (50.0, 4, 2)
+
+
+def test_unavailable_metrics_do_not_count_as_failures():
+    """The Sprint 2 defect: a metric we couldn't measure was scored the same
+    as one the company failed, dividing by all 8 regardless (§A13)."""
+    rows = [{"overall_pass": 1, "status": "pass"}, {"overall_pass": 1, "status": "pass"},
+            {"overall_pass": 0, "status": "unavailable"}, {"overall_pass": 0, "status": "unavailable"}]
+    score, assessed, passed = compute_quality_score(rows)
+    assert (score, assessed, passed) == (100.0, 2, 2)  # not 50.0 — we measured 2 things and both passed
+
+
+def test_all_unavailable_scores_zero_with_no_coverage():
+    rows = [{"overall_pass": 0, "status": "unavailable"}] * 3
+    assert compute_quality_score(rows) == (0.0, 0, 0)
 
 
 def test_compute_quality_score_rejects_empty_input():
@@ -210,3 +225,15 @@ def test_run_screen_end_to_end(tmp_path):
     assert strong_quality["composite_score"] > weak_quality["composite_score"]
 
     conn.close()
+
+
+def test_determined_failure_without_a_value_is_fail_not_unavailable():
+    """A company with debt but no positive FCF fails `debt` outright, and
+    debt/FCF is deliberately None (dividing by non-positive cash flow is
+    meaningless). That verdict must survive as a FAIL — keying the status off
+    `value is None` relabelled 109 such rows 'unavailable' (§A14)."""
+    from moat.screen.quant_screen import _metric_status
+    assert _metric_status(value=None, absolute_floor_pass=0, overall_pass=0) == "fail"
+    # genuinely unmeasurable: no floor determination was reached at all
+    assert _metric_status(value=None, absolute_floor_pass=None, overall_pass=0) == "unavailable"
+    assert _metric_status(value=1.2, absolute_floor_pass=1, overall_pass=1) == "pass"

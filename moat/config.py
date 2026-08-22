@@ -61,6 +61,17 @@ MIN_SECTOR_PEER_GROUP = 5
 # §A9 for the empirical distribution this was chosen against.
 QUALITY_SCORE_PASS_THRESHOLD = 50.0
 
+# A company can't pass a screen we couldn't actually run on it (A13).
+# composite_score is now the % of *assessable* metrics passed, so a company
+# with one measurable metric could otherwise score 100. Requiring most of the
+# metrics to be measurable keeps the score comparable across companies.
+MIN_METRICS_ASSESSED = 6
+
+# How stale a cached SEC companyfacts payload may be before ingest re-fetches
+# it (A6: fundamentals refresh quarterly). Sprint 2.1's cache had no expiry,
+# which froze fundamentals indefinitely while prices kept refreshing — see A13.
+FUNDAMENTALS_CACHE_MAX_AGE_DAYS = 90
+
 # Data confidence tiers (A4)
 CONFIDENCE_HIGH = "high"     # SEC EDGAR structured XBRL
 CONFIDENCE_MEDIUM = "medium" # derived from EDGAR with assumptions

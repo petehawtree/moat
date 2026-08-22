@@ -25,6 +25,13 @@ def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
 # CREATE TABLE IF NOT EXISTS won't add these to a database created by an
 # earlier schema version, so they're applied separately — see _migrate.
 _ADDED_COLUMNS = {
+    "quant_scores": {
+        "status": "TEXT",             # A13 pass/fail/unavailable
+    },
+    "quality_scores": {
+        "metrics_assessed": "INTEGER",  # A13 coverage
+        "metrics_passed": "INTEGER",
+    },
     "share_basis_changes": {
         "change_type": "TEXT",        # A10 split vs unit-correction
     },
@@ -32,6 +39,7 @@ _ADDED_COLUMNS = {
         "accession_number": "TEXT",   # A11 provenance
         "filed": "TEXT",              # A11 provenance
         "quality_flags": "TEXT",      # A10 ingest validation
+        "operating_cash_flow": "REAL",  # A13: FCF is no longer substituted with OCF
     },
 }
 

@@ -142,3 +142,51 @@ def test_ungated_mode_reproduces_sprint_2_behaviour():
     factors = _detect_split_factors(TKO_SHAPE, corroborated_years=None)
     adjusted = _cagr(_split_adjust(TKO_SHAPE, factors, invert=False))
     assert adjusted < 0.1  # the old, wrong answer
+
+
+# --- Sprint 2.2 data-integrity regressions (§A13) --------------------------
+
+def test_free_cash_flow_is_never_substituted_with_operating_cash_flow():
+    """Sprint 2 fell back to OCF when capex was missing, inflating FCF margin
+    and debt/FCF on 155 of 505 companies — 38 of which passed the screen on
+    the inflated figure."""
+    from moat.ingest.fundamentals_edgar import extract_annual_fundamentals
+    facts = {"facts": {"us-gaap": {
+        "Revenues": {"units": {"USD": [_usd("2023-01-01", "2023-12-31", 1000)]}},
+        "NetIncomeLoss": {"units": {"USD": [_usd("2023-01-01", "2023-12-31", 100)]}},
+        "NetCashProvidedByUsedInOperatingActivities": {"units": {"USD": [_usd("2023-01-01", "2023-12-31", 500)]}},
+        # no capex tag at all
+    }}}
+    row = extract_annual_fundamentals(facts)[0]
+    assert row["free_cash_flow"] is None, "FCF must be unknown, not OCF"
+    assert row["operating_cash_flow"] == 500, "but OCF itself is still kept"
+
+
+def test_lease_income_is_added_to_contract_revenue():
+    """REIT rental income is ASC 842, contract revenue is ASC 606 — disjoint
+    streams that must be summed. Camden reported $12.967m of fee income and
+    $1.573bn of rental income; either alone misstates it (§A13)."""
+    from moat.ingest.fundamentals_edgar import _total_revenue
+    assert _total_revenue(12_967_000, 1_573_544_000, "RevenueFromContractWithCustomerExcludingAssessedTax") == 1_586_511_000
+    # a consolidated tag already includes lease income — must not double-count
+    assert _total_revenue(5_000, 1_000, "Revenues") == 5_000
+
+
+def test_implausible_ratios_are_flagged():
+    from moat.ingest.fundamentals_edgar import FLAG_IMPLAUSIBLE_RATIO, check_ratio_plausibility
+    assert check_ratio_plausibility({"revenue": 1000, "net_income": 100}) == []
+    # net income far exceeding revenue means the revenue tag is a fragment
+    assert FLAG_IMPLAUSIBLE_RATIO in check_ratio_plausibility({"revenue": 12_967_000, "net_income": 384_462_000})
+    # operating income exceeding revenue: DTE ingested $61m against $2.37bn
+    assert FLAG_IMPLAUSIBLE_RATIO in check_ratio_plausibility(
+        {"revenue": 61e6, "operating_income": 2374e6})
+    # a large LOSS says nothing about whether revenue was captured — Moderna's
+    # -158% operating margin is real distress, not a data error, and must not
+    # be quarantined out of its peer group
+    assert check_ratio_plausibility(
+        {"revenue": 1944e6, "operating_income": -3074e6, "net_income": -2822e6}) == []
+
+
+def _usd(start, end, val):
+    return {"start": start, "end": end, "val": val, "filed": "2024-01-01",
+            "accn": "acc-1", "form": "10-K"}

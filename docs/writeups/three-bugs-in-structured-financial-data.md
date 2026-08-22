@@ -1,6 +1,6 @@
 # Three data bugs an AI coding agent found by actually running the code
 
-*Notes from Sprints 0-1 of Project Moat, a personal AI-assisted equity research tool built on Buffett/Graham fundamental investing principles.*
+*Notes from Sprints 0-1 of Project Moat, a personal AI-assisted equity research tool built on Buffett/Graham fundamental investing principles. The follow-up, covering Sprints 2-2.2 and two external code reviews, is [here](what-two-code-reviews-found.md).*
 
 The goal was straightforward: pull real fundamentals for the S&P 500 + NASDAQ 100 (518 companies after deduplication) from SEC EDGAR's structured XBRL data, and build the deterministic screening layer everything else depends on. The interesting part wasn't writing that code - it was what showed up once it ran against all 518 companies instead of a handful of test tickers.
 

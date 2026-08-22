@@ -9,7 +9,9 @@ Full spec: `docs/Project_Moat_PRD_MVP.pdf` (original PRD) +
 during Sprint 0 — read this first, it overrides the PRD where they differ).
 
 What actually happened each sprint — results, bugs found, scope calls — is
-in [`docs/sprints/`](docs/sprints/).
+in [`docs/sprints/`](docs/sprints/). Longer-form lessons are in
+[`docs/writeups/`](docs/writeups/): [Sprint 0-1 data bugs](docs/writeups/three-bugs-in-structured-financial-data.md)
+and [what two code reviews found](docs/writeups/what-two-code-reviews-found.md).
 
 ## Architecture
 
@@ -19,20 +21,6 @@ Green = shipped (Sprint 0–1). Dashed = planned (Sprint 2–6, still stubs).
 Gold = the one thing no sprint replaces.
 
 ## Status
-
-**Sprint 2 — sector-relative quant screen + ranked dashboard. Done.**
-- Screen: all 8 PRD §4 metrics scored against each company's own GICS
-  sector, not a flat bar — see [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A2/§A9.
-- Results: 111/505 passed at the time (98 after Sprint 2.2's data fixes).
-  Top of the ranked
-  table is recognizable moat businesses (Adobe, Mastercard, Meta,
-  Moody's, MSCI, Nvidia, Verisk) — see
-  [`docs/sprints/sprint-2.md`](docs/sprints/sprint-2.md).
-- Dashboard: ranked table + per-company metric breakdown showing *why* a
-  company passed or failed each metric.
-- 16 tests passing.
-- A `share_dilution` defect found by external review has been fixed in
-  Sprint 2.1 below.
 
 **Sprint 2.2 — data integrity. Done.**
 - Acted on a second external review that found the system not
@@ -58,6 +46,20 @@ Gold = the one thing no sprint replaces.
 - `python scripts/verify.py WMT shares_diluted` shows any stored number
   beside every filing that reported it.
 - 25 tests passing. See [sprint-2-1.md](docs/sprints/sprint-2-1.md).
+
+**Sprint 2 — sector-relative quant screen + ranked dashboard. Done.**
+- Screen: all 8 PRD §4 metrics scored against each company's own GICS
+  sector, not a flat bar — see [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A2/§A9.
+- Results: 111/505 passed at the time (93 after the Sprint 2.1/2.2 data
+  fixes). Top of the ranked
+  table is recognizable moat businesses (Adobe, Mastercard, Meta,
+  Moody's, MSCI, Nvidia, Verisk) — see
+  [`docs/sprints/sprint-2.md`](docs/sprints/sprint-2.md).
+- Dashboard: ranked table + per-company metric breakdown showing *why* a
+  company passed or failed each metric.
+- 16 tests passing.
+- A `share_dilution` defect found by external review has been fixed in
+  Sprint 2.1 below.
 
 **Sprint 1 — data foundation and company universe. Done.**
 - Universe: 518 unique US companies (S&P 500 + NASDAQ 100, deduplicated).

@@ -141,9 +141,9 @@ Plus, on `ai_analysis`: `norm_version`, `filings_used` (JSON accessions),
 |---|---|---|
 | W1 | **Fetch filing documents** — `moat/ingest/filing_documents.py`. Primary 10-K document via SEC `submissions`, cached under `FILINGS_CACHE_DIR`, reusing the existing rate-limit and User-Agent handling. | Latest 10-K text cached for the 93; `filings.local_path` and `content_hash` non-NULL; a second run is fully offline. |
 | W2 | **Normalize and section** — HTML→text, versioned normalization, Item 1/1A/7 extraction, `filing_documents` rows. | ≥90% of the 93 yield all three sections at `high` confidence; every low-confidence extraction is flagged and skipped, never silently used; tests against a trapping table of contents and an inline-XBRL filing. |
-| W3 | **Prompt and call** — `build_prompt`, per-type templates covering PRD §5's sub-points; documents as cached `document` blocks; one claim per text block; `INSUFFICIENT EVIDENCE:` sentinel. | Single-ticker run produces cited blocks per type, or explicit insufficiency; `--dry-run` prints measured token counts and estimated cost without calling the API. |
+| W3 | **Prompt and call** — `build_prompt`, per-type templates covering PRD §5's sub-points; documents as `document` blocks; one claim per text block; `INSUFFICIENT EVIDENCE:` sentinel registered as a stop sequence; `max_tokens` 64,000. | Single-ticker run produces cited blocks per type, or explicit insufficiency; `--dry-run` prints measured token counts and estimated cost without calling the API; `--batch` submits through the Batch API. |
 | W4 | **Resolve and validate** — `moat/ai/citations.py`: index→accession mapping, byte-equality assertion, coverage rule, anchor construction. | Uncited prose fails the stage and persists nothing (§A3); a deliberately mis-mapped document index is caught by the byte check; coverage is computed and stored. |
-| W5 | **Persist and cache** — `citations` + `ai_analysis` rows, `cache_key` per [§A15.7](../PRD_ADDENDUM.md#a157-cache-key-extends-a5), copy-forward under a new `run_id`. | A second pipeline run over unchanged filings makes **zero** API calls and still leaves every downstream stage a complete read. |
+| W5 | **Persist and cache** — `citations` + `ai_analysis` rows, `cache_key` per [§A15.7](../PRD_ADDENDUM.md#a157-cache-key-extends-a5), copy-forward under a new `run_id`. | A second pipeline run over unchanged filings makes **zero** API calls and still leaves every downstream stage a complete read. If the four-call design is kept, a standing test asserts `cache_read_input_tokens > 0` on the second call — a broken prefix is silent otherwise. |
 | W6 | **Recall surface** — `scripts/cite.py`, the sibling of `verify.py`. `cite.py TICKER [--type moat]` prints each claim with its quote, accession, filing date and EDGAR URL; `--filing ACCN` inverts it ("what rests on this filing"); `--reanchor` runs the ladder over stored citations and reports exact/moved/fuzzy/unresolved counts. Dashboard tab renders claims with expandable evidence. | Checking any AI claim takes one command. §A11: *grounding has to be cheaper than guessing, or guessing wins.* |
 | W7 | **Wire the stage** — `ai` stage in `run_pipeline.py`, gated on `passed_screen`, with `--limit` and `--dry-run`. | `--from-stage ai` runs end to end; run status stays `partial` at the first unbuilt stage (valuation). |
 
@@ -154,95 +154,139 @@ weight — they are the ones guarding the failure that looks like a good answer.
 
 ### What the numbers are made of
 
-Four inputs. Only two of them are known.
+Four inputs. Only two are known.
 
 | Input | Value | Basis |
 |---|---|---|
-| Companies × analysis types | 93 × 4 = 372 calls | **Measured** — the screen's output (§A14) |
-| Model price | `claude-opus-5`, $5 / $25 per MTok in/out | **Published** — cache read 0.1×, cache write 1.25× (5-min TTL) or 2× (1-hour) |
-| Document tokens per company (`D`) | assumed **80k** for Items 1 + 1A + 7 | **Guess.** Nothing has measured it. Cost is linear in this number |
-| Output tokens per analysis | assumed 2k | Guess. Minor — 11-24% of the bill depending on model. `cited_text` is not billed as output |
+| Companies × analysis types | 93 × 4 = 372 analyses | **Measured** — the screen's output (§A14) |
+| Model price | `claude-opus-5`, $5 / $25 per MTok | **Published.** Cache read 0.1×, write 1.25× (5-min TTL) / 2× (1-hour). No long-context premium — the 1M window bills at standard rates, so a large document isn't penalised beyond its tokens |
+| Document tokens per company (`D`) | assumed **80k** for Items 1 + 1A + 7 | **Guess.** Nothing has measured it, and cost is linear in it |
+| Output tokens per analysis | assumed 2k | **Guess, and probably low.** Thinking is on by default on Opus 5 and bills as output; 2k counts visible prose only |
 
-Everything below scales with `D`, so W3's `--dry-run` measures it with
-`count_tokens` (free) before a cent is spent. At `D` = 50k rather than 80k,
-every input figure below falls by ~37%.
+Two measurement rules follow. `--dry-run` counts `D` with `count_tokens`
+(free) before the first paid call. And **`D` is not portable across models** —
+tokenizers differ materially (Sonnet 5's is new; the Opus 4.7+ tokenizer runs
+~1–1.35× older ones), so a cross-model comparison has to re-count per model
+rather than scale one number.
 
-**Per company, cached:** `D × (1.25 + 0.1 × 3)` input tokens = **1.55 × D**,
-plus 4 × 2k output. The four calls must run **sequentially** — a cache entry
-is only readable once the first response has begun streaming, so four
-parallel calls all pay full price and write four entries. And the TTL is the
-**5-minute** default, not 1 hour: the four calls for one company run
-back-to-back, and the 1-hour TTL only doubles the write price for a window
-nothing uses.
+### The ladder
 
-### What it costs, and what changes it
+Each rung is a change to the one above it. `D` = 80k, Opus 5 unless stated.
 
-| Configuration | Per company | 93 companies | 20-company shortlist |
-|---|---|---|---|
-| Opus 5, documents re-sent per call | $1.80 | $167 | $36 |
-| **Opus 5, cached (the plan)** | $0.82 | **$76** | $16 |
-| Opus 5, Batch API (50%, uncached) | $0.90 | $84 | $18 |
-| Sonnet 5, cached | $0.33 | **$31** | $7 |
-| Haiku 4.5, cached | $0.16 | **$15** | $3 |
-| Opus 5, cached, steady state (§A5) | — | ~$19/quarter | ~$4/quarter |
+| Configuration | Per company | 93 companies |
+|---|---|---|
+| Four calls, documents re-sent each time | $1.80 | $167 |
+| Four calls, cached, sequential | $0.82 | $76 |
+| **One combined call per company** (no cache needed) | $0.60 | **$56** |
+| **…submitted through the Batch API** | $0.30 | **$28** |
+| …at Sonnet 5 (re-count `D` first) | ~$0.12 | ~$11 |
+| …at Haiku 4.5 (re-count `D` first) | ~$0.06 | ~$6 |
+| Steady state under §A5 — only new 10-Ks | — | ~$7/quarter |
 
-Batch and caching don't compose reliably — cache hits inside a concurrent
-batch are best-effort — so batch is costed against the uncached price. For
-this workload caching beats batching, and the two biggest levers are the
-**model** and `D`.
+The result worth noticing: **combining the calls and batching them lands Opus
+5 at ~$28 — below the price of downgrading to Sonnet on the original
+architecture.** Architecture beat model choice, which is the usual ordering
+and the reason model selection is the last lever here, not the first.
 
-### The optimization that isn't one
+### Free levers — take all of these
 
-The instinct is to send each analysis type only the sections it needs — moat
-gets Item 1, risk gets Item 1A. It costs *more*:
+None of these trade quality, so none need an eval to justify.
 
-| Approach | Input tokens per company |
-|---|---|
-| All three sections to all four types, cached | **1.55 × D** |
-| Half the document per type, no shared prefix | 2.00 × D |
-| Shared Item 1 cached + per-type extras | 1.82 × D |
+1. **Batch API — 50% off every token, and it stacks with caching.** This
+   workload is exactly what batch is for: unattended, scheduled, nobody
+   waiting on a response, single-shot requests with no tool loop. Results
+   arrive within 24 hours (an expiry, not an SLA). The only caveat is that
+   cache hits *inside* a concurrent batch are best-effort — which the
+   combined call makes irrelevant, since it needs no cache hit to be cheap.
+2. **One call per company instead of four.** Sends `D` once (1.00 × D)
+   instead of 1.55 × D cached, and drops the sequencing constraint entirely.
+   Costs: one validation failure loses all four analyses rather than one, and
+   a prompt change to any single analysis type regenerates all four. Measure
+   whether four analyses in one response are as deep as four separate ones
+   before committing — this is the one "free" lever that could quietly cost
+   quality.
+3. **Prompt assembly order.** Caching is a prefix match, so if the four calls
+   are kept: stable system prompt first (its own breakpoint — it is shared
+   across all 372 calls), then the documents, then the per-type instruction
+   **last**. Putting "analyse the moat" before the documents makes the prefix
+   differ per type and yields a 0% hit rate with no error and no warning.
+4. **Specify the output shape.** A worked example and a cap ("at most eight
+   claims") shortens responses directly. `max_tokens` is a backstop, not a
+   knob — set it to 64,000; a truncated response is a wasted call, not a
+   cheap one.
+5. **A stop sequence on the refusal sentinel**, so `INSUFFICIENT EVIDENCE:`
+   ends the response instead of paying for an explanation of it.
+6. **Write the prompts for this model.** Prompt patterns carried over from
+   older models measurably cost more for no accuracy gain — there is nothing
+   to port here, so simply don't import the scaffolding habits.
+7. **§A5's cache, which dwarfs everything above.** Re-running the stage on
+   every scheduled pass would cost ~$28,000/year at the plan's original
+   configuration. Not regenerating is worth more than every other lever
+   combined.
 
-Tailoring the context breaks the shared prefix that made the loop cheap, and
-it hands each analysis less evidence to cite. **Send everything to everyone
-and cache it** — cheaper and better grounded at once.
+### Quality-trading levers — blocked until there's something to measure
 
-### Free, and staying free
+Effort and model selection both trade capability for cost, and the guidance
+for both is *sweep against an eval, one change at a time*. **This project has
+no eval, and cannot cheaply build one**: citation validation checks
+groundedness, not judgement, and §A15.2 leaves entailment unverified. So
+there is no automated signal for "was this moat analysis any good" — only a
+human reading it.
 
-The rest of the project has no line items: SEC EDGAR is free, yfinance is
-free, SQLite and Streamlit are local. This sprint introduces the first cost
-in the tool's history, and most of the sprint still doesn't spend anything:
+That has three consequences worth stating plainly:
 
-- **W1, W2, W6, W7 cost $0** — fetching, sectioning, hashing, the recall CLI
-  and the pipeline wiring involve no model calls at all. That is roughly two
-  thirds of the work, including all of the citation architecture.
-- **Developing W3-W5 against 3 tickers costs ~$2.50** (~$1 on Sonnet). The
-  full run is a separate, deferrable decision made once the stage works.
-- **`count_tokens` is free**, so `D` gets measured before it gets spent.
-- **The screen is already the cost gate**: 93 of 505 companies, an 82%
-  reduction before a single call.
-- **§A5's cache is the real lever.** Re-running all four analyses on every
-  scheduled pass would cost ~$28,000/year at Opus prices. Not regenerating is
-  worth more than every other saving on this page combined.
+- **Effort should still be swept, by hand, on three tickers.** The plan
+  currently runs Opus 5 at its default `high` with adaptive thinking on — the
+  top of the cost curve. On research and knowledge work, which is the shape
+  of this task, published sweeps show nearly flat curves: `medium` matching
+  the default's accuracy at 70–85% of cost, `low` giving up little for a
+  third to a half off. This is the first lever to test and it comes *before*
+  the model.
+- **Haiku 4.5 is riskier here than its price suggests.** It fits high-volume
+  work with checkable outputs; on knowledge questions it has been measured at
+  roughly a tenth of Opus 5's cost per question and well below it on
+  accuracy. Our outputs are not cheaply checkable — which is exactly the
+  condition under which a cheap model's errors go unnoticed.
+- **One escalation pattern does work**, because we have a partial failure
+  signal: run at low effort, and **re-run only the companies whose citations
+  failed validation** at higher effort. It buys groundedness, not judgement —
+  but it is the one automated quality gate this pipeline actually has.
 
-**Lower-cost paths, in order of saving per unit of regret:** shorten the
-shortlist (linear, and nobody reads 93 analyses); drop to Sonnet 5 or Haiku
-4.5 (2.5× / 5× cheaper — and since the API extracts the citations, the
-model's job here is judgement, not quotation accuracy); batch it. **Not
-recommended:** retrieval that sends only top-k chunks — it is the cheapest
-option and it silently caps citation coverage at whatever the retriever
-found, which is the one property this sprint exists to guarantee.
+### What stays free regardless
 
-**Decide it by measurement, not by list price:** run the same 3 tickers
-through Opus 5, Sonnet 5 and Haiku 4.5, and read the four analyses side by
-side. If the cheaper model's moat write-up is as well-evidenced, the $61
-difference on a full pass is not buying anything.
+Nothing else in the project has a line item: EDGAR, yfinance, SQLite and
+Streamlit are all free. And most of this sprint still spends nothing —
+**W1, W2, W6 and W7 make no model calls at all**, which is roughly two thirds
+of the work including the entire citation architecture. Developing W3–W5
+against three tickers costs ~$2.50. The screen is already the cost gate: 93
+companies of 505, an 82% cut before a single call.
+
+### Deliberately not doing
+
+- **Retrieval / top-k chunking.** The cheapest option, and it caps citation
+  coverage at whatever the retriever found — a model can only cite what it
+  was given. The general guidance agrees for this shape: a document that most
+  calls consult in full belongs in the prefix, where it is cheap.
+- **Files API to "avoid re-sending" documents.** It doesn't save tokens —
+  document content bills per request whether inlined or referenced by
+  `file_id`. Only caching and the combined call avoid re-billing.
+- **An orchestrator or advisor split.** Both pay off only where there is bulk
+  to hand off or a wide capability gap inside a tool loop. One company's
+  filings fit one context and there is no loop; the coordinator would cost a
+  plan, a handoff and a merge for nothing.
+- **Per-type context tailoring** (Item 1 for moat, 1A for risk). Under the
+  four-call design it costs *more* — 2.00 × D against 1.55 × D — because it
+  breaks the shared prefix, and it hands each analysis less to cite. Under
+  the combined call the question disappears. Note this is about *varying* the
+  context per type; dropping a section for every type (say Item 7) shrinks
+  `D` for everyone and is a legitimate saving if the sections turn out large.
 
 ## Risks
 
 | Risk | Mitigation |
 |---|---|
 | **Section extraction picks up the table of contents** — yields a 200-char "Risk Factors", the model correctly says "insufficient evidence", and we conclude a company has no risk disclosure. A data bug wearing the costume of a modest answer. | Plausibility bounds, stored confidence, skip-and-flag over proceed. Highest-priority tests. §A15.8 |
-| Token estimate wrong by 2-3x | Cost is linear in `D`, which nothing has measured. `--dry-run` counts tokens for free before the first real call; the model choice is a second, larger lever if it comes in high |
+| Token estimate wrong by 2-3x | Cost is linear in `D`, which nothing has measured, and the output estimate excludes thinking tokens. `--dry-run` counts input for free; read real output off the first three tickers before scaling |
 | Management analysis is weak without the proxy statement | Out of scope, but **labelled** in the output rather than silently thin (§A15.9) |
 | Entailment unverified — a real quote attached to a claim it doesn't support | The stated ceiling of this sprint. Named in §A15.2 so it is not mistaken for coverage |
 | Corpus size on disk | ~1-3MB text per company, ~300MB total, against 2GB of XBRL cache already there |
@@ -268,8 +312,12 @@ difference on a full pass is not buying anything.
 2. **Management analysis without DEF 14A**: ship it thin-and-labelled, or add
    a proxy fetcher to the sprint (~W1.5, one more document type)? Plan
    assumes thin-and-labelled.
-3. **Budget ceiling, and which model.** The plan assumes Opus 5 at ~$76 for
-   the full pass. Sonnet 5 (~$31) and Haiku 4.5 (~$15) are the same pipeline
-   with one string changed — worth settling by running 3 tickers through all
-   three and comparing the write-ups, not by list price. A shorter shortlist
-   cuts any of them linearly.
+3. **Four calls per company, or one?** The combined call is a third off the
+   input and removes the caching machinery, at the risk of four shallower
+   analyses. It is the largest single lever and the only free one that could
+   cost quality — decide it on three tickers, read side by side.
+4. **Budget ceiling.** Taking the free levers alone puts a full pass at ~$28
+   on Opus 5. Effort and model tier could take it under $10, but both trade
+   quality with no eval to catch the loss — so the recommendation is to bank
+   the free levers now and leave the tradeable ones until there is something
+   worth measuring against.

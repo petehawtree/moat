@@ -954,30 +954,62 @@ finding this later:
 - **10-Qs** — quarterly narrative adds little to a moat assessment at the
   cost of 4x the corpus.
 
-### A15.10 Cost mechanics (two implementation decisions, one deferred)
+### A15.10 Cost mechanics
 
-**Decided: the four analyses for one company run sequentially, on the
-5-minute cache TTL.** A cache entry only becomes readable once the first
-response has begun streaming, so four parallel calls over the same documents
-all pay full price *and* write four separate entries — the loop's whole
-saving comes from it being a loop. The 1-hour TTL doubles the write price
-(2× against 1.25×) to keep an entry alive across a gap these calls don't
-have.
+**Decided: the stage runs through the Batch API.** 50% off every token in the
+request — the discount stacks with caching rather than competing with it (an
+earlier draft of this section had that backwards). The workload is the shape
+batch exists for: unattended, scheduled, single-shot, nobody waiting. The
+24-hour window is an expiry rather than an SLA, which is irrelevant to a
+quarterly refresh.
 
-**Decided: every analysis type receives all three sections.** Tailoring the
-context per type — Item 1 for moat, Item 1A for risk — reads like the obvious
-saving and costs *more*, because it breaks the shared prefix that makes three
-of every four document reads a cache hit: 1.55×D shared-and-cached against
-2.00×D tailored. It also hands each analysis less evidence to cite. Cheaper
-and better grounded point the same way here, which is worth recording
-precisely because the intuition points the other way.
+**Decided: if the four-per-company calls are kept, they run sequentially on
+the 5-minute TTL, with the per-type instruction placed after the documents.**
+A cache entry becomes readable only once the first response has begun
+streaming, so four parallel calls pay full price and write four entries. The
+1-hour TTL doubles the write price (2× against 1.25×) to bridge a gap these
+calls do not have. And because caching is a prefix match, an instruction
+placed *before* the documents makes the prefix differ per analysis type and
+produces a 0% hit rate with no error and no warning — so a standing test
+asserts `cache_read_input_tokens > 0` on the second call. A silent cache is
+the documented failure mode here, not a loud one.
 
-**Deferred: the model.** `claude-opus-5` is the plan's default and the
-costing basis. Sonnet 5 and Haiku 4.5 are the same pipeline at 2.5× and 5×
-less, and the citation architecture changes the usual calculus — the API
-extracts the quotes, so the model's remaining job is judgement rather than
-quotation accuracy, and a cheaper model cannot degrade citation fidelity in
-the way it could if it were authoring citations itself. Whether it degrades
-the *judgement* is an empirical question, settled by running the same three
-tickers through each and reading the output, not by list price. Recorded as
-open rather than silently defaulted.
+**Open, and the largest single lever: one call per company instead of four.**
+Sending the documents once costs 1.00×D against 1.55×D cached, removes the
+sequencing constraint, and makes the batch caveat about best-effort cache
+hits irrelevant. Together with batching it puts a full pass at roughly $28 on
+`claude-opus-5` — **cheaper than downgrading to Sonnet 5 on the four-call
+design.** Architecture beats model choice here, which is why model selection
+is recorded below as the last lever rather than the first. What it risks is
+four shallower analyses in one response, and one validation failure losing
+all four; that is a question for three tickers read side by side, not for
+this document to settle.
+
+**Decided: context is not tailored per analysis type.** Under the four-call
+design it costs more (2.00×D against 1.55×D) by breaking the shared prefix,
+and it hands each analysis less evidence to cite. Under a combined call the
+question dissolves. Uniformly dropping a section for every type is a
+different and legitimate lever, if the measured sections turn out large.
+
+**Deferred, and blocked on something this project does not have: effort and
+model tier.** Both trade capability for cost, and both are supposed to be
+swept against an eval. Citation validation checks *groundedness*, not
+judgement — §A15.2 leaves entailment unverified — so there is no automated
+signal for whether a moat analysis is any good, only a human reading it. The
+plan therefore runs Opus 5 at its default `high` effort with adaptive
+thinking, which is the top of the cost curve, and treats the saving as
+unbanked rather than pretending it is unavailable: published sweeps on
+research and knowledge work, the shape of this task, show nearly flat curves.
+Effort is swept by hand on three tickers, before the model is touched.
+
+One escalation pattern does survive the missing eval, because a partial
+failure signal exists: **run at low effort and re-run only the companies
+whose citations fail validation.** It buys groundedness rather than
+judgement, but groundedness is the property this sprint actually enforces.
+
+**Recorded so it is not rediscovered:** there is no long-context premium on
+these models, so a large document costs only its tokens; the Files API does
+not reduce cost, since document content bills per request whether inlined or
+referenced by `file_id`; and `D` is not portable between models, because
+tokenizers differ by up to ~35% — a cross-model comparison re-counts rather
+than scaling one number.

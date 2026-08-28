@@ -953,3 +953,31 @@ finding this later:
   years and is a natural Sprint 3.1.
 - **10-Qs** — quarterly narrative adds little to a moat assessment at the
   cost of 4x the corpus.
+
+### A15.10 Cost mechanics (two implementation decisions, one deferred)
+
+**Decided: the four analyses for one company run sequentially, on the
+5-minute cache TTL.** A cache entry only becomes readable once the first
+response has begun streaming, so four parallel calls over the same documents
+all pay full price *and* write four separate entries — the loop's whole
+saving comes from it being a loop. The 1-hour TTL doubles the write price
+(2× against 1.25×) to keep an entry alive across a gap these calls don't
+have.
+
+**Decided: every analysis type receives all three sections.** Tailoring the
+context per type — Item 1 for moat, Item 1A for risk — reads like the obvious
+saving and costs *more*, because it breaks the shared prefix that makes three
+of every four document reads a cache hit: 1.55×D shared-and-cached against
+2.00×D tailored. It also hands each analysis less evidence to cite. Cheaper
+and better grounded point the same way here, which is worth recording
+precisely because the intuition points the other way.
+
+**Deferred: the model.** `claude-opus-5` is the plan's default and the
+costing basis. Sonnet 5 and Haiku 4.5 are the same pipeline at 2.5× and 5×
+less, and the citation architecture changes the usual calculus — the API
+extracts the quotes, so the model's remaining job is judgement rather than
+quotation accuracy, and a cheaper model cannot degrade citation fidelity in
+the way it could if it were authoring citations itself. Whether it degrades
+the *judgement* is an empirical question, settled by running the same three
+tickers through each and reading the output, not by list price. Recorded as
+open rather than silently defaulted.

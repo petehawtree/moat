@@ -152,33 +152,97 @@ weight — they are the ones guarding the failure that looks like a good answer.
 
 ## Cost
 
-Assumptions, all of which W3's `--dry-run` measures before anything is spent:
-Items 1+1A+7 ≈ **80k tokens** per company (unmeasured — this is the number
-most likely to be wrong), ~2k output tokens per analysis, `claude-opus-5` at
-$5/$25 per MTok. `cited_text` costs no output tokens.
+### What the numbers are made of
 
-| Approach | Per company | 93 companies |
+Four inputs. Only two of them are known.
+
+| Input | Value | Basis |
 |---|---|---|
-| Naive: 4 calls, documents re-sent each time | ~$1.80 | **~$167** |
-| Company-major loop, documents cached (1h TTL) across the 4 types | ~$0.82 | **~$76** |
+| Companies × analysis types | 93 × 4 = 372 calls | **Measured** — the screen's output (§A14) |
+| Model price | `claude-opus-5`, $5 / $25 per MTok in/out | **Published** — cache read 0.1×, cache write 1.25× (5-min TTL) or 2× (1-hour) |
+| Document tokens per company (`D`) | assumed **80k** for Items 1 + 1A + 7 | **Guess.** Nothing has measured it. Cost is linear in this number |
+| Output tokens per analysis | assumed 2k | Guess. Minor — 11-24% of the bill depending on model. `cited_text` is not billed as output |
 
-The ordering *is* the optimization: the same three sections feed all four
-analysis types, so looping company-major with `cache_control` on the document
-blocks turns three of every four document reads into cache hits at a tenth of
-the price. Batch API (50%) is the alternative lever, at the cost of that
-reuse — not both.
+Everything below scales with `D`, so W3's `--dry-run` measures it with
+`count_tokens` (free) before a cent is spent. At `D` = 50k rather than 80k,
+every input figure below falls by ~37%.
 
-And this is a **one-off per filing version**. §A5 means steady state is only
-the ~quarter of the universe that files a new 10-K in a given quarter: on the
-order of $20/quarter, which is what makes the sprint's caching work the
-difference between a tool you run and one you don't.
+**Per company, cached:** `D × (1.25 + 0.1 × 3)` input tokens = **1.55 × D**,
+plus 4 × 2k output. The four calls must run **sequentially** — a cache entry
+is only readable once the first response has begun streaming, so four
+parallel calls all pay full price and write four entries. And the TTL is the
+**5-minute** default, not 1 hour: the four calls for one company run
+back-to-back, and the 1-hour TTL only doubles the write price for a window
+nothing uses.
+
+### What it costs, and what changes it
+
+| Configuration | Per company | 93 companies | 20-company shortlist |
+|---|---|---|---|
+| Opus 5, documents re-sent per call | $1.80 | $167 | $36 |
+| **Opus 5, cached (the plan)** | $0.82 | **$76** | $16 |
+| Opus 5, Batch API (50%, uncached) | $0.90 | $84 | $18 |
+| Sonnet 5, cached | $0.33 | **$31** | $7 |
+| Haiku 4.5, cached | $0.16 | **$15** | $3 |
+| Opus 5, cached, steady state (§A5) | — | ~$19/quarter | ~$4/quarter |
+
+Batch and caching don't compose reliably — cache hits inside a concurrent
+batch are best-effort — so batch is costed against the uncached price. For
+this workload caching beats batching, and the two biggest levers are the
+**model** and `D`.
+
+### The optimization that isn't one
+
+The instinct is to send each analysis type only the sections it needs — moat
+gets Item 1, risk gets Item 1A. It costs *more*:
+
+| Approach | Input tokens per company |
+|---|---|
+| All three sections to all four types, cached | **1.55 × D** |
+| Half the document per type, no shared prefix | 2.00 × D |
+| Shared Item 1 cached + per-type extras | 1.82 × D |
+
+Tailoring the context breaks the shared prefix that made the loop cheap, and
+it hands each analysis less evidence to cite. **Send everything to everyone
+and cache it** — cheaper and better grounded at once.
+
+### Free, and staying free
+
+The rest of the project has no line items: SEC EDGAR is free, yfinance is
+free, SQLite and Streamlit are local. This sprint introduces the first cost
+in the tool's history, and most of the sprint still doesn't spend anything:
+
+- **W1, W2, W6, W7 cost $0** — fetching, sectioning, hashing, the recall CLI
+  and the pipeline wiring involve no model calls at all. That is roughly two
+  thirds of the work, including all of the citation architecture.
+- **Developing W3-W5 against 3 tickers costs ~$2.50** (~$1 on Sonnet). The
+  full run is a separate, deferrable decision made once the stage works.
+- **`count_tokens` is free**, so `D` gets measured before it gets spent.
+- **The screen is already the cost gate**: 93 of 505 companies, an 82%
+  reduction before a single call.
+- **§A5's cache is the real lever.** Re-running all four analyses on every
+  scheduled pass would cost ~$28,000/year at Opus prices. Not regenerating is
+  worth more than every other saving on this page combined.
+
+**Lower-cost paths, in order of saving per unit of regret:** shorten the
+shortlist (linear, and nobody reads 93 analyses); drop to Sonnet 5 or Haiku
+4.5 (2.5× / 5× cheaper — and since the API extracts the citations, the
+model's job here is judgement, not quotation accuracy); batch it. **Not
+recommended:** retrieval that sends only top-k chunks — it is the cheapest
+option and it silently caps citation coverage at whatever the retriever
+found, which is the one property this sprint exists to guarantee.
+
+**Decide it by measurement, not by list price:** run the same 3 tickers
+through Opus 5, Sonnet 5 and Haiku 4.5, and read the four analyses side by
+side. If the cheaper model's moat write-up is as well-evidenced, the $61
+difference on a full pass is not buying anything.
 
 ## Risks
 
 | Risk | Mitigation |
 |---|---|
 | **Section extraction picks up the table of contents** — yields a 200-char "Risk Factors", the model correctly says "insufficient evidence", and we conclude a company has no risk disclosure. A data bug wearing the costume of a modest answer. | Plausibility bounds, stored confidence, skip-and-flag over proceed. Highest-priority tests. §A15.8 |
-| Token estimate wrong by 2-3x | Measure with `count_tokens` in `--dry-run` before the full run; the estimate above is explicitly unmeasured |
+| Token estimate wrong by 2-3x | Cost is linear in `D`, which nothing has measured. `--dry-run` counts tokens for free before the first real call; the model choice is a second, larger lever if it comes in high |
 | Management analysis is weak without the proxy statement | Out of scope, but **labelled** in the output rather than silently thin (§A15.9) |
 | Entailment unverified — a real quote attached to a claim it doesn't support | The stated ceiling of this sprint. Named in §A15.2 so it is not mistaken for coverage |
 | Corpus size on disk | ~1-3MB text per company, ~300MB total, against 2GB of XBRL cache already there |
@@ -204,5 +268,8 @@ difference between a tool you run and one you don't.
 2. **Management analysis without DEF 14A**: ship it thin-and-labelled, or add
    a proxy fetcher to the sprint (~W1.5, one more document type)? Plan
    assumes thin-and-labelled.
-3. **Budget ceiling for the first full pass.** Plan assumes ~$100 is
-   acceptable; if not, the levers are batch mode or a shorter shortlist.
+3. **Budget ceiling, and which model.** The plan assumes Opus 5 at ~$76 for
+   the full pass. Sonnet 5 (~$31) and Haiku 4.5 (~$15) are the same pipeline
+   with one string changed — worth settling by running 3 tickers through all
+   three and comparing the write-ups, not by list price. A shorter shortlist
+   cuts any of them linearly.

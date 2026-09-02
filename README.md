@@ -28,9 +28,14 @@ Gold = the one thing no sprint replaces.
 - Two builds: the document layer the pipeline has never had (`filings` holds
   accessions but no filing *text*), then the analysis on top of it.
 - Citations come from the API rather than the model, and every one is
-  resolved at call time into an anchor — accession + section + document hash
-  + offsets + quote + context — that still means something after the source
-  has been re-fetched, re-chunked or superseded.
+  resolved at call time into an immutable anchor — accession + section +
+  document hash + offsets + quote + context — that still means something
+  after the source has been re-fetched, re-chunked or superseded.
+- Revised after an [external review](docs/writeups/sprint-3-plan-external-review.md)
+  whose every code-level claim reproduced: one combined batched request per
+  company, claims parsed into their own table rather than inferred from API
+  response blocks, and re-anchoring recorded as events against anchors that
+  never change.
 
 **Sprint 2.2 — data integrity. Done.**
 - Acted on a second external review that found the system not

@@ -41,6 +41,12 @@ _ADDED_COLUMNS = {
         "quality_flags": "TEXT",      # A10 ingest validation
         "operating_cash_flow": "REAL",  # A13: FCF is no longer substituted with OCF
     },
+    "filings": {
+        # W1 (Sprint 3): document_url is the EDGAR index page (already present);
+        # primary_document_url is the direct URL of the fetched HTML file.
+        # local_path and content_hash are in the schema already (nullable).
+        "primary_document_url": "TEXT",
+    },
 }
 
 

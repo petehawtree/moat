@@ -184,19 +184,98 @@ CREATE TABLE IF NOT EXISTS filing_documents (
 );
 
 -- ---------------------------------------------------------------------
--- AI qualitative analysis (PRD §5) — citations are mandatory, not optional (A3)
+-- AI qualitative analysis (PRD §5, Sprint 3)
+-- citations TEXT column is retired in favour of analysis_claims + citations tables.
+-- Retirement is guarded: _migrate() drops it only when the table holds zero rows.
+-- New columns (is_current etc.) are additive, applied via _ADDED_COLUMNS.
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ai_analysis (
-    run_id              TEXT NOT NULL REFERENCES pipeline_runs(run_id),
-    ticker              TEXT NOT NULL REFERENCES companies(ticker),
-    analysis_type       TEXT NOT NULL,   -- 'business_quality'|'moat'|'management'|'risk'
-    content             TEXT NOT NULL,
-    citations           TEXT NOT NULL,   -- JSON array of {accession_number, quote}; non-empty required
-    model               TEXT NOT NULL,
-    prompt_version      TEXT NOT NULL,
-    cache_key           TEXT NOT NULL,   -- filing content_hash this was generated from (A5)
-    created_at          TEXT NOT NULL,
+    run_id                  TEXT NOT NULL REFERENCES pipeline_runs(run_id),
+    ticker                  TEXT NOT NULL REFERENCES companies(ticker),
+    analysis_type           TEXT NOT NULL,  -- 'business_quality'|'moat'|'management'|'risk'
+    content                 TEXT NOT NULL,
+    citations               TEXT NOT NULL,  -- RETIRED: kept only for legacy DBs; _migrate drops when empty
+    model                   TEXT NOT NULL,
+    prompt_version          TEXT NOT NULL,
+    cache_key               TEXT NOT NULL,  -- bundle prompt_sha256 (A5, §A15.7)
+    is_current              INTEGER NOT NULL DEFAULT 1,
+    superseded_by_run_id    TEXT,
+    reused_from_run_id      TEXT,           -- non-NULL means no API call was made
+    claim_coverage          REAL,           -- asserted claims cited ÷ asserted claims; must be 1.0
+    created_at              TEXT NOT NULL,
     PRIMARY KEY (run_id, ticker, analysis_type)
+);
+
+-- Claims are parsed by us from the model's response, not inferred from API
+-- text-block boundaries. claim_order is 1-based within each analysis_type.
+CREATE TABLE IF NOT EXISTS analysis_claims (
+    claim_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id           TEXT NOT NULL,
+    ticker           TEXT NOT NULL,
+    analysis_type    TEXT NOT NULL,
+    claim_order      INTEGER NOT NULL,
+    claim_text       TEXT NOT NULL,
+    assertion_status TEXT NOT NULL CHECK (assertion_status IN ('asserted','insufficient_evidence')),
+    FOREIGN KEY (run_id, ticker, analysis_type)
+        REFERENCES ai_analysis(run_id, ticker, analysis_type)
+);
+CREATE INDEX IF NOT EXISTS idx_claims_analysis
+    ON analysis_claims(run_id, ticker, analysis_type);
+
+-- Immutable citation anchors. Nothing is ever UPDATEd — use citation_resolution_events.
+-- Composite FK to filing_documents enforces (accession, section, norm_version) triplet.
+CREATE TABLE IF NOT EXISTS citations (
+    citation_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    claim_id         INTEGER NOT NULL REFERENCES analysis_claims(claim_id),
+    accession_number TEXT NOT NULL,
+    section_id       TEXT NOT NULL,
+    doc_sha256       TEXT NOT NULL,
+    norm_version     TEXT NOT NULL,
+    start_char       INTEGER NOT NULL,
+    end_char         INTEGER NOT NULL,
+    quote            TEXT NOT NULL,
+    quote_sha256     TEXT NOT NULL,
+    prefix           TEXT,
+    suffix           TEXT,
+    created_at       TEXT NOT NULL,
+    CHECK (start_char >= 0 AND end_char > start_char),
+    FOREIGN KEY (accession_number, section_id, norm_version)
+        REFERENCES filing_documents(accession_number, section_id, norm_version)
+);
+CREATE INDEX IF NOT EXISTS idx_citations_filing ON citations(accession_number);
+
+-- Re-anchoring audit trail. Current status = latest event for a citation_id.
+CREATE TABLE IF NOT EXISTS citation_resolution_events (
+    event_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    citation_id         INTEGER NOT NULL REFERENCES citations(citation_id),
+    checked_at          TEXT NOT NULL,
+    result              TEXT NOT NULL CHECK (result IN
+                          ('exact','moved','moved_section','renormalized','fuzzy','unresolved')),
+    score               REAL,
+    resolved_doc_sha256 TEXT,
+    resolved_start      INTEGER,
+    resolved_end        INTEGER
+);
+
+-- Every API request frame, kept whether the attempt succeeded or failed (§A15.11).
+-- custom_id is the idempotency key used for batch retrieval; UNIQUE allows NULL.
+CREATE TABLE IF NOT EXISTS analysis_attempts (
+    attempt_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id           TEXT NOT NULL REFERENCES pipeline_runs(run_id),
+    ticker           TEXT NOT NULL REFERENCES companies(ticker),
+    batch_id         TEXT,
+    custom_id        TEXT UNIQUE,
+    model_id         TEXT NOT NULL,
+    prompt_sha256    TEXT NOT NULL,
+    protocol_version TEXT NOT NULL,
+    document_map     TEXT NOT NULL,   -- JSON: {document_index: filing_document_id}
+    usage_json       TEXT,
+    cost_estimate    REAL,
+    outcome          TEXT NOT NULL CHECK (outcome IN
+                       ('persisted','validation_failed','api_error','refused')),
+    failure_reason   TEXT,
+    raw_response     TEXT,
+    created_at       TEXT NOT NULL
 );
 
 -- ---------------------------------------------------------------------

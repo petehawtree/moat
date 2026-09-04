@@ -47,7 +47,52 @@ _ADDED_COLUMNS = {
         # local_path and content_hash are in the schema already (nullable).
         "primary_document_url": "TEXT",
     },
+    "ai_analysis": {
+        # Sprint 3: new lifecycle and coverage columns.
+        # citations TEXT is retired via a guarded DROP below — see _retire_legacy.
+        "is_current":           "INTEGER NOT NULL DEFAULT 1",
+        "superseded_by_run_id": "TEXT",
+        "reused_from_run_id":   "TEXT",
+        "claim_coverage":       "REAL",
+    },
 }
+
+
+def _retire_legacy(conn) -> list[str]:
+    """One-off guarded column removals. Additive-only rule does not apply here.
+
+    ai_analysis.citations (TEXT NOT NULL) is replaced by analysis_claims +
+    citations tables. Dropped only when ai_analysis holds zero rows — if the
+    table has data the column is load-bearing and the caller must intervene.
+    Raises RuntimeError rather than silently leaving stale structure in place.
+    """
+    retired = []
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(ai_analysis)")}
+    if "citations" not in existing:
+        return retired  # already done
+
+    count = conn.execute("SELECT COUNT(*) FROM ai_analysis").fetchone()[0]
+    if count > 0:
+        raise RuntimeError(
+            f"ai_analysis.citations cannot be retired: table has {count} rows. "
+            "Migrate or clear the table before upgrading."
+        )
+
+    # SQLite doesn't support DROP COLUMN before 3.35.0; use recreate idiom.
+    other_cols = [
+        row["name"] for row in conn.execute("PRAGMA table_info(ai_analysis)")
+        if row["name"] != "citations"
+    ]
+    cols_sql = ", ".join(other_cols)
+    conn.executescript(f"""
+        BEGIN;
+        CREATE TABLE ai_analysis_new AS SELECT {cols_sql} FROM ai_analysis;
+        DROP TABLE ai_analysis;
+        ALTER TABLE ai_analysis_new RENAME TO ai_analysis;
+        COMMIT;
+    """)
+    retired.append("ai_analysis.citations")
+    return retired
 
 
 def _migrate(conn) -> list[str]:
@@ -57,6 +102,9 @@ def _migrate(conn) -> list[str]:
     column added here is NULL on existing rows, which is the honest state —
     those rows were ingested before we retained the information, and we
     can't invent it retroactively (docs/PRD_ADDENDUM.md §A4).
+
+    The one documented exception — ai_analysis.citations — is handled
+    separately by _retire_legacy().
     """
     applied = []
     for table, columns in _ADDED_COLUMNS.items():
@@ -67,6 +115,8 @@ def _migrate(conn) -> list[str]:
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
                 applied.append(f"{table}.{name}")
+    conn.commit()
+    applied += _retire_legacy(conn)
     conn.commit()
     return applied
 

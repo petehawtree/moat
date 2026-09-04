@@ -181,6 +181,29 @@ def _store_document(cik: str, accession: str, primary_doc: str, content: bytes) 
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def _cached_filing(ticker: str, conn) -> tuple[str, str] | None:
+    """Return (accession_number, local_path) if a verified cache entry exists.
+
+    Checks: row has local_path + content_hash, file is present, SHA-256 matches.
+    Returns None on any miss so the caller falls through to a live fetch.
+    """
+    row = conn.execute(
+        "SELECT accession_number, local_path, content_hash FROM filings "
+        "WHERE ticker = ? AND form_type IN ('10-K', '10-K/A') "
+        "  AND local_path IS NOT NULL AND content_hash IS NOT NULL "
+        "ORDER BY period_of_report DESC LIMIT 1",
+        (ticker,),
+    ).fetchone()
+    if not row:
+        return None
+    path = Path(row["local_path"])
+    if not path.exists():
+        return None
+    if hashlib.sha256(path.read_bytes()).hexdigest() != row["content_hash"]:
+        return None
+    return row["accession_number"], row["local_path"]
+
+
 def run_for_ticker(
     ticker: str,
     conn,
@@ -196,21 +219,19 @@ def run_for_ticker(
 
     offline=True: reuse whatever is already on disk; do not contact SEC.
     """
+    # Fast path: verified cache entry → no network calls at all.
+    cached = _cached_filing(ticker, conn)
+    if cached and not offline:
+        return cached[0], None
+
+    if offline:
+        if cached:
+            return cached[0], None
+        return None, f"offline: no cached filing for {ticker}"
+
     cik = lookup_cik(ticker)
     if cik is None:
         return None, f"no CIK found for {ticker}"
-
-    if offline:
-        row = conn.execute(
-            "SELECT accession_number, local_path FROM filings "
-            "WHERE ticker = ? AND form_type IN ('10-K', '10-K/A') "
-            "  AND local_path IS NOT NULL "
-            "ORDER BY period_of_report DESC LIMIT 1",
-            (ticker,),
-        ).fetchone()
-        if row and Path(row["local_path"]).exists():
-            return row["accession_number"], None
-        return None, f"offline: no cached filing for {ticker}"
 
     submissions = fetch_submissions(cik)
     if not submissions:
@@ -225,17 +246,6 @@ def run_for_ticker(
 
     if not primary_doc:
         return None, f"primaryDocument empty for {accession}"
-
-    # Cache hit: file present and hash verified → skip download
-    existing = conn.execute(
-        "SELECT local_path, content_hash FROM filings WHERE accession_number = ?",
-        (accession,),
-    ).fetchone()
-    if existing and existing["local_path"] and existing["content_hash"]:
-        path = Path(existing["local_path"])
-        if path.exists():
-            if hashlib.sha256(path.read_bytes()).hexdigest() == existing["content_hash"]:
-                return accession, None
 
     # Fetch, validate, store
     try:

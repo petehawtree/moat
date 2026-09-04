@@ -183,6 +183,34 @@ def test_store_document_does_not_overwrite(tmp_path, monkeypatch):
     assert dest1.read_bytes() == original_content   # unchanged
 
 
+def test_cached_filing_fast_path(tmp_path, monkeypatch):
+    """_cached_filing returns hit without any network calls when file + hash are valid."""
+    from moat.ingest.filing_fetcher import _cached_filing
+    import sqlite3, hashlib
+
+    monkeypatch.setattr("moat.ingest.filing_fetcher.FILING_DOCS_DIR", tmp_path)
+    content = b"<html><body>" + b"x" * 15_000 + b"</body></html>"
+    path = tmp_path / "doc.htm"
+    path.write_bytes(content)
+    sha = hashlib.sha256(content).hexdigest()
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE filings (accession_number TEXT, ticker TEXT, form_type TEXT, "
+        "period_of_report TEXT, local_path TEXT, content_hash TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO filings VALUES (?,?,?,?,?,?)",
+        ("0001-23-000001", "TST", "10-K", "2023-12-31", str(path), sha),
+    )
+    conn.commit()
+
+    result = _cached_filing("TST", conn)
+    assert result is not None
+    assert result[0] == "0001-23-000001"
+
+
 def test_store_document_sha256_matches(tmp_path, monkeypatch):
     """SHA-256 computed after write must match the original bytes."""
     monkeypatch.setattr("moat.ingest.filing_fetcher.FILING_DOCS_DIR", tmp_path)

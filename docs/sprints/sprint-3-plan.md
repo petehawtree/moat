@@ -462,17 +462,65 @@ companies of 505, an 82% cut before a single call.
 - `sprint-3.md` written with what actually happened, including whatever this
   plan got wrong.
 
-## Decisions to confirm before starting
+## Decisions — confirmed 2026-09-04
 
-1. **Pilot on three varied filers, then run the 90.** Recommended, and now
-   the gate rather than a suggestion: the 90 go only after measured cost and
-   a human read of the 12 pilot analyses.
-2. **Management analysis without DEF 14A**: ship it thin, labelled verbatim
-   *"10-K only; not an assessment of compensation, incentives, governance or
-   track record"*, or add a proxy fetcher (~W1.5)? Plan assumes labelled.
-3. **`10-K/A` amendments** — supersede the original, or analyse both? Needs
-   deciding before W1, since it changes what "latest 10-K" selects.
-4. **Budget.** $10–15 pilot cap, $35 production cap, enforced in code. Effort
-   and model tier could halve the run again but trade quality with nothing
-   automated to catch the loss — bank the architectural savings now, leave
-   the tradeable ones until the pilot gives something to compare against.
+Reviewed before build. The four the plan asked for, plus one the plan did not
+anticipate.
+
+| # | Decision | Resolution |
+|---|---|---|
+| 1 | Pilot three varied filers, then the 90 | **Confirmed.** The 90 go only after measured cost and a human read of the 12 pilot analyses. |
+| 2 | Management analysis without DEF 14A | **Ship it thin, labelled verbatim** *"10-K only; not an assessment of compensation, incentives, governance or track record"*. No proxy fetcher this sprint. |
+| 3 | `10-K/A` amendments | **Prefer the amendment, fall back on extraction failure.** Select the newest `10-K` or `10-K/A` for the latest period; if the chosen document does not yield Items 1/1A/7 above the plausibility floor, fall back to the original `10-K`. Which one was used is recorded on `filing_documents`, not inferred. Most amendments are Part III-only, so the fallback will fire often — the point is that it fires *visibly*. |
+| 4 | Budget | **Confirmed.** $10–15 pilot cap, $35 production cap, both enforced in code from accumulated `usage` fields. |
+| 5 | Retiring `ai_analysis.citations` | **Guarded `DROP COLUMN`.** The column is `TEXT NOT NULL` and `_migrate()` is additive-only, so retirement is a one-off migration that drops it *only* when `ai_analysis` holds zero rows and raises loudly otherwise. The additive-only rule stays intact for every table that holds data; this is the documented exception, not a precedent. |
+
+## Three API facts checked before build
+
+Checked against current documentation, not recalled. Each one changes
+something in the work breakdown.
+
+1. **Citations are incompatible with structured outputs.** A request that sets
+   `citations: {"enabled": true}` on a document block *and* `output_config.format`
+   returns a 400. So W3's constrained claim protocol **cannot** be
+   schema-enforced — it is prompt-instructed plain text, parsed by a strict
+   parser of ours, and a malformed response is a `validation_failed` attempt
+   row. The plan assumed this without saying the alternative was closed. It is
+   closed, which raises the weight of the W4 parser tests.
+
+2. **`fallbacks` is rejected on the Batches API.** The refusal check
+   (`stop_reason == "refusal"` before reading content) stands and is necessary,
+   but there is no server-side rescue inside a batch: a refusal is terminal for
+   that request, recorded as `analysis_attempts.outcome = 'refused'` with an
+   explicit resubmit decision. Nobody should reach for the fallback parameter
+   and collect a 400 across 93 requests.
+
+3. **Haiku 4.5's context window is 200K, not 1M.** If measured `D` lands at
+   150k+ for a large filer — plausible for a bank's Items 1 + 1A + 7 — Haiku is
+   not merely a quality downgrade, it does not fit. The cheapest rung of the
+   cost ladder is shakier than its price implies.
+
+Everything else in the cost section re-verified: Opus 5 $5/$25, Sonnet 5
+$2/$10, Haiku 4.5 $1/$5 per MTok; cache read 0.1×, write 1.25× (5-min) / 2×
+(1-hour); batch 50% off with unordered results keyed by `custom_id`; Opus 5
+runs adaptive thinking by default and bills it as output, with `budget_tokens`
+rejected outright. Every row of the ladder recomputes to the stated figure.
+
+## Corrections folded into the work breakdown
+
+- **`citations` gets a composite foreign key.** It stores
+  `(accession_number, section_id, doc_sha256, norm_version)` but the DDL above
+  constrains only the accession. `filing_documents` already carries
+  `UNIQUE (accession_number, section_id, norm_version)`, so a real composite FK
+  is available — an anchor that is referentially sound rather than sound by
+  convention.
+- **`analysis_attempts.custom_id` gets `UNIQUE`.** W5 promises idempotent batch
+  retrieval keyed on it; nothing in the DDL enforced that.
+- **The stage is `ai_analysis`, not `ai`.** `scripts/run_pipeline.py` already
+  names it; W7 invented a second name.
+- **`requirements.txt` pins `anthropic>=0.34`,** which now spans the 1.x major
+  release (httpx2, awaited async raw-response, removed parameters). Pin
+  `>=1,<2` before anyone installs.
+- **The synchronous pilot path must stream.** `max_tokens=64000` on a
+  non-streaming call hits the SDK's HTTP timeout; use `.stream()` with
+  `.get_final_message()`. Batch is unaffected.

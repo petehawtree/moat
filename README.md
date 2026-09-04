@@ -22,6 +22,21 @@ Gold = the one thing no sprint replaces.
 
 ## Status
 
+**Sprint 3 — AI qualitative analysis, citation-enforced. Planned.**
+- Plan: [sprint-3-plan.md](docs/sprints/sprint-3-plan.md). Citation
+  architecture: [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A15.
+- Two builds: the document layer the pipeline has never had (`filings` holds
+  accessions but no filing *text*), then the analysis on top of it.
+- Citations come from the API rather than the model, and every one is
+  resolved at call time into an immutable anchor — accession + section +
+  document hash + offsets + quote + context — that still means something
+  after the source has been re-fetched, re-chunked or superseded.
+- Revised after an [external review](docs/writeups/sprint-3-plan-external-review.md)
+  whose every code-level claim reproduced: one combined batched request per
+  company, claims parsed into their own table rather than inferred from API
+  response blocks, and re-anchoring recorded as events against anchors that
+  never change.
+
 **Sprint 2.2 — data integrity. Done.**
 - Acted on a second external review that found the system not
   investment-ready. Fixed: operating cash flow being scored as free cash
@@ -70,7 +85,7 @@ Gold = the one thing no sprint replaces.
 Run `python scripts/run_pipeline.py --init-db` (add `--init-only` to just create the schema) then
 `python scripts/run_pipeline.py --from-stage screen` to reproduce.
 
-Sprints 3-6 (ai/valuation/committee/monitor) are still documented stubs —
+Sprints 4-6 (valuation/committee/monitor) are still documented stubs —
 see the sprint table below.
 
 ## Scope for now
@@ -95,7 +110,7 @@ see the sprint table below.
 | 2 | Sector-relative quant screen + ranked dashboard — **done** (one metric defective, see 2.1) | [sprint-2.md](docs/sprints/sprint-2.md) |
 | 2.1 | Ingest data integrity + filing provenance — **done** | [sprint-2-1.md](docs/sprints/sprint-2-1.md) |
 | 2.2 | Data integrity: FCF, REIT revenue, FAIL vs UNAVAILABLE — **done** | [sprint-2-2.md](docs/sprints/sprint-2-2.md) |
-| 3 | AI business/moat/management/risk analysis (citation-enforced) | |
+| 3 | AI business/moat/management/risk analysis (citation-enforced) — **planned** | [sprint-3-plan.md](docs/sprints/sprint-3-plan.md) |
 | 4 | Owner Earnings DCF + supporting valuation methods | |
 | 5 | Investment Committee + one-page Investment Brief | |
 | 6 | Watchlist monitoring | |

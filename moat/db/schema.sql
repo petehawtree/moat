@@ -163,6 +163,27 @@ CREATE TABLE IF NOT EXISTS quality_scores (
 );
 
 -- ---------------------------------------------------------------------
+-- Filing documents: normalized and sectioned text (W2 output, Sprint 3)
+-- One row per (accession, section, norm_version).
+-- section_confidence is 'high'|'low' only — failed/IBR sections do not get rows.
+-- extraction_trace is a JSON receipt of every candidate and criterion (A11).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS filing_documents (
+    filing_document_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    accession_number    TEXT NOT NULL REFERENCES filings(accession_number),
+    section_id          TEXT NOT NULL CHECK (section_id IN ('item_1','item_1a','item_7','full')),
+    norm_version        TEXT NOT NULL,
+    doc_sha256          TEXT NOT NULL,     -- SHA-256 of the normalized text
+    char_length         INTEGER NOT NULL,
+    extraction_method   TEXT NOT NULL,     -- 'sections'|'full_fallback'|'sections_partial'
+    section_confidence  TEXT NOT NULL CHECK (section_confidence IN ('high','low')),
+    local_path          TEXT NOT NULL,     -- immutable file path; never overwritten in place
+    extraction_trace    TEXT,              -- JSON; NULL only for section_id = 'full'
+    created_at          TEXT NOT NULL,
+    UNIQUE (accession_number, section_id, norm_version)
+);
+
+-- ---------------------------------------------------------------------
 -- AI qualitative analysis (PRD §5) — citations are mandatory, not optional (A3)
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ai_analysis (

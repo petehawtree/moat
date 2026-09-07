@@ -194,12 +194,25 @@ class TestFindCachedRun:
         )
         assert find_cached_run("TST", "bk", conn) == "run1"
 
-    def test_ignores_is_current_0(self):
+    def test_superseded_source_is_still_returned(self):
+        # After a cache-forward write the original source has is_current=0 but
+        # reused_from_run_id IS NULL — it's still the authority for claims.
         conn = _make_db(None)
         conn.execute(
             "INSERT INTO ai_analysis (run_id, ticker, analysis_type, content, model, "
             "prompt_version, cache_key, is_current, claim_coverage, created_at) "
             "VALUES ('run1','TST','business_quality','x','m','v1','bk',0,1.0,'2026-01-01')"
+        )
+        assert find_cached_run("TST", "bk", conn) == "run1"
+
+    def test_copy_forward_row_not_returned_as_source(self):
+        # A cache-forward copy has reused_from_run_id set — should not be returned
+        # as the cache source (the caller would then try to copy it again).
+        conn = _make_db(None)
+        conn.execute(
+            "INSERT INTO ai_analysis (run_id, ticker, analysis_type, content, model, "
+            "prompt_version, cache_key, is_current, reused_from_run_id, claim_coverage, created_at) "
+            "VALUES ('run2','TST','business_quality','x','m','v1','bk',1,'run1',1.0,'2026-01-02')"
         )
         assert find_cached_run("TST", "bk", conn) is None
 

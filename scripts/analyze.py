@@ -33,7 +33,7 @@ from moat.config import ANTHROPIC_API_KEY  # loads .env as a side-effect
 from moat.db.connection import get_connection, init_db
 from moat.analysis.caller import _prompt_sha256, call_sync, submit_batch
 from moat.analysis.parser import parse_and_validate
-from moat.analysis.persist import compute_bundle_key, find_cached_run, persist_result
+from moat.analysis.persist import compute_bundle_key, find_cached_run, persist_result, _supersede_for_bundle
 from moat.analysis.pricing import DEFAULT_MODEL
 from moat.analysis.prompt import ANALYSIS_TYPES, PROTOCOL_VERSION, SYSTEM_PROMPT, build_request
 from moat.ingest.section_extractor import NORM_VERSION
@@ -145,6 +145,7 @@ def main() -> None:
                              PROTOCOL_VERSION, bundle_key, reused_from,
                              orig["claim_coverage"], now),
                         )
+                _supersede_for_bundle(conn, ticker, bundle_key, run_id)
                 conn.commit()
                 print(json.dumps({
                     "ticker": ticker, "run_id": run_id,

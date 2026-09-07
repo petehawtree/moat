@@ -71,14 +71,29 @@ def _doc_sha256s_for_result(result: CallResult, conn) -> list[str]:
 
 
 def find_cached_run(ticker: str, bundle_key: str, conn) -> str | None:
-    """Return the run_id of an existing current analysis with this bundle key, or None."""
+    """Return the source run_id for this bundle key, or None if not cached.
+
+    Returns the original (non-copy-forward) run — the one with claims and
+    citations attached. After a cache-forward write, the original has
+    reused_from_run_id IS NULL and is_current=0 (superseded), but is still
+    the authority for claims.
+    """
     row = conn.execute(
         "SELECT run_id FROM ai_analysis "
-        "WHERE ticker = ? AND cache_key = ? AND is_current = 1 "
+        "WHERE ticker = ? AND cache_key = ? AND reused_from_run_id IS NULL "
         "LIMIT 1",
         (ticker, bundle_key),
     ).fetchone()
     return row["run_id"] if row else None
+
+
+def _supersede_for_bundle(conn, ticker: str, bundle_key: str, new_run_id: str) -> None:
+    """Set is_current=0 on all prior current analyses for this ticker+bundle."""
+    conn.execute(
+        "UPDATE ai_analysis SET is_current = 0, superseded_by_run_id = ? "
+        "WHERE ticker = ? AND cache_key = ? AND run_id != ? AND is_current = 1",
+        (new_run_id, ticker, bundle_key, new_run_id),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +169,8 @@ def persist_result(
                          result.protocol_version, bundle_key,
                          reused_from_run_id, orig["claim_coverage"], now),
                     )
+
+            _supersede_for_bundle(conn, result.ticker, bundle_key, run_id)
 
             attempt_id = _write_attempt(
                 conn, run_id, result, bundle_key, now,
@@ -374,6 +391,7 @@ def run_analysis(
                      PROTOCOL_VERSION, bundle_key,
                      reused_from, orig["claim_coverage"], now),
                 )
+        _supersede_for_bundle(conn, ticker, bundle_key, run_id)
         conn.commit()
         return {"ticker": ticker, "outcome": "cache_hit", "reused_from_run_id": reused_from}
 

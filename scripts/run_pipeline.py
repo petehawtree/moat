@@ -145,10 +145,18 @@ def run_quality_stage(conn, run_id: str) -> None:
 
 
 def _latest_quality_run_id(conn) -> str | None:
-    """Return the run_id of the most recent quality_scores run that has passed tickers."""
+    """Return the run_id of the most recent complete/partial quality run with passed tickers."""
     row = conn.execute(
-        "SELECT run_id FROM quality_scores WHERE passed_screen = 1 "
-        "GROUP BY run_id ORDER BY run_id DESC LIMIT 1"
+        """
+        SELECT qs.run_id
+        FROM quality_scores qs
+        JOIN pipeline_runs pr ON pr.run_id = qs.run_id
+        WHERE qs.passed_screen = 1
+          AND pr.status IN ('complete', 'partial')
+        GROUP BY qs.run_id
+        ORDER BY qs.run_id DESC
+        LIMIT 1
+        """
     ).fetchone()
     return row["run_id"] if row else None
 

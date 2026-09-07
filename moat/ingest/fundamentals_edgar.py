@@ -134,7 +134,7 @@ def _facts_cache_path(cik: str) -> Path:
     return FILINGS_CACHE_DIR / f"CIK{cik}.json"
 
 
-def fetch_company_facts(cik: str, use_cache: bool = True, max_age_days: int | None = None) -> dict:
+def fetch_company_facts(cik: str, use_cache: bool = True, max_age_days: int | None = FUNDAMENTALS_CACHE_MAX_AGE_DAYS) -> dict:
     """Fetch the full XBRL company facts payload for one company. {} if none filed.
 
     Caches the raw payload under FILINGS_CACHE_DIR (docs/PRD_ADDENDUM.md §A11

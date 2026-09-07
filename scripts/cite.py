@@ -296,10 +296,14 @@ def show_ticker(ticker: str, conn, all_runs: bool = False) -> None:
 
     for run_row in runs:
         run_id = run_row["run_id"]
-        is_hist = conn.execute(
-            "SELECT MAX(is_current) FROM ai_analysis WHERE run_id = ? AND ticker = ?",
+        meta = conn.execute(
+            "SELECT MAX(is_current) as is_current, reused_from_run_id "
+            "FROM ai_analysis WHERE run_id = ? AND ticker = ?",
             (run_id, ticker),
-        ).fetchone()[0] == 0
+        ).fetchone()
+        is_hist = meta["is_current"] == 0
+        # Cache-forward runs store claims on the source run
+        claims_run_id = meta["reused_from_run_id"] or run_id
 
         _print_run_header(run_id, ticker, conn)
 
@@ -311,7 +315,7 @@ def show_ticker(ticker: str, conn, all_runs: bool = False) -> None:
                 WHERE ac.run_id = ? AND ac.ticker = ? AND ac.analysis_type = ?
                 ORDER BY ac.claim_order
                 """,
-                (run_id, ticker, at),
+                (claims_run_id, ticker, at),
             ).fetchall()
             if not claims:
                 continue

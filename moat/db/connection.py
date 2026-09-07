@@ -79,14 +79,29 @@ def _retire_legacy(conn) -> list[str]:
         )
 
     # SQLite doesn't support DROP COLUMN before 3.35.0; use recreate idiom.
+    # Must use explicit CREATE TABLE (not CREATE TABLE AS SELECT) to preserve
+    # NOT NULL constraints and allow a UNIQUE key that analysis_claims FKs to.
     other_cols = [
-        row["name"] for row in conn.execute("PRAGMA table_info(ai_analysis)")
+        row for row in conn.execute("PRAGMA table_info(ai_analysis)")
         if row["name"] != "citations"
     ]
-    cols_sql = ", ".join(other_cols)
+    col_defs = []
+    for c in other_cols:
+        decl = f'"{c["name"]}" {c["type"]}'
+        if c["notnull"]:
+            decl += " NOT NULL"
+        if c["dflt_value"] is not None:
+            decl += f" DEFAULT {c['dflt_value']}"
+        col_defs.append(decl)
+    col_defs_sql = ",\n    ".join(col_defs)
+    cols_sql = ", ".join(f'"{c["name"]}"' for c in other_cols)
     conn.executescript(f"""
         BEGIN;
-        CREATE TABLE ai_analysis_new AS SELECT {cols_sql} FROM ai_analysis;
+        CREATE TABLE ai_analysis_new (
+            {col_defs_sql},
+            UNIQUE (run_id, ticker, analysis_type)
+        );
+        INSERT INTO ai_analysis_new ({cols_sql}) SELECT {cols_sql} FROM ai_analysis;
         DROP TABLE ai_analysis;
         ALTER TABLE ai_analysis_new RENAME TO ai_analysis;
         COMMIT;
@@ -117,6 +132,22 @@ def _migrate(conn) -> list[str]:
                 applied.append(f"{table}.{name}")
     conn.commit()
     applied += _retire_legacy(conn)
+
+    # Ensure ai_analysis has the UNIQUE constraint that analysis_claims FKs to.
+    # _retire_legacy() may have already run (citations already dropped) so this
+    # is a standalone step rather than part of that migration.
+    existing_indexes = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='ai_analysis'"
+        )
+    }
+    if "idx_ai_analysis_pk" not in existing_indexes:
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_ai_analysis_pk "
+            "ON ai_analysis(run_id, ticker, analysis_type)"
+        )
+        applied.append("ai_analysis: UNIQUE INDEX on (run_id, ticker, analysis_type)")
+
     conn.commit()
     return applied
 

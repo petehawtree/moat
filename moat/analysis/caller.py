@@ -119,7 +119,7 @@ def prepare_sections(accession: str, conn) -> dict[str, tuple[str, int]]:
             sha = hashlib.sha256(text.encode()).hexdigest()
             local_path = _save_section(accession, section_id, text)
             trace_json = json.dumps(
-                extraction.trace.get(section_id), ensure_ascii=False
+                extraction.trace.get("sections", {}).get(section_id), ensure_ascii=False
             ) if extraction.trace else None
             conn.execute(
                 """

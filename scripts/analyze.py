@@ -23,16 +23,19 @@ import argparse
 import json
 import sys
 import uuid
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import anthropic
 
 from moat.config import ANTHROPIC_API_KEY  # loads .env as a side-effect
 from moat.db.connection import get_connection, init_db
-from moat.analysis.caller import call_sync, submit_batch
+from moat.analysis.caller import _prompt_sha256, call_sync, submit_batch
 from moat.analysis.parser import parse_and_validate
-from moat.analysis.persist import find_cached_run, persist_result, compute_bundle_key, _doc_sha256s_for_result
+from moat.analysis.persist import compute_bundle_key, find_cached_run, persist_result
 from moat.analysis.pricing import DEFAULT_MODEL
-from moat.analysis.prompt import PROTOCOL_VERSION, SYSTEM_PROMPT, build_request
+from moat.analysis.prompt import ANALYSIS_TYPES, PROTOCOL_VERSION, SYSTEM_PROMPT, build_request
 from moat.ingest.section_extractor import NORM_VERSION
 
 
@@ -74,46 +77,99 @@ def main() -> None:
         return
 
     for ticker in args.tickers:
+        ticker = ticker.upper()
         try:
-            result = call_sync(
-                client, ticker, conn, model_id=args.model, dry_run=args.dry_run
+            if args.dry_run:
+                call_sync(client, ticker, conn, model_id=args.model, dry_run=True)
+                continue
+
+            # Build the prompt and compute the bundle key BEFORE any API call.
+            # This lets us return immediately on a cache hit with zero spend.
+            from moat.analysis.caller import prepare_sections
+            sections = prepare_sections(
+                conn.execute(
+                    "SELECT accession_number FROM filings "
+                    "WHERE ticker = ? AND local_path IS NOT NULL "
+                    "ORDER BY period_of_report DESC LIMIT 1",
+                    (ticker,),
+                ).fetchone()["accession_number"],
+                conn,
             )
-        except (ValueError, RuntimeError) as exc:
+            section_texts  = {k: v[0] for k, v in sections.items()}
+            filing_doc_ids = {k: v[1] for k, v in sections.items()}
+            content, document_map = build_request(
+                section_texts, ticker,
+                conn.execute(
+                    "SELECT period_of_report FROM filings "
+                    "WHERE ticker = ? AND local_path IS NOT NULL "
+                    "ORDER BY period_of_report DESC LIMIT 1",
+                    (ticker,),
+                ).fetchone()["period_of_report"] or "unknown",
+                filing_doc_ids,
+            )
+            prompt_sha = _prompt_sha256(SYSTEM_PROMPT, content)
+            doc_sha256s = []
+            for fdi in filing_doc_ids.values():
+                row = conn.execute(
+                    "SELECT doc_sha256 FROM filing_documents WHERE filing_document_id = ?",
+                    (fdi,),
+                ).fetchone()
+                if row:
+                    doc_sha256s.append(row["doc_sha256"])
+            bundle_key = compute_bundle_key(
+                doc_sha256s, prompt_sha, args.model, NORM_VERSION, PROTOCOL_VERSION,
+            )
+            reused_from = find_cached_run(ticker, bundle_key, conn)
+
+            if reused_from:
+                from datetime import datetime, timezone
+                from moat.analysis.persist import _ensure_pipeline_run
+                _ensure_pipeline_run(run_id, conn)
+                now = datetime.now(timezone.utc).isoformat()
+                for at in ANALYSIS_TYPES:
+                    orig = conn.execute(
+                        "SELECT content, claim_coverage FROM ai_analysis "
+                        "WHERE run_id = ? AND ticker = ? AND analysis_type = ?",
+                        (reused_from, ticker, at),
+                    ).fetchone()
+                    if orig:
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO ai_analysis
+                              (run_id, ticker, analysis_type, content, model,
+                               prompt_version, cache_key, is_current,
+                               reused_from_run_id, claim_coverage, created_at)
+                            VALUES (?,?,?,?,?,?,?,1,?,?,?)
+                            """,
+                            (run_id, ticker, at, orig["content"], args.model,
+                             PROTOCOL_VERSION, bundle_key, reused_from,
+                             orig["claim_coverage"], now),
+                        )
+                conn.commit()
+                print(json.dumps({
+                    "ticker": ticker, "run_id": run_id,
+                    "outcome": "cache_hit", "reused_from_run_id": reused_from,
+                }, indent=2))
+                continue
+
+            result = call_sync(client, ticker, conn, model_id=args.model, dry_run=False)
+
+        except (ValueError, RuntimeError, AttributeError) as exc:
             print(f"ERROR {ticker}: {exc}", file=sys.stderr)
             continue
 
-        if args.dry_run:
-            continue  # report already printed by call_sync
-
-        # Cache check: skip API persist if bundle already stored
-        doc_sha256s = _doc_sha256s_for_result(result, conn)
-        bundle_key = compute_bundle_key(
-            doc_sha256s,
-            result.prompt_sha256,
-            result.model_id,
-            NORM_VERSION,
-            result.protocol_version,
-        )
-        reused_from = find_cached_run(ticker, bundle_key, conn)
-
         parsed = parse_and_validate(result, conn)
-        attempt_id = persist_result(
-            result, parsed, run_id, conn,
-            reused_from_run_id=reused_from,
-        )
+        attempt_id = persist_result(result, parsed, run_id, conn)
 
         out = {
-            "ticker":           ticker,
-            "run_id":           run_id,
-            "attempt_id":       attempt_id,
-            "outcome":          "cache_hit" if reused_from else (
-                                    "persisted" if parsed.is_valid else "validation_failed"
-                                ),
-            "reused_from_run_id": reused_from,
-            "claim_coverage":   parsed.claim_coverage,
+            "ticker":            ticker,
+            "run_id":            run_id,
+            "attempt_id":        attempt_id,
+            "outcome":           "persisted" if parsed.is_valid else "validation_failed",
+            "claim_coverage":    parsed.claim_coverage,
             "validation_errors": parsed.validation_errors,
-            "cost_estimate":    result.cost_estimate,
-            "usage":            result.usage,
+            "cost_estimate":     result.cost_estimate,
+            "usage":             result.usage,
         }
         print(json.dumps(out, indent=2))
 

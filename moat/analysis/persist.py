@@ -301,6 +301,41 @@ def _write_attempt(
 
 
 # ---------------------------------------------------------------------------
+# Cache-hit audit receipt
+# ---------------------------------------------------------------------------
+
+def _write_cache_attempt(
+    conn,
+    run_id: str,
+    ticker: str,
+    model_id: str,
+    prompt_sha256: str,
+    protocol_version: str,
+    reused_from_run_id: str,
+    now: str,
+) -> int:
+    """Write the analysis_attempts audit row for a cache-hit (no API call made)."""
+    conn.execute(
+        """
+        INSERT INTO analysis_attempts
+          (run_id, ticker, batch_id, custom_id, model_id, prompt_sha256,
+           protocol_version, document_map, usage_json, cost_estimate,
+           outcome, failure_reason, raw_response, created_at)
+        VALUES (?,?,NULL,NULL,?,?,?,?,?,?,?,?,NULL,?)
+        """,
+        (run_id, ticker, model_id, prompt_sha256,
+         protocol_version,
+         json.dumps({}),
+         json.dumps({}),
+         0.0,
+         "persisted",
+         f"cache_hit:reused_from={reused_from_run_id}",
+         now),
+    )
+    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
 # High-level orchestrator: check cache → call → parse → persist
 # ---------------------------------------------------------------------------
 
@@ -334,7 +369,10 @@ def run_analysis(
     accession = filing["accession_number"]
     period    = filing["period_of_report"] or "unknown"
 
-    sections = prepare_sections(accession, conn)
+    try:
+        sections = prepare_sections(accession, conn)
+    except ValueError as exc:
+        return {"ticker": ticker, "outcome": "document_extraction_failed", "reason": str(exc)}
     section_texts  = {k: v[0] for k, v in sections.items()}
     filing_doc_ids = {k: v[1] for k, v in sections.items()}
 
@@ -392,8 +430,15 @@ def run_analysis(
                      reused_from, orig["claim_coverage"], now),
                 )
         _supersede_for_bundle(conn, ticker, bundle_key, run_id)
+        attempt_id = _write_cache_attempt(
+            conn, run_id, ticker, model_id, prompt_sha,
+            PROTOCOL_VERSION, reused_from, now,
+        )
         conn.commit()
-        return {"ticker": ticker, "outcome": "cache_hit", "reused_from_run_id": reused_from}
+        return {
+            "ticker": ticker, "outcome": "cache_hit",
+            "reused_from_run_id": reused_from, "attempt_id": attempt_id,
+        }
 
     # Fresh call
     result = call_sync(client, ticker, conn, model_id=model_id, dry_run=False)

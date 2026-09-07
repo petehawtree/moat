@@ -27,6 +27,11 @@ from moat.analysis.pricing import DEFAULT_MODEL, estimate_cost, format_dry_run_r
 
 SECTIONS_DIR = DATA_DIR / "sections"
 
+# Minimum normalized character count for a full-fallback document to be usable.
+# Below this the filing is likely an amendment stub, a redirect, or a corrupt
+# download — not a 10-K with meaningful Item 1/1A/7 text.
+FULL_FALLBACK_MIN_CHARS = 20_000
+
 
 # ---------------------------------------------------------------------------
 # Return type
@@ -140,6 +145,12 @@ def prepare_sections(accession: str, conn) -> dict[str, tuple[str, int]]:
             result[section_id] = (text, row_id)
 
     if method in ("full_fallback", "sections_partial") and "full" not in result:
+        if len(norm_text) < FULL_FALLBACK_MIN_CHARS:
+            raise ValueError(
+                f"full_fallback for {accession} is implausibly short "
+                f"({len(norm_text):,} chars < {FULL_FALLBACK_MIN_CHARS:,} floor) — "
+                f"likely an amendment stub or corrupt download"
+            )
         sha = hashlib.sha256(norm_text.encode()).hexdigest()
         local_path = _save_section(accession, "full", norm_text)
         conn.execute(

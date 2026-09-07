@@ -524,3 +524,56 @@ rejected outright. Every row of the ladder recomputes to the stated figure.
 - **The synchronous pilot path must stream.** `max_tokens=64000` on a
   non-streaming call hits the SDK's HTTP timeout; use `.stream()` with
   `.get_final_message()`. Batch is unaffected.
+
+## Deferred to Sprint 4
+
+Items surfaced by judge rounds 2–3 that are genuine gaps but outside the
+Sprint 3 definition of done.
+
+### [HIGH] Normal runs silently reuse stale filings
+
+`moat/ingest/filing_fetcher.py` returns the cached filing immediately when a
+valid local file exists, even on a non-offline run. A new 10-K or 10-K/A filed
+after the initial fetch is invisible — the document hash and bundle key are
+unchanged, so the analysis appears current while citing an outdated filing.
+
+**Sprint 4 fix:** on non-offline runs, fetch submissions metadata from SEC,
+select the latest accepted 10-K/10-K/A for the period, and short-circuit the
+download only when the cached accession matches. The offline shortcut remains
+unchanged.
+
+### [HIGH] Batch workflow end-to-end path
+
+`retrieve_batch()` is defined (`moat/analysis/caller.py`) but never called.
+`--batch` in `analyze.py` submits and prints transient metadata; no path
+persists results, retries failures by `custom_id`, or wires retrieval into the
+pipeline. The synchronous pilot path is the correct Sprint 3 approach; batch
+is the production path for the full 93-company run.
+
+**Sprint 4 fix:** persist batch request frames before submission, add a
+`retrieve_and_persist_batch()` entry point keyed by `custom_id`, atomic persist
+or failure per item, pipeline wiring in `run_ai_analysis_stage()`.
+
+### [MEDIUM] Citation resolution ladder — only exact rung
+
+`scripts/cite.py --reanchor` implements only byte-exact resolution. The three
+remaining rungs from §A15.5 — moved (same quote, different offsets), fuzzy
+(minor normalization change), renormalized (norm_version bump) — are marked
+`# Sprint 4 scope` in the code.
+
+**Sprint 4 fix:** implement all four rungs in order; emit `citation_resolution_events`
+rows with the rung used; set `stale_analysis` flag on any analysis whose
+citations fall back to fuzzy or below.
+
+### [MEDIUM] Test coverage gaps
+
+No test covers `run_ai_analysis_stage`, `retrieve_batch`, `_reanchor`, normal
+cached-filing refresh, amendment fallback, batch round-trips, or a real
+citation-enabled API response shape. The existing suite detects formula and
+parser regressions but cannot catch operational failures in the Sprint 3
+workflows.
+
+**Sprint 4 fix:** real anonymized SEC fixture tests for section extraction,
+deterministic formula fixtures with independent expected values,
+offline-refresh tests, amendment-fallback tests, and a credential-gated
+integration test for the API citation response shape.

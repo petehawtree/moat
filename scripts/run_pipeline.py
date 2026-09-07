@@ -8,8 +8,9 @@ Stage order mirrors PRD §3:
 Sprint 1: 'universe' and 'ingest' are real (US-only, docs/PRD_ADDENDUM.md
 §A1). Sprint 2: 'screen' and 'quality' are real (sector-relative screen,
 §A2/§A9); Sprint 2.1 adds ingest provenance + share-basis detection
-(§A10/§A11). 'ai_analysis' onward still raise NotImplementedError until
-Sprint 3+.
+(§A10/§A11). Sprint 3: 'ai_analysis' is real (citation-enforced qualitative
+analysis, §A15). 'valuation' onward still raise NotImplementedError until
+Sprint 4+.
 """
 from __future__ import annotations
 
@@ -143,12 +144,140 @@ def run_quality_stage(conn, run_id: str) -> None:
     )
 
 
+def _latest_quality_run_id(conn) -> str | None:
+    """Return the run_id of the most recent quality_scores run that has passed tickers."""
+    row = conn.execute(
+        "SELECT run_id FROM quality_scores WHERE passed_screen = 1 "
+        "GROUP BY run_id ORDER BY run_id DESC LIMIT 1"
+    ).fetchone()
+    return row["run_id"] if row else None
+
+
+def run_ai_analysis_stage(
+    conn,
+    run_id: str,
+    offline: bool = False,
+    model_id: str | None = None,
+    dry_run: bool = False,
+    cost_cap_usd: float | None = None,
+) -> None:
+    """W1→W3→W4→W5 for every ticker that passed the quant screen.
+
+    Reads the screened ticker list from the *latest* quality_scores run with
+    passed tickers — not the current run_id, which has no quality_scores rows
+    when the pipeline starts from this stage.
+
+    offline=True: skip W1 network calls; use whatever is already on disk.
+    Each company is cache-checked before any API call; an unchanged bundle
+    makes zero API calls and costs nothing toward the cap.
+    """
+    # Lazy imports — keep AI deps out of module-level load for other stages.
+    import anthropic as _anthropic
+    from moat.config import ANTHROPIC_API_KEY
+    from moat.analysis.persist import run_analysis
+    from moat.analysis.pricing import DEFAULT_MODEL, PILOT_CAP_USD
+    from moat.ingest.filing_fetcher import run_for_ticker as w1_fetch
+
+    if model_id is None:
+        model_id = DEFAULT_MODEL
+    if cost_cap_usd is None:
+        cost_cap_usd = PILOT_CAP_USD
+
+    # --- Find screened tickers ---
+    quality_run = _latest_quality_run_id(conn)
+    if not quality_run:
+        raise RuntimeError(
+            "No quality_scores run with passed_screen tickers found. "
+            "Run the pipeline from 'screen' stage first, or provide "
+            "a --from-stage that includes 'quality'."
+        )
+    tickers = [
+        row["ticker"] for row in conn.execute(
+            "SELECT ticker FROM quality_scores WHERE run_id = ? AND passed_screen = 1 "
+            "ORDER BY ticker",
+            (quality_run,),
+        )
+    ]
+    print(
+        f"  ai_analysis: {len(tickers)} tickers from quality run {quality_run}"
+        + ("  [offline]" if offline else "")
+    )
+
+    # --- W1: fetch / verify filings ---
+    w1_ok, w1_failed = [], []
+    for ticker in tickers:
+        accession, err = w1_fetch(ticker, conn, offline=offline)
+        if err:
+            w1_failed.append(ticker)
+            print(f"    W1 {ticker}: {err}", file=sys.stderr)
+        else:
+            w1_ok.append(ticker)
+    print(f"    filings: {len(w1_ok)} ok, {len(w1_failed)} failed")
+    if w1_failed:
+        print(f"    W1 failures: {w1_failed[:10]}")
+
+    # --- W3→W4→W5 ---
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY not set — cannot run AI analysis")
+    client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    outcomes: dict[str, int] = {}
+    accumulated_cost = 0.0
+
+    print(
+        f"  ai_analysis: W3→W5 — {len(w1_ok)} eligible, model={model_id}, "
+        f"cap=${cost_cap_usd:.2f}"
+        + ("  [dry-run]" if dry_run else "")
+    )
+
+    for ticker in w1_ok:
+        if not dry_run and accumulated_cost >= cost_cap_usd:
+            capped_after = sum(outcomes.values())
+            print(
+                f"    cost cap ${cost_cap_usd:.2f} reached after "
+                f"{capped_after} tickers — halting. "
+                f"Re-run from ai_analysis to continue; cached tickers cost $0."
+            )
+            break
+
+        result = run_analysis(
+            ticker, run_id, client, conn,
+            model_id=model_id, dry_run=dry_run,
+        )
+        outcome = result.get("outcome", "error")
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        cost = result.get("cost_estimate") or 0.0
+        accumulated_cost += cost
+
+        if dry_run:
+            tokens = result.get("input_tokens", "?")
+            print(f"    {ticker}: {outcome} ({tokens:,} tokens)")
+        else:
+            errors = result.get("errors") or result.get("reason") or ""
+            suffix = f"  [{errors}]" if errors else ""
+            print(f"    {ticker}: {outcome} (${accumulated_cost:.3f} cumulative){suffix}")
+
+    print(f"\n  ai_analysis summary:")
+    for k in sorted(outcomes):
+        if outcomes[k]:
+            print(f"    {k}: {outcomes[k]}")
+    if not dry_run:
+        print(f"    total cost estimate: ${accumulated_cost:.3f}")
+        print(f"    cap: ${cost_cap_usd:.2f}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Project Moat pipeline")
     parser.add_argument("--from-stage", choices=STAGES, default=STAGES[0])
     parser.add_argument("--init-db", action="store_true", help="Create schema if missing, then run the pipeline")
     parser.add_argument("--init-only", action="store_true", help="With --init-db: create the schema and exit without running the pipeline")
     parser.add_argument("--limit", type=int, default=None, help="Only ingest the first N tickers (testing)")
+    # ai_analysis stage flags
+    parser.add_argument("--model", default=None, help="Model for ai_analysis stage (default: claude-sonnet-4-6)")
+    parser.add_argument("--dry-run", action="store_true", help="ai_analysis: count tokens only, no API calls")
+    parser.add_argument("--offline", action="store_true", help="ai_analysis: skip W1 network calls, use cached filings only")
+    parser.add_argument("--cost-cap", type=float, default=None, metavar="USD",
+                        help="ai_analysis: halt when accumulated cost exceeds this (default: $15.00 pilot cap)")
     args = parser.parse_args()
 
     if args.init_db:
@@ -183,6 +312,15 @@ def main() -> None:
             elif stage == "quality":
                 print("-> stage 'quality'")
                 run_quality_stage(conn, run_id)
+            elif stage == "ai_analysis":
+                print("-> stage 'ai_analysis'")
+                run_ai_analysis_stage(
+                    conn, run_id,
+                    offline=args.offline,
+                    model_id=args.model,
+                    dry_run=args.dry_run,
+                    cost_cap_usd=args.cost_cap,
+                )
             else:
                 print(f"-> stage '{stage}': not yet implemented (see docs/PRD_ADDENDUM.md sprint plan)")
                 raise NotImplementedError(f"Stage '{stage}' lands in a later sprint")

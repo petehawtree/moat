@@ -1,46 +1,54 @@
 #!/usr/bin/env python3
-"""W3 — prompt, call and (optionally) batch for Sprint 3.
+"""Analyze — W3→W4→W5 pipeline for Sprint 3.
 
 Usage:
   # Dry-run: count tokens, print pricing snapshot, no API call
   python scripts/analyze.py --tickers AAPL --dry-run
 
-  # Synchronous call for one or more tickers
+  # Synchronous call for one or more tickers (calls API + persists to DB)
   python scripts/analyze.py --tickers AAPL MSFT NVDA
 
-  # Batch submission (returns immediately with batch_id)
+  # Batch submission (returns immediately with batch_id; no W4/W5 yet)
   python scripts/analyze.py --tickers AAPL MSFT NVDA --batch
 
   # Choose model (default: claude-sonnet-4-6)
   python scripts/analyze.py --tickers AAPL --model claude-opus-4-8
 
-The raw CallResult is printed as JSON to stdout. Persistence (W5) is a
-separate step — this script is the W3 acceptance path.
+On a cache hit (same bundle key already in DB) no API call is made — the
+result is copied forward with reused_from_run_id.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+import uuid
 
 import anthropic
 
 from moat.config import ANTHROPIC_API_KEY  # loads .env as a side-effect
 from moat.db.connection import get_connection, init_db
 from moat.analysis.caller import call_sync, submit_batch
+from moat.analysis.parser import parse_and_validate
+from moat.analysis.persist import find_cached_run, persist_result, compute_bundle_key, _doc_sha256s_for_result
 from moat.analysis.pricing import DEFAULT_MODEL
+from moat.analysis.prompt import PROTOCOL_VERSION, SYSTEM_PROMPT, build_request
+from moat.ingest.section_extractor import NORM_VERSION
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="W3: prompt and call")
+    parser = argparse.ArgumentParser(description="Analyze: W3→W4→W5")
     parser.add_argument("--tickers", nargs="+", required=True, metavar="TICKER")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--dry-run", action="store_true",
                         help="count tokens only; no API generation call")
     parser.add_argument("--batch", action="store_true",
                         help="submit via Batch API (50%% off; async)")
+    parser.add_argument("--run-id", default=None,
+                        help="explicit run_id (defaults to a fresh UUID)")
     args = parser.parse_args()
 
+    run_id = args.run_id or str(uuid.uuid4())
     init_db()
     conn = get_connection()
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -77,17 +85,35 @@ def main() -> None:
         if args.dry_run:
             continue  # report already printed by call_sync
 
+        # Cache check: skip API persist if bundle already stored
+        doc_sha256s = _doc_sha256s_for_result(result, conn)
+        bundle_key = compute_bundle_key(
+            doc_sha256s,
+            result.prompt_sha256,
+            result.model_id,
+            NORM_VERSION,
+            result.protocol_version,
+        )
+        reused_from = find_cached_run(ticker, bundle_key, conn)
+
+        parsed = parse_and_validate(result, conn)
+        attempt_id = persist_result(
+            result, parsed, run_id, conn,
+            reused_from_run_id=reused_from,
+        )
+
         out = {
-            "ticker":           result.ticker,
-            "accession":        result.accession,
-            "model_id":         result.model_id,
-            "stop_reason":      result.stop_reason,
-            "usage":            result.usage,
+            "ticker":           ticker,
+            "run_id":           run_id,
+            "attempt_id":       attempt_id,
+            "outcome":          "cache_hit" if reused_from else (
+                                    "persisted" if parsed.is_valid else "validation_failed"
+                                ),
+            "reused_from_run_id": reused_from,
+            "claim_coverage":   parsed.claim_coverage,
+            "validation_errors": parsed.validation_errors,
             "cost_estimate":    result.cost_estimate,
-            "prompt_sha256":    result.prompt_sha256,
-            "protocol_version": result.protocol_version,
-            "document_map":     result.document_map,
-            "content_blocks":   result.content_blocks,
+            "usage":            result.usage,
         }
         print(json.dumps(out, indent=2))
 

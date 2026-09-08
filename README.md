@@ -22,7 +22,7 @@ Gold = the one thing no sprint replaces.
 
 ## Status
 
-**Sprint 3 — AI qualitative analysis, citation-enforced. Planned.**
+**Sprint 3 — AI qualitative analysis, citation-enforced. Active (W1–W7 implemented).**
 - Plan: [sprint-3-plan.md](docs/sprints/sprint-3-plan.md). Citation
   architecture: [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A15.
 - Two builds: the document layer the pipeline has never had (`filings` holds

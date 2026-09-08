@@ -198,20 +198,32 @@ def call_sync(
     conn,
     model_id: str = DEFAULT_MODEL,
     dry_run: bool = False,
+    accession: str | None = None,
 ) -> CallResult:
     """Fetch sections, build request, call the API synchronously.
 
+    accession: if provided, use this specific filing rather than the latest.
+               Used by run_analysis() when retrying with an original 10-K
+               after an amendment fails section extraction.
     dry_run=True: count tokens (free) and print the report; no generation.
     Raises ValueError if W1 hasn't been run for this ticker.
     """
-    filing = conn.execute(
-        "SELECT accession_number, period_of_report FROM filings "
-        "WHERE ticker = ? AND local_path IS NOT NULL "
-        "ORDER BY period_of_report DESC LIMIT 1",
-        (ticker,),
-    ).fetchone()
-    if not filing:
-        raise ValueError(f"no cached filing for {ticker} — run W1 first")
+    if accession is not None:
+        filing = conn.execute(
+            "SELECT accession_number, period_of_report FROM filings WHERE accession_number = ?",
+            (accession,),
+        ).fetchone()
+        if not filing:
+            raise ValueError(f"no filing row for accession {accession} — run W1 first")
+    else:
+        filing = conn.execute(
+            "SELECT accession_number, period_of_report FROM filings "
+            "WHERE ticker = ? AND local_path IS NOT NULL "
+            "ORDER BY period_of_report DESC, filing_date DESC LIMIT 1",
+            (ticker,),
+        ).fetchone()
+        if not filing:
+            raise ValueError(f"no cached filing for {ticker} — run W1 first")
 
     accession = filing["accession_number"]
     period    = filing["period_of_report"] or "unknown"
@@ -251,7 +263,23 @@ def call_sync(
         message = stream.get_final_message()
 
     if message.stop_reason == "refusal":
-        raise RuntimeError(f"API refused request for {ticker}: stop_reason=refusal")
+        # Return a refusal CallResult so the caller can persist the audit receipt
+        # and continue processing other tickers without aborting.
+        return CallResult(
+            ticker=ticker,
+            accession=accession,
+            model_id=model_id,
+            stop_reason="refusal",
+            content_blocks=[],
+            document_map=document_map,
+            usage={
+                "input_tokens":  message.usage.input_tokens,
+                "output_tokens": message.usage.output_tokens,
+            },
+            prompt_sha256=_prompt_sha256(SYSTEM_PROMPT, content),
+            protocol_version=PROTOCOL_VERSION,
+            cost_estimate=0.0,
+        )
 
     usage_dict = {
         "input_tokens":                   message.usage.input_tokens,

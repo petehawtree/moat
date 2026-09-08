@@ -36,9 +36,9 @@ def _submissions(filings: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 
 def test_select_latest_10k_empty_submissions():
-    assert select_latest_10k({}) is None
-    assert select_latest_10k({"filings": {}}) is None
-    assert select_latest_10k({"filings": {"recent": {}}}) is None
+    assert select_latest_10k({}) == (None, None)
+    assert select_latest_10k({"filings": {}}) == (None, None)
+    assert select_latest_10k({"filings": {"recent": {}}}) == (None, None)
 
 
 def test_select_latest_10k_no_qualifying_forms():
@@ -46,7 +46,9 @@ def test_select_latest_10k_no_qualifying_forms():
         {"accessionNumber": "0001-00-000001", "form": "10-Q",
          "reportDate": "2024-09-30", "filingDate": "2024-11-10", "primaryDocument": "form10q.htm"},
     ])
-    assert select_latest_10k(subs) is None
+    primary, fallback = select_latest_10k(subs)
+    assert primary is None
+    assert fallback is None
 
 
 def test_select_latest_10k_skips_no_period_filings():
@@ -55,31 +57,39 @@ def test_select_latest_10k_skips_no_period_filings():
         {"accessionNumber": "0001-00-000001", "form": "10-K",
          "reportDate": "", "filingDate": "2024-03-01", "primaryDocument": "form10k.htm"},
     ])
-    assert select_latest_10k(subs) is None
+    primary, fallback = select_latest_10k(subs)
+    assert primary is None
+    assert fallback is None
 
 
-def test_select_latest_10k_fallback_to_original():
+def test_select_latest_10k_original_only():
+    """When only an original 10-K exists, fallback is None."""
     subs = _submissions([
         {"accessionNumber": "0001-00-000001", "form": "10-K",
          "reportDate": "2023-12-31", "filingDate": "2024-02-15", "primaryDocument": "form10k.htm"},
     ])
-    result = select_latest_10k(subs)
-    assert result is not None
-    assert result["form_type"] == "10-K"
-    assert result["accession_number"] == "0001-00-000001"
+    primary, fallback = select_latest_10k(subs)
+    assert primary is not None
+    assert primary["form_type"] == "10-K"
+    assert primary["accession_number"] == "0001-00-000001"
+    assert fallback is None
 
 
 def test_select_latest_10k_prefers_amendment():
+    """Primary is the 10-K/A; fallback is the original 10-K for the same period."""
     subs = _submissions([
         {"accessionNumber": "0001-00-000001", "form": "10-K",
          "reportDate": "2023-12-31", "filingDate": "2024-02-15", "primaryDocument": "form10k.htm"},
         {"accessionNumber": "0001-00-000002", "form": "10-K/A",
          "reportDate": "2023-12-31", "filingDate": "2024-04-20", "primaryDocument": "form10ka.htm"},
     ])
-    result = select_latest_10k(subs)
-    assert result is not None
-    assert result["form_type"] == "10-K/A"
-    assert result["accession_number"] == "0001-00-000002"
+    primary, fallback = select_latest_10k(subs)
+    assert primary is not None
+    assert primary["form_type"] == "10-K/A"
+    assert primary["accession_number"] == "0001-00-000002"
+    assert fallback is not None
+    assert fallback["form_type"] == "10-K"
+    assert fallback["accession_number"] == "0001-00-000001"
 
 
 def test_select_latest_10k_latest_period_wins():
@@ -90,10 +100,11 @@ def test_select_latest_10k_latest_period_wins():
         {"accessionNumber": "0001-00-000002", "form": "10-K",
          "reportDate": "2023-12-31", "filingDate": "2024-02-14", "primaryDocument": "2023_10k.htm"},
     ])
-    result = select_latest_10k(subs)
-    assert result is not None
-    assert result["period_of_report"] == "2023-12-31"
-    assert result["accession_number"] == "0001-00-000002"
+    primary, fallback = select_latest_10k(subs)
+    assert primary is not None
+    assert primary["period_of_report"] == "2023-12-31"
+    assert primary["accession_number"] == "0001-00-000002"
+    assert fallback is None  # no amendment, so no fallback
 
 
 def test_select_latest_10k_latest_amendment_wins():
@@ -106,9 +117,11 @@ def test_select_latest_10k_latest_amendment_wins():
         {"accessionNumber": "0001-00-000003", "form": "10-K/A",
          "reportDate": "2023-12-31", "filingDate": "2024-05-20", "primaryDocument": "10ka2.htm"},
     ])
-    result = select_latest_10k(subs)
-    assert result is not None
-    assert result["accession_number"] == "0001-00-000003"
+    primary, fallback = select_latest_10k(subs)
+    assert primary is not None
+    assert primary["accession_number"] == "0001-00-000003"
+    assert fallback is not None
+    assert fallback["form_type"] == "10-K"
 
 
 def test_select_latest_10k_prefers_amendment_over_older_period():
@@ -121,8 +134,9 @@ def test_select_latest_10k_prefers_amendment_over_older_period():
         {"accessionNumber": "0001-00-000003", "form": "10-K/A",
          "reportDate": "2023-12-31", "filingDate": "2024-05-01", "primaryDocument": "new10ka.htm"},
     ])
-    result = select_latest_10k(subs)
-    assert result["accession_number"] == "0001-00-000003"
+    primary, fallback = select_latest_10k(subs)
+    assert primary["accession_number"] == "0001-00-000003"
+    assert fallback["accession_number"] == "0001-00-000002"
 
 
 def test_select_latest_10k_returns_primary_document():
@@ -131,9 +145,10 @@ def test_select_latest_10k_returns_primary_document():
          "reportDate": "2023-12-31", "filingDate": "2024-02-15",
          "primaryDocument": "aapl-20231230.htm"},
     ])
-    result = select_latest_10k(subs)
-    assert result["primary_document"] == "aapl-20231230.htm"
-    assert result["filing_date"] == "2024-02-15"
+    primary, fallback = select_latest_10k(subs)
+    assert primary["primary_document"] == "aapl-20231230.htm"
+    assert primary["filing_date"] == "2024-02-15"
+    assert fallback is None
 
 
 # ---------------------------------------------------------------------------

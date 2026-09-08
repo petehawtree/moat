@@ -381,21 +381,28 @@ def run_screen(run_id: str, conn) -> None:
         history = history_by_ticker.get(ticker)
         if not history:
             continue  # no fundamentals at all — same 13-company gap as Sprint 1 (§A7)
+        # Exclude rows with implausible_ratio from the time series passed to
+        # _compute_raw_metrics so bad historical years don't pollute CAGR/trend
+        # calculations (§A13). If all rows are flagged, skip the ticker entirely.
+        clean_history = [
+            row for row in history
+            if "implausible_ratio" not in (row["quality_flags"] or "")
+        ]
+        if not clean_history:
+            continue
         values_by_ticker[ticker], extra_by_ticker[ticker] = _compute_raw_metrics(
-            history, corroborated.get(ticker, set())
+            clean_history, corroborated.get(ticker, set())
         )
 
     # Sector peer groups, built once per metric so compute_sector_percentile
     # doesn't re-scan every company per call.
-    # Companies whose latest row failed plausibility validation are excluded
-    # from *everyone's* peer group (§A13). A percentile is relative, so one
-    # nonsense value doesn't just mis-score its own company — Camden Property
-    # Trust's 6,375% "FCF margin" shifted all 30 Real Estate peers and pushed
-    # one of them across the top-tercile bar. Quarantining is what keeps a bad
-    # row's blast radius to itself.
+    # Companies with ANY historical row that failed plausibility validation are
+    # excluded from *everyone's* peer group (§A13). Checking only history[-1]
+    # was insufficient: a corrupted earlier year still pollutes CAGR/trend metrics
+    # and, through the percentile, affects peer rankings for all 30+ sector peers.
     quarantined = {
         ticker for ticker, history in history_by_ticker.items()
-        if history and (history[-1]["quality_flags"] or "") and "implausible_ratio" in (history[-1]["quality_flags"] or "")
+        if any("implausible_ratio" in (row["quality_flags"] or "") for row in (history or []))
     }
 
     peer_values: dict[str, dict[str, dict[str, float]]] = {m: {} for m in METRICS}

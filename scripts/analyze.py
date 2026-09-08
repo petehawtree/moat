@@ -164,6 +164,12 @@ def main() -> None:
             print(f"ERROR {ticker}: {exc}", file=sys.stderr)
             continue
 
+        if result.stop_reason == "refusal":
+            attempt_id = persist_result(result, None, run_id, conn)
+            print(json.dumps({"ticker": ticker, "run_id": run_id,
+                              "outcome": "refused", "attempt_id": attempt_id}, indent=2))
+            continue
+
         parsed = parse_and_validate(result, conn)
         attempt_id = persist_result(result, parsed, run_id, conn)
 

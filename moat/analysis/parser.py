@@ -158,13 +158,50 @@ def _parse_claims(stream: list[tuple[str, list[dict]]]) -> list[ParsedClaim]:
 
     for text, cites in stream:
         if cites:
-            # Cited block = claim body (API attaches citations here).
-            body = text.strip()
-            if body and pending_claim:
-                _add(body, "asserted", [_make_raw_cite(c) for c in cites
-                                         if c.get("type") == "char_location"])
-            else:
+            raw_cites = [_make_raw_cite(c) for c in cites if c.get("type") == "char_location"]
+
+            if _SPLIT_RE.search(text):
+                # Compound cited block: contains protocol markers (CLAIM:, header, etc.).
+                # Cancel any outer pending_claim — we can't safely bind the pre-marker
+                # text to the claim waiting for a body. Only bind citations to claim
+                # bodies that follow an explicit CLAIM: marker within this block.
                 pending_claim = False
+                parts = _SPLIT_RE.split(text)
+                i = 0
+                while i < len(parts):
+                    fragment = parts[i]
+                    header_m = _HEADER_RE.match(fragment.strip())
+                    if header_m:
+                        current_type = _HEADER_TO_TYPE[header_m.group(1).upper()]
+                        type_claim_counts.setdefault(current_type, 0)
+                        i += 1
+                        continue
+                    frag_upper = fragment.strip().upper()
+                    if frag_upper == _CLAIM_PREFIX:
+                        body = parts[i + 1].strip() if i + 1 < len(parts) else ""
+                        if body:
+                            _add(body, "asserted", raw_cites)
+                            i += 2
+                        else:
+                            pending_claim = True
+                            i += 1
+                        continue
+                    if frag_upper == _IE_PREFIX:
+                        ie_body = parts[i + 1].strip() if i + 1 < len(parts) else ""
+                        if ie_body:
+                            _add(ie_body, "insufficient_evidence", [])
+                            i += 2
+                        else:
+                            i += 1
+                        continue
+                    i += 1
+            else:
+                # Normal case: entire cited block is the body for the pending claim.
+                body = text.strip()
+                if body and pending_claim:
+                    _add(body, "asserted", raw_cites)
+                else:
+                    pending_claim = False
             continue
 
         # Non-cited block: split by delimiters so compound blocks are handled.

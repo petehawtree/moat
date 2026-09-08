@@ -180,6 +180,15 @@ def persist_result(
             conn.commit()
             return attempt_id
 
+        # ---- Case 1b: API refusal ----
+        if result.stop_reason == "refusal":
+            attempt_id = _write_attempt(
+                conn, run_id, result, bundle_key, now,
+                outcome="refused",
+            )
+            conn.commit()
+            return attempt_id
+
         # ---- Case 3/4: validation failed or no parsed result ----
         if parsed is None or not parsed.is_valid:
             failure = "; ".join((parsed.validation_errors if parsed else ["no parsed result"]))
@@ -356,11 +365,14 @@ def run_analysis(
     import anthropic as _anthropic
     from moat.analysis.caller import call_sync
 
-    # Prepare sections (W2 on demand)
+    # Prepare sections (W2 on demand).
+    # Amendment-first: prefer the most recent 10-K/A, fall back to original
+    # 10-K for the same period when the amendment fails extraction (Decision 3,
+    # sprint-3-plan.md). W1 pre-fetches both so the fallback is usually a DB read.
     filing = conn.execute(
-        "SELECT accession_number, period_of_report FROM filings "
+        "SELECT accession_number, period_of_report, form_type FROM filings "
         "WHERE ticker = ? AND local_path IS NOT NULL "
-        "ORDER BY period_of_report DESC LIMIT 1",
+        "ORDER BY period_of_report DESC, filing_date DESC LIMIT 1",
         (ticker,),
     ).fetchone()
     if not filing:
@@ -371,8 +383,26 @@ def run_analysis(
 
     try:
         sections = prepare_sections(accession, conn)
-    except ValueError as exc:
-        return {"ticker": ticker, "outcome": "document_extraction_failed", "reason": str(exc)}
+    except ValueError as first_err:
+        # If the primary is an amendment, retry with the original 10-K.
+        if filing["form_type"] == "10-K/A":
+            fallback_row = conn.execute(
+                "SELECT accession_number FROM filings "
+                "WHERE ticker = ? AND form_type = '10-K' "
+                "AND period_of_report = ? AND local_path IS NOT NULL "
+                "ORDER BY filing_date DESC LIMIT 1",
+                (ticker, filing["period_of_report"]),
+            ).fetchone()
+            if fallback_row:
+                try:
+                    accession = fallback_row["accession_number"]
+                    sections  = prepare_sections(accession, conn)
+                except ValueError as second_err:
+                    return {"ticker": ticker, "outcome": "document_extraction_failed", "reason": str(second_err)}
+            else:
+                return {"ticker": ticker, "outcome": "document_extraction_failed", "reason": str(first_err)}
+        else:
+            return {"ticker": ticker, "outcome": "document_extraction_failed", "reason": str(first_err)}
     section_texts  = {k: v[0] for k, v in sections.items()}
     filing_doc_ids = {k: v[1] for k, v in sections.items()}
 
@@ -440,8 +470,9 @@ def run_analysis(
             "reused_from_run_id": reused_from, "attempt_id": attempt_id,
         }
 
-    # Fresh call
-    result = call_sync(client, ticker, conn, model_id=model_id, dry_run=False)
+    # Fresh call — pin the resolved accession so call_sync uses the same filing
+    # we already prepared sections for (matters when fallback switched to original 10-K).
+    result = call_sync(client, ticker, conn, model_id=model_id, dry_run=False, accession=accession)
 
     if result.stop_reason == "refusal":
         _ensure_pipeline_run(run_id, conn)

@@ -61,7 +61,7 @@ def _get_bytes(url: str) -> bytes:
     if resp.status_code == 429 or resp.status_code >= 500:
         raise TransientSecError(f"HTTP {resp.status_code} from {url}")
     resp.raise_for_status()
-    return resp.content
+    return resp.content, resp.headers.get("Content-Type", "")
 
 
 # ---------------------------------------------------------------------------
@@ -78,15 +78,19 @@ def fetch_submissions(cik: str) -> dict:
     return _get_json(SUBMISSIONS_URL.format(cik=cik))
 
 
-def select_latest_10k(submissions: dict) -> dict | None:
-    """Find the best 10-K or 10-K/A to analyse.
+def select_latest_10k(submissions: dict) -> tuple[dict | None, dict | None]:
+    """Find the best 10-K or 10-K/A to analyse, plus the original-10-K fallback.
 
     Decision 3 (sprint-3-plan.md): for the latest period, prefer the most
     recent 10-K/A amendment; fall back to the original 10-K if none exists.
+    When an amendment is selected, also return the original 10-K for the same
+    period so callers can retry on extraction failure (many amendments are
+    Part III-only and contain no Items 1/1A/7).
 
-    Returns a dict with keys: accession_number, form_type, filing_date,
-    period_of_report, primary_document.
-    Returns None when no qualifying filing is found.
+    Returns (primary, fallback):
+      primary:  best candidate (most recent 10-K/A, else most recent 10-K)
+      fallback: original 10-K for same period when primary is an amendment;
+                None when primary is already the original 10-K or none exists.
     """
     recent = submissions.get("filings", {}).get("recent", {})
     keys = ("accessionNumber", "form", "reportDate", "filingDate", "primaryDocument")
@@ -105,7 +109,7 @@ def select_latest_10k(submissions: dict) -> dict | None:
     ]
 
     if not candidates:
-        return None
+        return None, None
 
     by_period: dict[str, list[dict]] = {}
     for c in candidates:
@@ -116,7 +120,10 @@ def select_latest_10k(submissions: dict) -> dict | None:
 
     amendments = [f for f in group if f["form_type"] == "10-K/A"]
     originals  = [f for f in group if f["form_type"] == "10-K"]
-    return amendments[0] if amendments else (originals[0] if originals else None)
+
+    if amendments:
+        return amendments[0], (originals[0] if originals else None)
+    return (originals[0] if originals else None), None
 
 
 # ---------------------------------------------------------------------------
@@ -139,17 +146,27 @@ def _accession_index_url(cik: str, accession: str) -> str:
     )
 
 
+_ACCEPTABLE_CONTENT_TYPES = ("text/html", "application/xhtml", "text/plain", "text/xml", "application/xml")
+
+
 def fetch_filing_document(cik: str, accession: str, primary_doc: str) -> tuple[bytes, str]:
     """Fetch and validate the primary HTML document.
 
-    Validates HTTP status (raised by _get_bytes), minimum byte length, and
-    parseability (BeautifulSoup produces non-empty text).
+    Validates HTTP status (raised by _get_bytes), Content-Type, minimum byte
+    length, and parseability (BeautifulSoup produces non-empty text).
 
     Returns (raw_bytes, source_url).
     Raises ValueError on validation failure.
     """
     url = _primary_document_url(cik, accession, primary_doc)
-    content = _get_bytes(url)
+    content, content_type = _get_bytes(url)
+
+    ct_lower = content_type.lower()
+    if not any(ct in ct_lower for ct in _ACCEPTABLE_CONTENT_TYPES):
+        raise ValueError(
+            f"unexpected Content-Type {content_type!r} from {url} — "
+            f"expected HTML/XML; possible redirect or error page"
+        )
 
     if len(content) < _MIN_BYTES:
         raise ValueError(
@@ -204,6 +221,61 @@ def _cached_filing(ticker: str, conn) -> tuple[str, str] | None:
     return row["accession_number"], row["local_path"]
 
 
+def _try_store_filing(ticker: str, cik: str, filing: dict, conn) -> None:
+    """Fetch and store a secondary filing (original 10-K fallback). Best-effort.
+
+    Silently ignores all errors — the fallback not being available is not a
+    W1 failure. Called only when the primary selection is a 10-K/A amendment.
+    """
+    accession   = filing["accession_number"]
+    primary_doc = filing.get("primary_document", "")
+    if not primary_doc:
+        return
+    # Skip if already stored with a local file
+    existing = conn.execute(
+        "SELECT local_path FROM filings WHERE accession_number = ? AND local_path IS NOT NULL",
+        (accession,),
+    ).fetchone()
+    if existing:
+        return
+    try:
+        content, source_url = fetch_filing_document(cik, accession, primary_doc)
+        local_path   = _store_document(cik, accession, primary_doc, content)
+        content_hash = hashlib.sha256(content).hexdigest()
+        now          = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT INTO filings (
+                accession_number, ticker, form_type, filing_date, period_of_report,
+                document_url, primary_document_url, local_path, content_hash, retrieved_at
+            ) VALUES (
+                :accession_number, :ticker, :form_type, :filing_date, :period_of_report,
+                :document_url, :primary_document_url, :local_path, :content_hash, :retrieved_at
+            )
+            ON CONFLICT(accession_number) DO UPDATE SET
+                primary_document_url = excluded.primary_document_url,
+                local_path           = excluded.local_path,
+                content_hash         = excluded.content_hash,
+                retrieved_at         = excluded.retrieved_at
+            """,
+            {
+                "accession_number":     accession,
+                "ticker":               ticker,
+                "form_type":            filing["form_type"],
+                "filing_date":          filing["filing_date"],
+                "period_of_report":     filing["period_of_report"],
+                "document_url":         _accession_index_url(cik, accession),
+                "primary_document_url": source_url,
+                "local_path":           str(local_path),
+                "content_hash":         content_hash,
+                "retrieved_at":         now,
+            },
+        )
+        conn.commit()
+    except Exception:
+        pass  # best-effort only
+
+
 def run_for_ticker(
     ticker: str,
     conn,
@@ -216,6 +288,10 @@ def run_for_ticker(
     On success: filings.local_path, content_hash, and primary_document_url
     are populated. A second call with an unchanged filing returns immediately
     from the on-disk cache with no network request.
+
+    When the best candidate is a 10-K/A amendment, also pre-fetches the
+    original 10-K for the same period (best-effort) so the extraction fallback
+    in persist.py can retry without an additional W1 call.
 
     offline=True: reuse whatever is already on disk; do not contact SEC.
     """
@@ -237,7 +313,7 @@ def run_for_ticker(
     if not submissions:
         return None, f"no submissions at SEC EDGAR for CIK {cik}"
 
-    filing = select_latest_10k(submissions)
+    filing, fallback = select_latest_10k(submissions)
     if filing is None:
         return None, "no 10-K or 10-K/A in submissions"
 
@@ -247,7 +323,7 @@ def run_for_ticker(
     if not primary_doc:
         return None, f"primaryDocument empty for {accession}"
 
-    # Fetch, validate, store
+    # Fetch, validate, store primary filing
     try:
         content, source_url = fetch_filing_document(cik, accession, primary_doc)
     except (ValueError, TransientSecError) as exc:
@@ -286,4 +362,9 @@ def run_for_ticker(
         },
     )
     conn.commit()
+
+    # Pre-fetch original 10-K fallback when primary is an amendment.
+    if fallback:
+        _try_store_filing(ticker, cik, fallback, conn)
+
     return accession, None

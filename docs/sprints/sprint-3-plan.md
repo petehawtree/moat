@@ -1,6 +1,6 @@
 # Sprint 3 — AI qualitative analysis, citation-enforced (plan)
 
-**Status:** Planned
+**Status:** Active — W1–W7 implemented; pilot analyses pending human read
 **Implements:** PRD §5, addendum [§A3](../PRD_ADDENDUM.md#a3-evidence-and-citation-requirement-hardened-from-prd-1),
 [§A5](../PRD_ADDENDUM.md#a5-ai-cost-control),
 [§A15](../PRD_ADDENDUM.md#a15-sprint-3--citation-architecture-implements-a3-extends-a11)

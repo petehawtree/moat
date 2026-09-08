@@ -599,10 +599,11 @@ from real content — it regressed AAPL and KO's now-fixed extraction.
 
 **Current impact: zero.** The 93-company `passed_screen` set (run
 `20260822T140041Z`) contains no Financials tickers — all 76 Financials in the
-universe are filtered out upstream by the quant/quality screen, most likely
-because bank-style leverage ratios don't fit ratios built for operating
-companies (worth confirming that's deliberate). JPM was a pilot stress case
-chosen for "very long risk factors," not a production company.
+universe are deliberately excluded as unscreenable by Sprint 2.2
+(`SECTOR_INAPPLICABLE_METRICS`, [PRD_ADDENDUM.md
+§A14](../PRD_ADDENDUM.md#a14-sprint-22-follow-up--status-inversion-and-sector-applicability)),
+not an artifact of this screen run. JPM was a pilot stress case chosen for
+"very long risk factors," not a production company.
 
 **Sprint 4 fix (if financials enter the universe):** a structural ToC signal
 independent of character distance — e.g. requiring a preceding "TABLE OF
@@ -610,3 +611,22 @@ CONTENTS" heading, or page-number/dot-leader density, or treating candidates
 past some fraction of the document as immune to `toc_cluster` once at least
 one primary section has already resolved at `high` confidence earlier in the
 document.
+
+### [LOW] Parser doesn't recognize the `---` divider the model adds between sections
+
+Found reading the pilot output: the model volunteers a markdown horizontal
+rule (`---`) between the four protocol sections — not requested by the
+prompt, but a common enough model habit. `moat/analysis/parser.py`'s
+`_SPLIT_RE` only splits on `## HEADER`, `CLAIM:`, and
+`INSUFFICIENT EVIDENCE:`, so the `---` isn't a recognized delimiter and
+lands glued onto the last claim of three of the four sections per company —
+confirmed across all three pilot companies (AAPL, KO, JPM).
+
+**Cosmetic only:** citations resolve from the API's own `char_location`
+blocks, independent of `claim_text`, so `claim_coverage` and citation
+correctness are unaffected. The stored `claim_text` for the affected claims
+carries a trailing `\n\n---`.
+
+**Sprint 4 fix:** add a `---`-only-line pattern to `_SPLIT_RE` so it's
+recognized and discarded like the other delimiters, plus a regression test
+mirroring the pilot's actual model output shape.

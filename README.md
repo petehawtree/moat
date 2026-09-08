@@ -22,10 +22,11 @@ Gold = the one thing no sprint replaces.
 
 ## Status
 
-**Sprint 3 — AI qualitative analysis, citation-enforced. Active (W1–W7 implemented).**
-- Plan: [sprint-3-plan.md](docs/sprints/sprint-3-plan.md). Citation
-  architecture: [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A15.
-- Two builds: the document layer the pipeline has never had (`filings` holds
+**Sprint 3 — AI qualitative analysis, citation-enforced. Done.**
+- Retro: [sprint-3.md](docs/sprints/sprint-3.md). Plan:
+  [sprint-3-plan.md](docs/sprints/sprint-3-plan.md). Citation architecture:
+  [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A15.
+- Two builds: the document layer the pipeline had never had (`filings` holds
   accessions but no filing *text*), then the analysis on top of it.
 - Citations come from the API rather than the model, and every one is
   resolved at call time into an immutable anchor — accession + section +
@@ -36,6 +37,13 @@ Gold = the one thing no sprint replaces.
   company, claims parsed into their own table rather than inferred from API
   response blocks, and re-anchoring recorded as events against anchors that
   never change.
+- Pilot of 3 deliberately varied filers (AAPL, KO, JPM): 12 analyses, 99
+  citations, **100% exact `--reanchor`**, $1.91 spent of a $15 cap. Found
+  and fixed a real bug along the way — `toc_cluster`/boundary handling was
+  sending every real filing to full-document fallback, not targeted
+  sections; AAPL's input tokens dropped 71,731 → 29,000 once fixed. Two
+  smaller gaps deferred to Sprint 4 (a rarer `toc_cluster` case, a cosmetic
+  parser artifact) — see the retro.
 
 **Sprint 2.2 — data integrity. Done.**
 - Acted on a second external review that found the system not
@@ -110,7 +118,7 @@ see the sprint table below.
 | 2 | Sector-relative quant screen + ranked dashboard — **done** (one metric defective, see 2.1) | [sprint-2.md](docs/sprints/sprint-2.md) |
 | 2.1 | Ingest data integrity + filing provenance — **done** | [sprint-2-1.md](docs/sprints/sprint-2-1.md) |
 | 2.2 | Data integrity: FCF, REIT revenue, FAIL vs UNAVAILABLE — **done** | [sprint-2-2.md](docs/sprints/sprint-2-2.md) |
-| 3 | AI business/moat/management/risk analysis (citation-enforced) — **planned** | [sprint-3-plan.md](docs/sprints/sprint-3-plan.md) |
+| 3 | AI business/moat/management/risk analysis (citation-enforced) — **done** | [sprint-3.md](docs/sprints/sprint-3.md) |
 | 4 | Owner Earnings DCF + supporting valuation methods | |
 | 5 | Investment Committee + one-page Investment Brief | |
 | 6 | Watchlist monitoring | |

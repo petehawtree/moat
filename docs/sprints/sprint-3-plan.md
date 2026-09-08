@@ -577,3 +577,36 @@ workflows.
 deterministic formula fixtures with independent expected values,
 offline-refresh tests, amendment-fallback tests, and a credential-gated
 integration test for the API citation response shape.
+
+### [LOW] `toc_cluster` misreads a real IBR-stub run as a table of contents
+
+Found running the pilot: JPMorgan Chase's real Item 7 heading is a one-
+paragraph "incorporated by reference" stub — the substantive MD&A lives on
+pages 46–160 of a separate exhibit, not in the 10-K body — immediately
+followed by equally short IBR stubs for Items 7A, 8, 9, 9A and 9B, all within
+~3,400 chars. `toc_cluster`'s rule (§ sprint-3-section-extraction-rules.md,
+step 2) is "4+ distinct item headings within ±3,000/6,000 chars → reject as
+ToC," reasoning that real body sections sit thousands of characters apart.
+JPM's real content violates that assumption on its own terms, so the filter
+rejects the genuine Item 7 candidate and the filing falls back to sending the
+whole 1.4M-char document (measured: $1.53/company vs. an expected
+$0.25–0.35 with proper extraction).
+
+A backward-looking window was tried as a fix and reverted: short boundary
+sections (Item 1B, Item 2) routinely sit within a few hundred chars of an
+*ordinary* filer's real Item 7 too, so proximity alone can't tell a real ToC
+from real content — it regressed AAPL and KO's now-fixed extraction.
+
+**Current impact: zero.** The 93-company `passed_screen` set (run
+`20260822T140041Z`) contains no Financials tickers — all 76 Financials in the
+universe are filtered out upstream by the quant/quality screen, most likely
+because bank-style leverage ratios don't fit ratios built for operating
+companies (worth confirming that's deliberate). JPM was a pilot stress case
+chosen for "very long risk factors," not a production company.
+
+**Sprint 4 fix (if financials enter the universe):** a structural ToC signal
+independent of character distance — e.g. requiring a preceding "TABLE OF
+CONTENTS" heading, or page-number/dot-leader density, or treating candidates
+past some fraction of the document as immune to `toc_cluster` once at least
+one primary section has already resolved at `high` confidence earlier in the
+document.

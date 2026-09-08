@@ -91,6 +91,13 @@ the candidate by name, so the trace says not just *which* span was chosen but
 If no candidate survives for a section, that section is `failed` with reason
 `no_candidate`. Stop; do not relax a filter to manufacture one.
 
+**Known gap:** `toc_cluster`'s "real sections sit thousands of chars apart"
+assumption fails for filers that legitimately incorporate several consecutive
+items by reference in short stubs (seen in JPMorgan Chase's real Item 7 —
+see sprint-3-plan.md § Deferred to Sprint 4, "`toc_cluster` misreads a real
+IBR-stub run as a table of contents"). Zero impact on the current
+passed_screen universe (no Financials pass the quant screen); deferred.
+
 ## Step 3 — assignment and tie-break
 
 Survivors are assigned in document order under one constraint: **the chosen

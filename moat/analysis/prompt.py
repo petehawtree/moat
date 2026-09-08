@@ -73,11 +73,14 @@ def build_request(
     ticker: str,
     period: str,
     filing_document_ids: dict[str, int],
+    gap_sections: list[str] | None = None,
 ) -> tuple[list[dict], dict[int, int]]:
     """Build the user-message content array and document_map for the API call.
 
     sections: {section_id: normalized_text} — only the sections to include
     filing_document_ids: {section_id: filing_document_id}
+    gap_sections: section_ids that are incorporated by reference (unavailable for
+      citation); a plain-text notice is injected before the analysis request.
 
     Returns:
       content: list of document blocks + final text instruction
@@ -102,6 +105,19 @@ def build_request(
             "citations": {"enabled": True},
         })
         document_map[idx] = filing_document_ids[section_id]
+
+    if gap_sections:
+        gap_lines = "\n".join(
+            f"- {_SECTION_LABELS.get(s, s)}" for s in gap_sections
+        )
+        content.append({
+            "type": "text",
+            "text": (
+                f"NOTE: The following section(s) are incorporated by reference "
+                f"in this filing and are not available for citation:\n{gap_lines}\n"
+                f"Use INSUFFICIENT EVIDENCE for any claim that would require them."
+            ),
+        })
 
     content.append({
         "type": "text",

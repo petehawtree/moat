@@ -275,6 +275,44 @@ def persist_result(
         raise
 
 
+def write_stage_failure(
+    ticker: str,
+    run_id: str,
+    failure_reason: str,
+    model_id: str,
+    conn,
+) -> int:
+    """Write an analysis_attempts audit row for a pre-API failure.
+
+    Used when no CallResult exists — W1 couldn't fetch the filing, or section
+    extraction raised before any API call was attempted. Uses outcome='api_error'
+    (the existing bucket for infrastructure failures); failure_reason carries
+    a typed prefix: 'w1_failed:', 'no_filing:', or 'extraction_failed:'.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    _ensure_pipeline_run(run_id, conn)
+    conn.execute(
+        """
+        INSERT INTO analysis_attempts
+          (run_id, ticker, batch_id, custom_id, model_id, prompt_sha256,
+           protocol_version, document_map, usage_json, cost_estimate,
+           outcome, failure_reason, raw_response, created_at)
+        VALUES (?,?,NULL,NULL,?,?,?,?,?,?,?,?,NULL,?)
+        """,
+        (
+            run_id, ticker,
+            model_id, "none",
+            PROTOCOL_VERSION,
+            json.dumps({}), json.dumps({}),
+            0.0,
+            "api_error", failure_reason,
+            now,
+        ),
+    )
+    conn.commit()
+    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
 def _write_attempt(
     conn,
     run_id: str,
@@ -376,7 +414,10 @@ def run_analysis(
         (ticker,),
     ).fetchone()
     if not filing:
-        return {"ticker": ticker, "outcome": "error", "reason": "no cached filing — run W1 first"}
+        if not dry_run:
+            write_stage_failure(ticker, run_id, "no_filing: no cached filing — run W1 first",
+                                model_id, conn)
+        return {"ticker": ticker, "outcome": "api_error", "reason": "no cached filing — run W1 first"}
 
     accession = filing["accession_number"]
     period    = filing["period_of_report"] or "unknown"
@@ -398,15 +439,34 @@ def run_analysis(
                     accession = fallback_row["accession_number"]
                     sections  = prepare_sections(accession, conn)
                 except ValueError as second_err:
-                    return {"ticker": ticker, "outcome": "document_extraction_failed", "reason": str(second_err)}
+                    if not dry_run:
+                        write_stage_failure(ticker, run_id,
+                                            f"extraction_failed: {second_err}", model_id, conn)
+                    return {"ticker": ticker, "outcome": "api_error",
+                            "reason": str(second_err)}
             else:
-                return {"ticker": ticker, "outcome": "document_extraction_failed", "reason": str(first_err)}
+                if not dry_run:
+                    write_stage_failure(ticker, run_id,
+                                        f"extraction_failed: {first_err}", model_id, conn)
+                return {"ticker": ticker, "outcome": "api_error", "reason": str(first_err)}
         else:
-            return {"ticker": ticker, "outcome": "document_extraction_failed", "reason": str(first_err)}
+            if not dry_run:
+                write_stage_failure(ticker, run_id,
+                                    f"extraction_failed: {first_err}", model_id, conn)
+            return {"ticker": ticker, "outcome": "api_error", "reason": str(first_err)}
+
+    used_full_fallback = "full" in sections
     section_texts  = {k: v[0] for k, v in sections.items()}
     filing_doc_ids = {k: v[1] for k, v in sections.items()}
 
-    content, document_map = build_request(section_texts, ticker, period, filing_doc_ids)
+    # For sections_partial (no "full" key): inject gap notice for IBR sections.
+    if not used_full_fallback:
+        gap_sections = sorted({"item_1", "item_1a", "item_7"} - set(section_texts))
+    else:
+        gap_sections = []
+
+    content, document_map = build_request(section_texts, ticker, period, filing_doc_ids,
+                                          gap_sections=gap_sections)
     prompt_sha = _prompt_sha256(SYSTEM_PROMPT, content)
 
     # Get doc_sha256s for bundle key
@@ -468,6 +528,7 @@ def run_analysis(
         return {
             "ticker": ticker, "outcome": "cache_hit",
             "reused_from_run_id": reused_from, "attempt_id": attempt_id,
+            "used_full_fallback": used_full_fallback,
         }
 
     # Fresh call — pin the resolved accession so call_sync uses the same filing
@@ -479,16 +540,17 @@ def run_analysis(
         _write_attempt(conn, run_id, result, bundle_key, datetime.now(timezone.utc).isoformat(),
                        outcome="refused")
         conn.commit()
-        return {"ticker": ticker, "outcome": "refused"}
+        return {"ticker": ticker, "outcome": "refused", "used_full_fallback": used_full_fallback}
 
     parsed = parse_and_validate(result, conn)
     attempt_id = persist_result(result, parsed, run_id, conn)
 
     return {
-        "ticker":          ticker,
-        "outcome":         "persisted" if parsed.is_valid else "validation_failed",
-        "attempt_id":      attempt_id,
-        "claim_coverage":  parsed.claim_coverage,
-        "errors":          parsed.validation_errors,
-        "cost_estimate":   result.cost_estimate,
+        "ticker":              ticker,
+        "outcome":             "persisted" if parsed.is_valid else "validation_failed",
+        "attempt_id":          attempt_id,
+        "claim_coverage":      parsed.claim_coverage,
+        "errors":              parsed.validation_errors,
+        "cost_estimate":       result.cost_estimate,
+        "used_full_fallback":  used_full_fallback,
     }

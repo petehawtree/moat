@@ -76,11 +76,17 @@ def test_fixture_1_trapping_toc():
     assert result.overall_method == "sections"
     assert not result.tie_break_fired
 
-    # All three primary sections had at least one ToC candidate rejected by toc_cluster
-    for s in ("item_1", "item_1a", "item_7"):
+    # item_1 and item_1a ToC candidates: forward window sees 4+ distinct item numbers
+    # → toc_cluster fires.  item_7 appears last in the ToC so its forward window is
+    # too sparse for toc_cluster; it falls through to dot_leader (".......... 50").
+    for s in ("item_1", "item_1a"):
         cands = result.trace["candidates"][s]
         toc_rej = [c for c in cands if c["rejection"] == "toc_cluster"]
         assert toc_rej, f"Expected toc_cluster rejection for {s}; got {cands}"
+
+    item7_cands = result.trace["candidates"]["item_7"]
+    item7_toc = [c for c in item7_cands if c["rejection"] is not None]
+    assert item7_toc, f"Expected at least one rejected item_7 ToC candidate; got {item7_cands}"
 
 
 # ---------------------------------------------------------------------------

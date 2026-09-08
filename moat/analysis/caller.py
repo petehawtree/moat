@@ -144,7 +144,10 @@ def prepare_sections(accession: str, conn) -> dict[str, tuple[str, int]]:
             ).fetchone()["filing_document_id"]
             result[section_id] = (text, row_id)
 
-    if method in ("full_fallback", "sections_partial") and "full" not in result:
+    # sections_partial: do NOT fall back to the full document — the available
+    # sections are sent as-is; build_request() injects a gap notice for the
+    # missing (IBR) sections. full_fallback only when no sections were found.
+    if method == "full_fallback" and "full" not in result:
         if len(norm_text) < FULL_FALLBACK_MIN_CHARS:
             raise ValueError(
                 f"full_fallback for {accession} is implausibly short "
@@ -153,6 +156,7 @@ def prepare_sections(accession: str, conn) -> dict[str, tuple[str, int]]:
             )
         sha = hashlib.sha256(norm_text.encode()).hexdigest()
         local_path = _save_section(accession, "full", norm_text)
+        full_trace_json = json.dumps(extraction.trace, ensure_ascii=False) if extraction.trace else None
         conn.execute(
             """
             INSERT OR IGNORE INTO filing_documents
@@ -162,7 +166,7 @@ def prepare_sections(accession: str, conn) -> dict[str, tuple[str, int]]:
             VALUES (?,?,?,?,?,?,?,?,?,?)
             """,
             (accession, "full", NORM_VERSION, sha, len(norm_text),
-             method, "low", str(local_path), None, now),
+             method, "low", str(local_path), full_trace_json, now),
         )
         row_id = conn.execute(
             "SELECT filing_document_id FROM filing_documents "
@@ -232,7 +236,15 @@ def call_sync(
     section_texts = {k: v[0] for k, v in sections.items()}
     filing_doc_ids = {k: v[1] for k, v in sections.items()}
 
-    content, document_map = build_request(section_texts, ticker, period, filing_doc_ids)
+    # For sections_partial: sections that are IBR are absent from section_texts.
+    # Inject a gap notice so the model knows explicitly they are unavailable.
+    if "full" not in section_texts:
+        gap_sections = sorted({"item_1", "item_1a", "item_7"} - set(section_texts))
+    else:
+        gap_sections = []
+
+    content, document_map = build_request(section_texts, ticker, period, filing_doc_ids,
+                                          gap_sections=gap_sections)
 
     if dry_run:
         resp = client.messages.count_tokens(

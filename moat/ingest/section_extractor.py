@@ -292,9 +292,11 @@ def _rejection(text: str, cand: _Cand) -> Optional[str]:
 
 
 def _is_toc_cluster(text: str, pos: int) -> bool:
-    start = max(0, pos - _TOC_CLUSTER_WINDOW)
-    end = min(len(text), pos + _TOC_CLUSTER_WINDOW)
-    distinct = {m.upper() for m in _PAT_ANY_ITEM.findall(text[start:end])}
+    # Forward-only: a ToC entry is immediately followed by other item headings
+    # in the same compact block. A real section header at the start of content
+    # is not — the next 6,000 chars are narrative, not more item numbers.
+    end = min(len(text), pos + _TOC_CLUSTER_WINDOW * 2)
+    distinct = {m.upper() for m in _PAT_ANY_ITEM.findall(text[pos:end])}
     return len(distinct) >= _TOC_CLUSTER_THRESHOLD
 
 

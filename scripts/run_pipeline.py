@@ -216,13 +216,20 @@ def run_ai_analysis_stage(
     for ticker in tickers:
         accession, err = w1_fetch(ticker, conn, offline=offline)
         if err:
-            w1_failed.append(ticker)
+            w1_failed.append((ticker, err))
             print(f"    W1 {ticker}: {err}", file=sys.stderr)
         else:
             w1_ok.append(ticker)
     print(f"    filings: {len(w1_ok)} ok, {len(w1_failed)} failed")
     if w1_failed:
-        print(f"    W1 failures: {w1_failed[:10]}")
+        print(f"    W1 failures: {[t for t, _ in w1_failed[:10]]}")
+
+    # Persist structured failure rows for W1 errors so every screened ticker
+    # has an analysis_attempts record (audit completeness).
+    if w1_failed and not dry_run:
+        from moat.analysis.persist import write_stage_failure
+        for ticker, err_msg in w1_failed:
+            write_stage_failure(ticker, run_id, f"w1_failed: {err_msg}", model_id, conn)
 
     # --- W3→W4→W5 ---
     if not ANTHROPIC_API_KEY:
@@ -231,6 +238,8 @@ def run_ai_analysis_stage(
 
     outcomes: dict[str, int] = {}
     accumulated_cost = 0.0
+    fallback_count = 0
+    analyzed_count = 0
 
     print(
         f"  ai_analysis: W3→W5 — {len(w1_ok)} eligible, model={model_id}, "
@@ -252,18 +261,34 @@ def run_ai_analysis_stage(
             ticker, run_id, client, conn,
             model_id=model_id, dry_run=dry_run,
         )
-        outcome = result.get("outcome", "error")
+        outcome = result.get("outcome", "api_error")
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
         cost = result.get("cost_estimate") or 0.0
         accumulated_cost += cost
 
+        analyzed_count += 1
+        if result.get("used_full_fallback"):
+            fallback_count += 1
+
         if dry_run:
             tokens = result.get("input_tokens", "?")
-            print(f"    {ticker}: {outcome} ({tokens:,} tokens)")
+            fb_tag = " [full_fallback]" if result.get("used_full_fallback") else ""
+            print(f"    {ticker}: {outcome} ({tokens:,} tokens){fb_tag}")
         else:
             errors = result.get("errors") or result.get("reason") or ""
             suffix = f"  [{errors}]" if errors else ""
             print(f"    {ticker}: {outcome} (${accumulated_cost:.3f} cumulative){suffix}")
+
+        # 10% full_fallback rate gate: if more than 1-in-10 companies fall back
+        # to the whole filing, the section extractor likely needs attention.
+        if not dry_run and analyzed_count >= 5 and fallback_count / analyzed_count > 0.10:
+            print(
+                f"\n    HALTING: full_fallback rate "
+                f"{fallback_count}/{analyzed_count} "
+                f"({fallback_count/analyzed_count:.0%}) exceeds 10% — "
+                f"fix section extractor before continuing."
+            )
+            break
 
     print(f"\n  ai_analysis summary:")
     for k in sorted(outcomes):
@@ -272,6 +297,9 @@ def run_ai_analysis_stage(
     if not dry_run:
         print(f"    total cost estimate: ${accumulated_cost:.3f}")
         print(f"    cap: ${cost_cap_usd:.2f}")
+        if analyzed_count:
+            print(f"    full_fallback: {fallback_count}/{analyzed_count} "
+                  f"({fallback_count/analyzed_count:.0%})")
 
 
 def main() -> None:

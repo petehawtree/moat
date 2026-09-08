@@ -311,3 +311,56 @@ def test_fixture_7_runs_into_financial_statements():
         f"Expected 'below_alpha_ratio', got {sec7.failed_reason}"
     )
     assert result.overall_method == "full_fallback"
+
+
+# ---------------------------------------------------------------------------
+# Fixture 8: Item 7 opens with an inline reference to a later boundary item
+# Must produce: item_7 high, not truncated by the inline "Item 8" mention.
+#
+# Real-world pattern (verbatim, from actual 10-Ks): nearly every MD&A opens
+# with a sentence pointing at the financial statements item, e.g. AAPL's
+# "...included in Part II, Item 8 of this Form 10-K" or Coca-Cola's
+# '...contained in "Item 8. Financial Statements and Supplementary Data" of
+# this report.' Before the fix, _find_end() used every raw "Item 8" match as
+# a boundary with no filtering, so this opening sentence — not the real
+# Item 8 heading pages later — closed out Item 7 after a few hundred chars,
+# failing the hard floor and forcing full_fallback on an otherwise
+# well-formed filing.
+# ---------------------------------------------------------------------------
+
+def _fixture_8() -> str:
+    p70 = _para(70)
+    p95 = _para(95)
+    return (
+        "ITEM 1. BUSINESS\n\n" + p70
+        + "ITEM 1A. RISK FACTORS\n\n" + p95
+        + "ITEM 1B. UNRESOLVED STAFF COMMENTS\n\nNone.\n\n"
+        + "ITEM 2. PROPERTIES\n\nSome properties.\n\n"
+        + "ITEM 7. MANAGEMENT'S DISCUSSION AND ANALYSIS\n\n"
+        + "The following discussion should be read in conjunction with the "
+          "consolidated financial statements and accompanying notes "
+          'contained in "Item 8. Financial Statements and Supplementary '
+          'Data" of this report.\n\n'
+        + p70
+        + "ITEM 7A. QUANTITATIVE AND QUALITATIVE DISCLOSURES\n\nNone.\n\n"
+        + "ITEM 8. FINANCIAL STATEMENTS AND SUPPLEMENTARY DATA\n\n" + _para(30)
+    )
+
+
+def test_fixture_8_boundary_cross_reference_not_truncated():
+    result = extract_sections(_fixture_8())
+
+    for s in ("item_1", "item_1a", "item_7"):
+        sec = result.sections[s]
+        assert sec.confidence == "high", (
+            f"{s}: confidence={sec.confidence}, low_reasons={sec.low_reasons}, "
+            f"failed_reason={sec.failed_reason}"
+        )
+
+    assert result.overall_method == "sections"
+
+    # The real Item 7A heading (not the inline "Item 8" reference in Item 7's
+    # opening sentence) must be what closed out Item 7.
+    sec7 = result.sections["item_7"]
+    assert sec7.end_boundary_key == "item_7a"
+    assert sec7.length > 15_000, f"item_7 length={sec7.length} — looks truncated"

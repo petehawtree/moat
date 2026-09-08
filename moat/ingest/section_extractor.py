@@ -161,10 +161,16 @@ def extract_sections(normalized_text: str) -> ExtractionResult:
             all_cands.append(_Cand(sec, m.start(), m.end(), has_title))
     all_cands.sort(key=lambda c: c.pos)
 
-    # Boundary positions: non-primary sections; not filtered
+    # Boundary positions: non-primary sections, used by _find_end() to close
+    # out a primary section's span. Cross-reference mentions are filtered
+    # here too — a primary section's opening paragraph routinely references
+    # a later item inline ("...included in Part II, Item 8 of this Form
+    # 10-K."), and treating that as the real Item 8 heading truncates the
+    # primary section to a few hundred chars, failing its hard floor and
+    # forcing full_fallback on an otherwise well-formed filing.
     bpos: dict[str, list[int]] = {}
     for c in all_cands:
-        if c.section not in _PRIMARY:
+        if c.section not in _PRIMARY and not _is_cross_reference(normalized_text, c.pos):
             bpos.setdefault(c.section, []).append(c.pos)
 
     # Step 2: apply rejection filters to primary section candidates
@@ -328,6 +334,11 @@ def _has_dot_leader(text: str, heading_end: int) -> bool:
 def _is_cross_reference(text: str, pos: int) -> bool:
     line_start = text.rfind("\n", 0, pos) + 1
     before = text[line_start:pos].rstrip()
+    # A quoted title reference ('...contained in "Item 8. Financial
+    # Statements..." of this report') puts a closing quote mark directly
+    # before the item number; strip it so the phrase/punctuation checks below
+    # see what actually precedes the quote, not the quote itself.
+    before = before.rstrip("\"'“”‘’").rstrip()
     if not before:
         return False
     if _CROSS_REF_RE.search(before):

@@ -10,6 +10,8 @@ data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 data/filings/
+data/filing_docs/
+data/sections/
 data/sec_company_tickers.json
 .pytest_cache/
 .DS_Store

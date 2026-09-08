@@ -20,8 +20,10 @@ from moat.config import ANTHROPIC_API_KEY, DATA_DIR
 from moat.ingest.section_extractor import NORM_VERSION, extract_sections, normalize
 from moat.analysis.prompt import (
     PROTOCOL_VERSION,
+    REQUIRED_SECTIONS,
     SYSTEM_PROMPT,
     build_request,
+    compute_gap_sections,
 )
 from moat.analysis.pricing import DEFAULT_MODEL, estimate_cost, format_dry_run_report
 
@@ -79,7 +81,7 @@ def prepare_sections(accession: str, conn) -> dict[str, tuple[str, int]]:
     Raises ValueError if the filing has no local_path (W1 not run yet).
     """
     rows = conn.execute(
-        "SELECT section_id, local_path, filing_document_id "
+        "SELECT section_id, local_path, filing_document_id, extraction_method "
         "FROM filing_documents WHERE accession_number = ? AND norm_version = ?",
         (accession, NORM_VERSION),
     ).fetchall()
@@ -97,10 +99,26 @@ def prepare_sections(accession: str, conn) -> dict[str, tuple[str, int]]:
                 row["filing_document_id"],
             )
 
-    if result:
+    # Stale-data guard: current behavior never writes a "full" row unless
+    # extraction_method is "full_fallback" (see below — sections_partial sends
+    # the available sections plus a gap notice instead). A "full" row recorded
+    # under any other method predates that fix and must not short-circuit
+    # re-extraction, or the sections_partial fix never applies to it.
+    full_row = existing.get("full")
+    stale_full = full_row is not None and full_row["extraction_method"] != "full_fallback"
+
+    if stale_full:
+        conn.execute(
+            "DELETE FROM filing_documents WHERE accession_number = ? "
+            "AND section_id = 'full' AND norm_version = ?",
+            (accession, NORM_VERSION),
+        )
+        conn.commit()
+        result.pop("full", None)
+    elif result:
         return result
 
-    # No filing_documents rows yet — run W2 now.
+    # No usable filing_documents rows yet — run W2 now.
     filing = conn.execute(
         "SELECT local_path, period_of_report, ticker FROM filings WHERE accession_number = ?",
         (accession,),
@@ -116,7 +134,7 @@ def prepare_sections(accession: str, conn) -> dict[str, tuple[str, int]]:
     method = extraction.overall_method
 
     if method in ("sections", "sections_partial"):
-        for section_id in ("item_1", "item_1a", "item_7"):
+        for section_id in REQUIRED_SECTIONS:
             sec = extraction.sections[section_id]
             if sec.confidence not in ("high", "low"):
                 continue
@@ -238,10 +256,7 @@ def call_sync(
 
     # For sections_partial: sections that are IBR are absent from section_texts.
     # Inject a gap notice so the model knows explicitly they are unavailable.
-    if "full" not in section_texts:
-        gap_sections = sorted({"item_1", "item_1a", "item_7"} - set(section_texts))
-    else:
-        gap_sections = []
+    gap_sections = compute_gap_sections(section_texts)
 
     content, document_map = build_request(section_texts, ticker, period, filing_doc_ids,
                                           gap_sections=gap_sections)
@@ -356,7 +371,11 @@ def submit_batch(
         section_texts  = {k: v[0] for k, v in sections.items()}
         filing_doc_ids = {k: v[1] for k, v in sections.items()}
 
-        content, document_map = build_request(section_texts, ticker, period, filing_doc_ids)
+        # Same gap_sections computation as call_sync() — the batch and sync
+        # paths must produce identical prompts (and prompt_sha256) for the
+        # same filing, or the bundle key each path resolves later diverges.
+        content, document_map = build_request(section_texts, ticker, period, filing_doc_ids,
+                                              gap_sections=compute_gap_sections(section_texts))
         sha = _prompt_sha256(SYSTEM_PROMPT, content)
         cid = _custom_id(ticker, sha)
 

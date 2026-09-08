@@ -295,8 +295,22 @@ def _is_toc_cluster(text: str, pos: int) -> bool:
     # Forward-only: a ToC entry is immediately followed by other item headings
     # in the same compact block. A real section header at the start of content
     # is not — the next 6,000 chars are narrative, not more item numbers.
+    #
+    # Only headings count toward the cluster: an inline cross-reference in
+    # real prose ("As described in Item 1A, Item 7, Item 8, and Item 14
+    # below") mentions several items too, but each is embedded in a sentence
+    # rather than starting its own line — _is_cross_reference() (the same
+    # check used to reject a candidate's own position) filters those out.
+    # (A backward-looking window was tried and rejected: short boundary
+    # sections like Item 1B/Item 2 routinely sit within a few hundred chars
+    # of a genuine Item 7 heading, so looking behind false-positives on
+    # ordinary compact filings — see Sprint 3 Round 6 review, finding 7.)
     end = min(len(text), pos + _TOC_CLUSTER_WINDOW * 2)
-    distinct = {m.upper() for m in _PAT_ANY_ITEM.findall(text[pos:end])}
+    distinct = {
+        m.group(1).upper()
+        for m in _PAT_ANY_ITEM.finditer(text, pos, end)
+        if not _is_cross_reference(text, m.start())
+    }
     return len(distinct) >= _TOC_CLUSTER_THRESHOLD
 
 

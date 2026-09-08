@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from datetime import datetime, timezone
 
 from moat.analysis.caller import CallResult, _prompt_sha256, prepare_sections
@@ -24,6 +25,7 @@ from moat.analysis.prompt import (
     PROTOCOL_VERSION,
     SYSTEM_PROMPT,
     build_request,
+    compute_gap_sections,
 )
 from moat.ingest.section_extractor import NORM_VERSION
 
@@ -288,29 +290,45 @@ def write_stage_failure(
     extraction raised before any API call was attempted. Uses outcome='api_error'
     (the existing bucket for infrastructure failures); failure_reason carries
     a typed prefix: 'w1_failed:', 'no_filing:', or 'extraction_failed:'.
+
+    Never raises — this is itself the failure-recording path, so a DB error
+    here must not take down the rest of the pipeline stage. Returns -1 (an
+    unusable rowid) if the write itself fails, after logging to stderr.
     """
     now = datetime.now(timezone.utc).isoformat()
-    _ensure_pipeline_run(run_id, conn)
-    conn.execute(
-        """
-        INSERT INTO analysis_attempts
-          (run_id, ticker, batch_id, custom_id, model_id, prompt_sha256,
-           protocol_version, document_map, usage_json, cost_estimate,
-           outcome, failure_reason, raw_response, created_at)
-        VALUES (?,?,NULL,NULL,?,?,?,?,?,?,?,?,NULL,?)
-        """,
-        (
-            run_id, ticker,
-            model_id, "none",
-            PROTOCOL_VERSION,
-            json.dumps({}), json.dumps({}),
-            0.0,
-            "api_error", failure_reason,
-            now,
-        ),
-    )
-    conn.commit()
-    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    try:
+        _ensure_pipeline_run(run_id, conn)
+        conn.execute(
+            """
+            INSERT INTO analysis_attempts
+              (run_id, ticker, batch_id, custom_id, model_id, prompt_sha256,
+               protocol_version, document_map, usage_json, cost_estimate,
+               outcome, failure_reason, raw_response, created_at)
+            VALUES (?,?,NULL,NULL,?,?,?,?,?,?,?,?,NULL,?)
+            """,
+            (
+                run_id, ticker,
+                model_id, "none",
+                PROTOCOL_VERSION,
+                json.dumps({}), json.dumps({}),
+                0.0,
+                "api_error", failure_reason,
+                now,
+            ),
+        )
+        conn.commit()
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(
+            f"    write_stage_failure: failed to record '{failure_reason}' "
+            f"for {ticker} (run {run_id}): {exc}",
+            file=sys.stderr,
+        )
+        return -1
 
 
 def _write_attempt(
@@ -460,10 +478,7 @@ def run_analysis(
     filing_doc_ids = {k: v[1] for k, v in sections.items()}
 
     # For sections_partial (no "full" key): inject gap notice for IBR sections.
-    if not used_full_fallback:
-        gap_sections = sorted({"item_1", "item_1a", "item_7"} - set(section_texts))
-    else:
-        gap_sections = []
+    gap_sections = compute_gap_sections(section_texts)
 
     content, document_map = build_request(section_texts, ticker, period, filing_doc_ids,
                                           gap_sections=gap_sections)

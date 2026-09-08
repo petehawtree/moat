@@ -35,7 +35,13 @@ from moat.analysis.caller import _prompt_sha256, call_sync, submit_batch
 from moat.analysis.parser import parse_and_validate
 from moat.analysis.persist import compute_bundle_key, find_cached_run, persist_result, _supersede_for_bundle, _write_cache_attempt
 from moat.analysis.pricing import DEFAULT_MODEL
-from moat.analysis.prompt import ANALYSIS_TYPES, PROTOCOL_VERSION, SYSTEM_PROMPT, build_request
+from moat.analysis.prompt import (
+    ANALYSIS_TYPES,
+    PROTOCOL_VERSION,
+    SYSTEM_PROMPT,
+    build_request,
+    compute_gap_sections,
+)
 from moat.ingest.section_extractor import NORM_VERSION
 
 
@@ -97,6 +103,9 @@ def main() -> None:
             )
             section_texts  = {k: v[0] for k, v in sections.items()}
             filing_doc_ids = {k: v[1] for k, v in sections.items()}
+            # gap_sections must be computed identically to call_sync()'s, or the
+            # prompt (and its sha256, and the bundle key derived from it) built
+            # here diverges from the one call_sync() actually sends/stores.
             content, document_map = build_request(
                 section_texts, ticker,
                 conn.execute(
@@ -106,6 +115,7 @@ def main() -> None:
                     (ticker,),
                 ).fetchone()["period_of_report"] or "unknown",
                 filing_doc_ids,
+                gap_sections=compute_gap_sections(section_texts),
             )
             prompt_sha = _prompt_sha256(SYSTEM_PROMPT, content)
             doc_sha256s = []

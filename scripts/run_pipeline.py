@@ -266,9 +266,13 @@ def run_ai_analysis_stage(
         cost = result.get("cost_estimate") or 0.0
         accumulated_cost += cost
 
-        analyzed_count += 1
-        if result.get("used_full_fallback"):
-            fallback_count += 1
+        # api_error means section prep never got far enough to choose full
+        # vs. partial sections (no filing, extraction failed) — it belongs in
+        # neither the numerator nor the denominator of the fallback rate.
+        if outcome != "api_error":
+            analyzed_count += 1
+            if result.get("used_full_fallback"):
+                fallback_count += 1
 
         if dry_run:
             tokens = result.get("input_tokens", "?")

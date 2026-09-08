@@ -9,12 +9,32 @@ PROTOCOL_VERSION = "v1"
 
 ANALYSIS_TYPES = ("business_quality", "moat", "management", "risk")
 
+# The three sections a filing is expected to supply. Single source of truth —
+# import this rather than re-typing the literal; a bundle key's cache
+# behavior depends on gap_sections being computed identically everywhere.
+REQUIRED_SECTIONS = ("item_1", "item_1a", "item_7")
+
 _SECTION_LABELS = {
     "item_1":  "Item 1: Business",
     "item_1a": "Item 1A: Risk Factors",
     "item_7":  "Item 7: MD&A",
     "full":    "Full Filing",
 }
+
+
+def compute_gap_sections(section_texts: dict[str, str]) -> list[str]:
+    """Return the REQUIRED_SECTIONS missing from section_texts, sorted.
+
+    Empty when a full_fallback was used ("full" in section_texts) — the full
+    document covers everything, so there's no gap to call out. Callers must
+    use this (not a re-typed literal) so build_request() always sees the same
+    gap_sections for the same inputs — the prompt (and its sha256, and the
+    bundle cache key derived from it) depends on it.
+    """
+    if "full" in section_texts:
+        return []
+    return sorted(set(REQUIRED_SECTIONS) - set(section_texts))
+
 
 SYSTEM_PROMPT = """\
 You are an investment analyst reviewing a company's SEC 10-K annual report.

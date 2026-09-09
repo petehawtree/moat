@@ -173,6 +173,7 @@ def _run_batch_submission_and_retrieval(
     dry_run: bool,
     poll_interval: float,
     poll_timeout: float,
+    cost_cap_usd: float,
 ) -> None:
     """Cache-check, submit, poll, and retrieve — the batch path, end-to-end.
 
@@ -183,13 +184,22 @@ def _run_batch_submission_and_retrieval(
     (moat/analysis/persist.py); a poll timeout leaves the batch's 'pending'
     rows exactly as submit_and_persist_batch() wrote them — nothing is lost,
     re-run this stage with --retrieve-batch-id to finish later.
+
+    cost_cap_usd is enforced as a preflight projection, not after the fact:
+    submit_batch() has no cap of its own, and true cost isn't known until
+    retrieval — by which point the money is already spent. Free token counts
+    (client.messages.count_tokens) are summed against the same assumed-output
+    formula --dry-run uses, and only as many tickers as fit are submitted.
     """
     from moat.analysis.persist import (
         find_ticker_bundle, persist_cache_hit, run_batch_retrieval,
-        submit_and_persist_batch,
+        submit_and_persist_batch, write_stage_failure,
     )
+    from moat.analysis.pricing import estimate_projected_cost
+    from moat.analysis.prompt import SYSTEM_PROMPT
 
     to_submit: list[str] = []
+    contents: dict[str, list] = {}
     outcomes: dict[str, int] = {}
 
     for ticker in tickers:
@@ -197,7 +207,6 @@ def _run_batch_submission_and_retrieval(
         if "error" in info:
             outcomes["api_error"] = outcomes.get("api_error", 0) + 1
             if not dry_run:
-                from moat.analysis.persist import write_stage_failure
                 write_stage_failure(ticker, run_id, info["error"], model_id, conn)
             print(f"    {ticker}: api_error [{info['error']}]")
             continue
@@ -211,6 +220,7 @@ def _run_batch_submission_and_retrieval(
             print(f"    {ticker}: cache_hit (reused from {info['reused_from']})")
             continue
         to_submit.append(ticker)
+        contents[ticker] = info["content"]
 
     print(f"  ai_analysis batch: {len(to_submit)} to submit, "
           f"{outcomes.get('cache_hit', 0)} cache hits, {outcomes.get('api_error', 0)} pre-batch errors")
@@ -222,8 +232,35 @@ def _run_batch_submission_and_retrieval(
         print("  ai_analysis batch: nothing to submit")
         return
 
-    batch_id, attempt_ids = submit_and_persist_batch(client, to_submit, conn, run_id, model_id=model_id)
-    print(f"  ai_analysis batch: submitted {batch_id} ({len(attempt_ids)} tickers)")
+    # Preflight cap check (free — count_tokens makes no generation call):
+    # submit only as many tickers as project to stay under cost_cap_usd.
+    capped_tickers: list[str] = []
+    projected_cost = 0.0
+    for ticker in to_submit:
+        resp = client.messages.count_tokens(
+            model=model_id, system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": contents[ticker]}],
+        )
+        ticker_cost = estimate_projected_cost(resp.input_tokens, model_id, is_batch=True)
+        if projected_cost + ticker_cost > cost_cap_usd:
+            break
+        projected_cost += ticker_cost
+        capped_tickers.append(ticker)
+
+    if len(capped_tickers) < len(to_submit):
+        print(
+            f"    cost cap ${cost_cap_usd:.2f} reached after {len(capped_tickers)}/{len(to_submit)} "
+            f"tickers (${projected_cost:.3f} projected) — submitting only those. "
+            f"Re-run from ai_analysis to continue; already-cached tickers cost $0."
+        )
+    if not capped_tickers:
+        print(f"  ai_analysis batch: cost cap ${cost_cap_usd:.2f} leaves room for zero "
+              f"tickers — not submitting")
+        return
+
+    batch_id, attempt_ids = submit_and_persist_batch(client, capped_tickers, conn, run_id, model_id=model_id)
+    print(f"  ai_analysis batch: submitted {batch_id} ({len(attempt_ids)} tickers, "
+          f"${projected_cost:.3f} projected)")
 
     deadline = time.monotonic() + poll_timeout
     status = "in_progress"
@@ -350,7 +387,7 @@ def run_ai_analysis_stage(
     if batch:
         _run_batch_submission_and_retrieval(
             client, w1_ok, run_id, conn, model_id, dry_run,
-            batch_poll_interval, batch_poll_timeout,
+            batch_poll_interval, batch_poll_timeout, cost_cap_usd,
         )
         return
 

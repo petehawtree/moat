@@ -21,6 +21,7 @@ def _conn():
         CREATE TABLE ai_analysis (
             run_id TEXT, ticker TEXT, analysis_type TEXT,
             is_current INTEGER DEFAULT 1, stale_analysis INTEGER DEFAULT 0,
+            reused_from_run_id TEXT,
             PRIMARY KEY (run_id, ticker, analysis_type)
         );
         CREATE TABLE analysis_claims (
@@ -299,3 +300,48 @@ def test_reanchor_ignores_superseded_analyses(tmp_path):
     _reanchor("TST", conn)
 
     assert conn.execute("SELECT COUNT(*) FROM citation_resolution_events").fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# _reanchor — cache-forward analyses (confirmed HIGH finding, judge report
+# 20260909-131716: a cache-forward ai_analysis row stores no claims of its
+# own — moat/analysis/persist.py's copy-forward writes ai_analysis only —
+# so joining analysis_claims straight on aa.run_id found zero claims for any
+# cached analysis and silently reanchored nothing for it.)
+# ---------------------------------------------------------------------------
+
+def test_reanchor_resolves_cached_analysis_via_source_run(tmp_path):
+    """A cache-forward row (run2, reused_from_run_id='run1') has no claims of
+    its own; its citations must still be reanchored via run1's claims, and
+    any resulting stale_analysis flag must land on run2 (the current row)."""
+    conn = _conn()
+    text = "Nothing related remains in this section."
+    _write_section(conn, tmp_path, "0001", "item_7", text)
+
+    # The source analysis (run1) actually owns the claim + citation.
+    conn.execute("INSERT INTO ai_analysis (run_id, ticker, analysis_type, is_current) "
+                 "VALUES ('run1','TST','moat',0)")  # superseded by the copy-forward
+    conn.execute("INSERT INTO analysis_claims (claim_id, run_id, ticker, analysis_type, claim_order) "
+                 "VALUES (1,'run1','TST','moat',1)")
+    gone_quote = "a claim whose text is nowhere in this filing anymore at all"
+    _make_citation(conn, "0001", "item_7", "stale_sha", 0, len(gone_quote), gone_quote, claim_id=1)
+
+    # The current row is a pure copy-forward: no analysis_claims row of its own.
+    conn.execute("INSERT INTO ai_analysis (run_id, ticker, analysis_type, is_current, reused_from_run_id) "
+                 "VALUES ('run2','TST','moat',1,'run1')")
+    conn.commit()
+
+    _reanchor("TST", conn)
+
+    events = conn.execute("SELECT * FROM citation_resolution_events").fetchall()
+    assert len(events) == 1
+    assert events[0]["result"] == "unresolved"
+
+    run2_row = conn.execute(
+        "SELECT stale_analysis FROM ai_analysis WHERE run_id='run2' AND ticker='TST' AND analysis_type='moat'"
+    ).fetchone()
+    run1_row = conn.execute(
+        "SELECT stale_analysis FROM ai_analysis WHERE run_id='run1' AND ticker='TST' AND analysis_type='moat'"
+    ).fetchone()
+    assert run2_row["stale_analysis"] == 1  # the current, displayed row
+    assert run1_row["stale_analysis"] == 0  # the superseded source row is untouched

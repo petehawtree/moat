@@ -444,6 +444,65 @@ def _write_cache_attempt(
 
 
 # ---------------------------------------------------------------------------
+# Filing resolution with amendment fallback (Decision 3, sprint-3-plan.md)
+#
+# Shared by run_analysis() (sync) and find_ticker_bundle() (batch precheck)
+# so the two paths can't drift on which companies the fallback rescues — a
+# real Sprint 3.1 gap found by external judge review: find_ticker_bundle()
+# originally had no fallback at all, silently dropping any company whose
+# latest 10-K/A is a Part-III-only stub from the batch instead of retrying
+# the original 10-K the way the sync path always has.
+# ---------------------------------------------------------------------------
+
+def _resolve_sections_with_amendment_fallback(
+    ticker: str, conn,
+) -> tuple[str, dict, str] | tuple[None, None, tuple[str, str]]:
+    """Resolve (accession, sections, period) for a ticker, retrying the
+    original 10-K when the latest 10-K/A's section extraction fails.
+
+    Returns (accession, sections, period) on success.
+    Returns (None, None, (error_kind, error_detail)) on failure, where
+    error_kind is 'no_filing' or 'extraction_failed' — callers prefix
+    write_stage_failure()/find_ticker_bundle()'s error string with it.
+    """
+    filing = conn.execute(
+        "SELECT accession_number, period_of_report, form_type FROM filings "
+        "WHERE ticker = ? AND local_path IS NOT NULL "
+        "ORDER BY period_of_report DESC, filing_date DESC LIMIT 1",
+        (ticker,),
+    ).fetchone()
+    if not filing:
+        return None, None, ("no_filing", "no cached filing — run W1 first")
+
+    accession = filing["accession_number"]
+    period    = filing["period_of_report"] or "unknown"
+
+    try:
+        sections = prepare_sections(accession, conn)
+        return accession, sections, period
+    except ValueError as first_err:
+        if filing["form_type"] != "10-K/A":
+            return None, None, ("extraction_failed", str(first_err))
+
+        fallback_row = conn.execute(
+            "SELECT accession_number FROM filings "
+            "WHERE ticker = ? AND form_type = '10-K' "
+            "AND period_of_report = ? AND local_path IS NOT NULL "
+            "ORDER BY filing_date DESC LIMIT 1",
+            (ticker, filing["period_of_report"]),
+        ).fetchone()
+        if not fallback_row:
+            return None, None, ("extraction_failed", str(first_err))
+
+        try:
+            accession = fallback_row["accession_number"]
+            sections  = prepare_sections(accession, conn)
+            return accession, sections, period
+        except ValueError as second_err:
+            return None, None, ("extraction_failed", str(second_err))
+
+
+# ---------------------------------------------------------------------------
 # Cache precheck (Sprint 3.1, item 2 — used by the batch submission path)
 #
 # submit_batch() has no cache check of its own: every ticker handed to it
@@ -458,29 +517,22 @@ def _write_cache_attempt(
 def find_ticker_bundle(ticker: str, model_id: str, conn) -> dict:
     """Resolve the filing/sections/prompt for a ticker and check the cache.
 
-    Does the same W2/W3 prep call_sync() does, without calling the API.
+    Does the same W2/W3 prep call_sync() does, without calling the API —
+    including the amendment fallback (Decision 3), shared with run_analysis()
+    via _resolve_sections_with_amendment_fallback().
 
     Returns one of:
       {"error": str}
-      {"reused_from": run_id_or_None, "bundle_key": str,
-       "accession": str, "prompt_sha": str}
+      {"reused_from": run_id_or_None, "bundle_key": str, "accession": str,
+       "prompt_sha": str, "content": list[dict]}
+        — "content" is the built request body, returned so a batch-mode
+        preflight cap check can count its tokens without rebuilding it.
     """
-    filing = conn.execute(
-        "SELECT accession_number, period_of_report FROM filings "
-        "WHERE ticker = ? AND local_path IS NOT NULL "
-        "ORDER BY period_of_report DESC, filing_date DESC LIMIT 1",
-        (ticker,),
-    ).fetchone()
-    if not filing:
-        return {"error": "no_filing: no cached filing — run W1 first"}
-
-    accession = filing["accession_number"]
-    period    = filing["period_of_report"] or "unknown"
-
-    try:
-        sections = prepare_sections(accession, conn)
-    except ValueError as exc:
-        return {"error": f"extraction_failed: {exc}"}
+    accession, sections, info = _resolve_sections_with_amendment_fallback(ticker, conn)
+    if sections is None:
+        error_kind, error_detail = info
+        return {"error": f"{error_kind}: {error_detail}"}
+    period = info
 
     section_texts  = {k: v[0] for k, v in sections.items()}
     filing_doc_ids = {k: v[1] for k, v in sections.items()}
@@ -506,6 +558,7 @@ def find_ticker_bundle(ticker: str, model_id: str, conn) -> dict:
         "bundle_key":  bundle_key,
         "accession":   accession,
         "prompt_sha":  prompt_sha,
+        "content":     content,
     }
 
 
@@ -726,57 +779,17 @@ def run_analysis(
     import anthropic as _anthropic
     from moat.analysis.caller import call_sync
 
-    # Prepare sections (W2 on demand).
-    # Amendment-first: prefer the most recent 10-K/A, fall back to original
-    # 10-K for the same period when the amendment fails extraction (Decision 3,
-    # sprint-3-plan.md). W1 pre-fetches both so the fallback is usually a DB read.
-    filing = conn.execute(
-        "SELECT accession_number, period_of_report, form_type FROM filings "
-        "WHERE ticker = ? AND local_path IS NOT NULL "
-        "ORDER BY period_of_report DESC, filing_date DESC LIMIT 1",
-        (ticker,),
-    ).fetchone()
-    if not filing:
+    # Prepare sections (W2 on demand). Amendment-first: prefer the most
+    # recent 10-K/A, fall back to original 10-K for the same period when the
+    # amendment fails extraction (Decision 3, sprint-3-plan.md) — shared with
+    # find_ticker_bundle() via _resolve_sections_with_amendment_fallback().
+    accession, sections, info = _resolve_sections_with_amendment_fallback(ticker, conn)
+    if sections is None:
+        error_kind, error_detail = info
         if not dry_run:
-            write_stage_failure(ticker, run_id, "no_filing: no cached filing — run W1 first",
-                                model_id, conn)
-        return {"ticker": ticker, "outcome": "api_error", "reason": "no cached filing — run W1 first"}
-
-    accession = filing["accession_number"]
-    period    = filing["period_of_report"] or "unknown"
-
-    try:
-        sections = prepare_sections(accession, conn)
-    except ValueError as first_err:
-        # If the primary is an amendment, retry with the original 10-K.
-        if filing["form_type"] == "10-K/A":
-            fallback_row = conn.execute(
-                "SELECT accession_number FROM filings "
-                "WHERE ticker = ? AND form_type = '10-K' "
-                "AND period_of_report = ? AND local_path IS NOT NULL "
-                "ORDER BY filing_date DESC LIMIT 1",
-                (ticker, filing["period_of_report"]),
-            ).fetchone()
-            if fallback_row:
-                try:
-                    accession = fallback_row["accession_number"]
-                    sections  = prepare_sections(accession, conn)
-                except ValueError as second_err:
-                    if not dry_run:
-                        write_stage_failure(ticker, run_id,
-                                            f"extraction_failed: {second_err}", model_id, conn)
-                    return {"ticker": ticker, "outcome": "api_error",
-                            "reason": str(second_err)}
-            else:
-                if not dry_run:
-                    write_stage_failure(ticker, run_id,
-                                        f"extraction_failed: {first_err}", model_id, conn)
-                return {"ticker": ticker, "outcome": "api_error", "reason": str(first_err)}
-        else:
-            if not dry_run:
-                write_stage_failure(ticker, run_id,
-                                    f"extraction_failed: {first_err}", model_id, conn)
-            return {"ticker": ticker, "outcome": "api_error", "reason": str(first_err)}
+            write_stage_failure(ticker, run_id, f"{error_kind}: {error_detail}", model_id, conn)
+        return {"ticker": ticker, "outcome": "api_error", "reason": error_detail}
+    period = info
 
     used_full_fallback = "full" in sections
     section_texts  = {k: v[0] for k, v in sections.items()}

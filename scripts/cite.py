@@ -354,13 +354,24 @@ def _reanchor(ticker: str, conn) -> None:
 
     now = datetime.now(timezone.utc).isoformat()
 
+    # Cache-forward analyses (reused_from_run_id set) store no claims of
+    # their own — their claims live under the *source* run
+    # (moat/analysis/persist.py's copy-forward writes ai_analysis only, same
+    # convention show_ticker() already follows below: "Cache-forward runs
+    # store claims on the source run"). Joining on aa.run_id directly, as an
+    # earlier version of this query did, finds zero claims for any cached
+    # analysis and silently reanchors nothing for it. stale_analysis must
+    # still land on the *current* row (aa.run_id) — the one actually shown —
+    # not the historical source row.
     claims = conn.execute(
         """
-        SELECT ac.claim_id, ac.run_id, ac.analysis_type, ac.claim_order
-        FROM analysis_claims ac
-        JOIN ai_analysis aa ON aa.run_id = ac.run_id AND aa.ticker = ac.ticker
-                           AND aa.analysis_type = ac.analysis_type
-        WHERE ac.ticker = ? AND aa.is_current = 1
+        SELECT ac.claim_id, aa.run_id AS analysis_run_id, aa.analysis_type, ac.claim_order
+        FROM ai_analysis aa
+        JOIN analysis_claims ac
+          ON ac.run_id = COALESCE(aa.reused_from_run_id, aa.run_id)
+         AND ac.ticker = aa.ticker
+         AND ac.analysis_type = aa.analysis_type
+        WHERE aa.ticker = ? AND aa.is_current = 1
         """,
         (ticker,),
     ).fetchall()
@@ -380,7 +391,7 @@ def _reanchor(ticker: str, conn) -> None:
             tally[result] = tally.get(result, 0) + 1
 
             if result in _DEGRADED_RESULTS:
-                degraded_analyses.add((claim["run_id"], claim["analysis_type"]))
+                degraded_analyses.add((claim["analysis_run_id"], claim["analysis_type"]))
 
             conn.execute(
                 """

@@ -15,6 +15,7 @@ from moat.analysis.caller import CallResult
 from moat.analysis.persist import (
     _load_pending_batch,
     _write_pending_batch_attempts,
+    find_ticker_bundle,
     persist_result,
     run_batch_retrieval,
     submit_and_persist_batch,
@@ -38,6 +39,69 @@ def _partial(ticker, custom_id, accession="0000-00", batch_id="batch_1"):
         batch_id=batch_id,
         custom_id=custom_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# find_ticker_bundle — amendment fallback (confirmed HIGH finding, judge
+# report 20260909-131716: the batch precheck had no fallback at all, unlike
+# run_analysis(); both now share _resolve_sections_with_amendment_fallback())
+# ---------------------------------------------------------------------------
+
+def test_find_ticker_bundle_falls_back_to_original_10k(tmp_path):
+    conn = _make_db(tmp_path)
+    conn.execute(
+        "INSERT INTO filings (accession_number, ticker, form_type, filing_date, "
+        "period_of_report, local_path) VALUES (?,?,?,?,?,?)",
+        ("0000-02-000002", "TST", "10-K/A", "2024-04-20", "2023-12-31", "amendment.htm"),
+    )
+    conn.execute(
+        "INSERT INTO filings (accession_number, ticker, form_type, filing_date, "
+        "period_of_report, local_path) VALUES (?,?,?,?,?,?)",
+        ("0000-01-000001", "TST", "10-K", "2024-02-15", "2023-12-31", "original.htm"),
+    )
+    conn.commit()
+
+    amendment_path = tmp_path / "amendment.htm"
+    amendment_path.write_text("<html><body>Part III only, nothing else here.</body></html>")
+    conn.execute(
+        "UPDATE filings SET local_path = ? WHERE accession_number = '0000-02-000002'",
+        (str(amendment_path),),
+    )
+    conn.commit()
+
+    for fdi, section_id in enumerate(("item_1", "item_1a", "item_7"), start=1):
+        path = tmp_path / f"{section_id}.txt"
+        path.write_text(f"{section_id} content, plenty of words to be non-trivial.")
+        _insert_doc(
+            conn, fdi, hashlib.sha256(path.read_bytes()).hexdigest(), path,
+            section_id=section_id, accession="0000-01-000001",
+        )
+    conn.commit()
+
+    with patch("moat.analysis.persist.NORM_VERSION", "v1"), \
+         patch("moat.analysis.caller.NORM_VERSION", "v1"):
+        info = find_ticker_bundle("TST", "claude-sonnet-4-6", conn)
+
+    assert "error" not in info
+    assert info["accession"] == "0000-01-000001"  # fell back to the original, not the amendment
+    assert "content" in info
+
+
+def test_find_ticker_bundle_reports_extraction_failed_with_no_fallback_available(tmp_path):
+    conn = _make_db(tmp_path)
+    conn.execute(
+        "INSERT INTO filings (accession_number, ticker, form_type, filing_date, "
+        "period_of_report, local_path) VALUES (?,?,?,?,?,?)",
+        ("0000-02-000002", "TST", "10-K/A", "2024-04-20", "2023-12-31", str(tmp_path / "amendment.htm")),
+    )
+    (tmp_path / "amendment.htm").write_text("<html><body>Part III only.</body></html>")
+    conn.commit()
+
+    with patch("moat.analysis.persist.NORM_VERSION", "v1"), \
+         patch("moat.analysis.caller.NORM_VERSION", "v1"):
+        info = find_ticker_bundle("TST", "claude-sonnet-4-6", conn)
+
+    assert info["error"].startswith("extraction_failed:")
 
 
 # ---------------------------------------------------------------------------

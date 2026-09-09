@@ -69,6 +69,32 @@ def estimate_cost(usage: dict, model_id: str, is_batch: bool = False) -> float:
     return cost
 
 
+# Assumed output tokens (4 analyses × ~2k; thinking not included) for
+# projecting cost from a free token count alone, before any generation call.
+ASSUMED_OUTPUT_TOKENS = 8_000
+
+
+def estimate_projected_cost(
+    input_tokens: int,
+    model_id: str,
+    is_batch: bool,
+    assumed_output: int = ASSUMED_OUTPUT_TOKENS,
+) -> float:
+    """Project cost from an input token count alone (no generation call made).
+
+    Used by --dry-run's report and, since Sprint 3.1, by the batch path's
+    pre-submission cap check — submit_batch() has no way to know true cost
+    until after the batch resolves, so the cap has to be enforced against a
+    projection before submitting, not the actual cost after the fact.
+    """
+    prices = get_prices(model_id)
+    discount = BATCH_DISCOUNT if is_batch else 1.0
+    return (
+        input_tokens    * prices["input"]  / 1_000_000
+        + assumed_output * prices["output"] / 1_000_000
+    ) * discount
+
+
 def format_dry_run_report(
     ticker: str,
     model_id: str,
@@ -80,12 +106,8 @@ def format_dry_run_report(
     discount = BATCH_DISCOUNT if is_batch else 1.0
     mode = "batch" if is_batch else "sync"
 
-    # Assume ~8k output tokens (4 analyses × ~2k) for the estimate.
-    assumed_output = 8_000
-    estimated_cost = (
-        input_tokens  * prices["input"]  / 1_000_000
-        + assumed_output * prices["output"] / 1_000_000
-    ) * discount
+    assumed_output = ASSUMED_OUTPUT_TOKENS
+    estimated_cost = estimate_projected_cost(input_tokens, model_id, is_batch, assumed_output)
 
     lines = [
         f"DRY RUN — {ticker}",

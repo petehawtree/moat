@@ -1105,3 +1105,111 @@ short quote wrapped around a long uncited assertion will flatter. The
 acceptance metric is `asserted claims with ≥1 resolving citation ÷ asserted
 claims`, and it must equal **1.0** — character coverage survives only as a
 diagnostic. A gate that can be gamed by the thing it is gating is not a gate.
+
+## A16. Sprint 4 — valuation architecture (implements PRD §6)
+
+Recorded before build, the same way §A15 preceded Sprint 3, because the
+naive reading of the PRD roadmap and the existing `moat/valuation/engine.py`
+stub both understate what this sprint actually requires.
+
+### A16.1 "Sprint 4" is now two sprints, not one
+
+Sprint 3's plan document deferred its own unfinished work — the batch
+pipeline end-to-end path, three of four citation-reanchor rungs, non-offline
+stale-filing refresh, test-coverage gaps, and two small bugs — under the
+label "Sprint 4." None of that reads `fundamentals_annual` or
+`quality_scores`; all of it reads `ai_analysis`, `citations` and
+`analysis_attempts`. The PRD's actual Sprint 4 is the valuation engine, which
+reads the former and never touches the latter. One name was doing two jobs.
+
+**Decision (confirmed 2026-09-08):** split them, the way Sprint 2's
+post-review fixes got `2.1`/`2.2` rather than being folded into Sprint 3.
+**Sprint 3.1** closes the citation/batch backlog (plan:
+[sprint-3-1-plan.md](sprints/sprint-3-1-plan.md)) and authorizes the deferred
+90-company AI analysis run. **Sprint 4** is the valuation engine (plan:
+[sprint-4-plan.md](sprints/sprint-4-plan.md)) and does not depend on 3.1 —
+it can start immediately, in parallel, against whatever `quality_scores` run
+is current.
+
+### A16.2 Owner Earnings needs data this pipeline has never ingested
+
+`engine.py`'s own docstring defines owner earnings as `net income + D&A −
+maintenance capex − working-capital change`. Checking `fundamentals_edgar.py`
+and `schema.sql` against that formula: `fundamentals_annual` carries net
+income and capex (via §A13's FCF fix), but **no D&A column and no
+working-capital column exist anywhere in the schema**, and no XBRL tag for
+either is in the candidate-tag list. The formula as documented cannot
+currently be computed.
+
+**Decision:** extend ingest rather than substitute a proxy. Owner earnings
+as PRD §1 frames it ("evidence over AI opinion," conservative assumptions)
+is a specific, named methodology; quietly computing something else under
+that label repeats the exact substitution §A13 fixed for FCF (OCF standing
+in for FCF, silently, until measured). Two new columns on
+`fundamentals_annual`: `depreciation_amortization`, `working_capital_change`
+— both nullable, both carrying the same `source`/`confidence`/
+`accession_number` provenance columns the rest of the row already has.
+
+**D&A tag strategy** mirrors §A7/§A9's merge-across-candidates approach:
+primary tag `DepreciationDepletionAndAmortization` (the combined cash-flow-
+statement line most filers use), falling back to
+`DepreciationAmortizationAndAccretionNet`, falling back to summing
+`Depreciation` + `AmortizationOfIntangibleAssets` when only the split tags
+are present. This is expected to behave like revenue/net-income tagging did
+in Sprint 1 — real variance across filers, not a single canonical tag — and
+should be treated as such rather than assumed solved on the first filer
+checked.
+
+**Working-capital change is the harder one, and is flagged rather than
+reconstructed.** Unlike D&A, most filers do not report one canonical
+"change in working capital" cash-flow line — they report several
+(`IncreaseDecreaseInAccountsReceivable`, `...Inventories`,
+`...AccountsPayable`, and others), and which subset sums to a correct ΔNWC
+varies by filer in a way that risks silently wrong arithmetic rather than a
+missing value. **Decision:** use the single summary tag
+(`IncreaseDecreaseInOperatingCapital`) when a filer reports it; when absent,
+store `working_capital_change = NULL` with `quality_flags` noting "NWC
+unavailable, treated as zero" rather than summing fragments and risking a
+confident wrong number. This is the same "flag, don't guess" rule §A4 and
+§A10 already established, applied to a new field before it produces its own
+version of the Walmart-split misdiagnosis.
+
+### A16.3 Discount rate: fixed and conservative, not company-specific WACC
+
+No discount-rate methodology is specified anywhere in the PRD or this
+addendum, and no WACC input (beta, risk-free rate, credit spread) is
+ingested by any pipeline stage.
+
+**Decision (confirmed 2026-09-08):** a single fixed, conservative discount
+rate applied uniformly — not a per-company CAPM/WACC build. PRD §1 already
+does the work a per-company rate would otherwise do ("valuation must allow
+for analytical error... intrinsic value is a range, not false precision"):
+the bear/base/bull spread carries the uncertainty a differentiated discount
+rate would try to express, without a new data source (beta is not in EDGAR
+XBRL) and without reopening the tag-variance risk class for a third input.
+
+**Starting parameters (tune against real output, not decided in advance of
+seeing it — same posture as the 66.7th-percentile tercile bar and the 50.0
+quality threshold, both revisited after real runs):** discount rate 9–10%
+held constant across all three scenarios; terminal growth capped below the
+discount rate (proposed 1.5% bear / 2.5% base / 3% bull); scenarios
+differentiated by growth-rate and margin assumptions on the projected
+owner-earnings stream, not by the discount rate itself.
+
+### A16.4 Two findings folded in before build
+
+- **Price history is fetched at a 2-year window** (`fetch_price_history`'s
+  default `period="2y"`), which is enough for current price but not for
+  PRD §6's "P/E vs its own 5–10yr historical range." Extending the fetch
+  window is a one-parameter change with no effect on existing 2y consumers
+  (current-price, near-term charts) — folded into Sprint 4's ingest work
+  rather than treated as a separate decision.
+- **`margin_of_safety()`'s existing formula inverts sign when intrinsic
+  value is negative or zero.** `(low − price) / low` with a negative `low`
+  produces a *positive*-looking ratio for a company whose bear case is worth
+  less than nothing — the least safe possible result reads as the safest.
+  A bear-case owner-earnings stream going negative is not a hypothetical:
+  it is exactly what a real bear case is for. Sprint 4 must guard this case
+  explicitly (an undefined/flagged margin of safety, not a formula that
+  silently flips sign) before the first company with a negative bear
+  scenario reaches the dashboard.

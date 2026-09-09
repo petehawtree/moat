@@ -111,7 +111,7 @@ whole document — input tokens dropped 60% (AAPL: 71,731 → 29,000) and 66%
 is a real correctness fix, not a pilot-ticker-selection issue — the pattern
 it fixes is close to universal boilerplate across 10-Ks.
 
-**Known gap, not fixed this sprint: `toc_cluster` misreads a real
+**Known gap, deferred to Sprint 3.1: `toc_cluster` misreads a real
 "incorporated by reference" run as a table of contents.** JPMorgan Chase's
 real Item 7 is a one-paragraph IBR stub (the real MD&A is in a separate
 exhibit, pages 46–160), immediately followed by equally short IBR stubs for
@@ -126,7 +126,7 @@ deliberate exclusion of financials as unscreenable ([PRD_ADDENDUM.md
 not an artifact of this run. JPM was a deliberately-chosen pilot stress
 case, not a production company. Full detail and fix direction:
 [sprint-3-plan.md § Deferred to Sprint
-4](sprint-3-plan.md#low-toc_cluster-misreads-a-real-ibr-stub-run-as-a-table-of-contents).
+3.1](sprint-3-plan.md#low-toc_cluster-misreads-a-real-ibr-stub-run-as-a-table-of-contents).
 
 **Known gap, not fixed this sprint: the parser doesn't recognize the `---`
 divider the model adds between protocol sections.** `_SPLIT_RE` only
@@ -143,8 +143,11 @@ review; flagged for the next pass at `parser.py`.
 
 ## Next up
 
-Sprint 4, per [sprint-3-plan.md § Deferred to Sprint
-4](sprint-3-plan.md#deferred-to-sprint-4): the batch workflow end-to-end
+**Sprint 3.1** (renamed 2026-09-08 — see [sprint-3-1-plan.md](sprint-3-1-plan.md);
+this backlog is unrelated to the PRD's Sprint 4 valuation engine, which can
+proceed independently, see [sprint-4-plan.md](sprint-4-plan.md)), per
+[sprint-3-plan.md § Deferred to Sprint
+3.1](sprint-3-plan.md#deferred-to-sprint-31): the batch workflow end-to-end
 path (needed for the 90-company run's cost profile), non-offline stale-
 filing refresh, the remaining three reanchor rungs (moved/fuzzy/
 renormalized), the `toc_cluster` IBR-stub gap above, the `---`-divider

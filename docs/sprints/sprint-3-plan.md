@@ -525,10 +525,19 @@ rejected outright. Every row of the ladder recomputes to the stated figure.
   non-streaming call hits the SDK's HTTP timeout; use `.stream()` with
   `.get_final_message()`. Batch is unaffected.
 
-## Deferred to Sprint 4
+## Deferred to Sprint 3.1
 
 Items surfaced by judge rounds 2–3 that are genuine gaps but outside the
 Sprint 3 definition of done.
+
+**Renamed from "Sprint 4" on 2026-09-08.** The PRD roadmap's Sprint 4 is the
+DCF/Owner Earnings valuation engine (PRD §6), which reads `fundamentals_annual`
+and `quality_scores`, not `ai_analysis` — none of the items below block it or
+are blocked by it. Calling this backlog "Sprint 4" collided two unrelated
+things under one name, the same way Sprint 2's post-review fixes got their own
+`2.1`/`2.2` rather than being folded into Sprint 3. See
+[sprint-3-1-plan.md](sprint-3-1-plan.md) for the formal plan and
+[sprint-4-plan.md](sprint-4-plan.md) for the valuation engine.
 
 ### [HIGH] Normal runs silently reuse stale filings
 
@@ -537,7 +546,7 @@ valid local file exists, even on a non-offline run. A new 10-K or 10-K/A filed
 after the initial fetch is invisible — the document hash and bundle key are
 unchanged, so the analysis appears current while citing an outdated filing.
 
-**Sprint 4 fix:** on non-offline runs, fetch submissions metadata from SEC,
+**Sprint 3.1 fix:** on non-offline runs, fetch submissions metadata from SEC,
 select the latest accepted 10-K/10-K/A for the period, and short-circuit the
 download only when the cached accession matches. The offline shortcut remains
 unchanged.
@@ -550,7 +559,7 @@ persists results, retries failures by `custom_id`, or wires retrieval into the
 pipeline. The synchronous pilot path is the correct Sprint 3 approach; batch
 is the production path for the full 93-company run.
 
-**Sprint 4 fix:** persist batch request frames before submission, add a
+**Sprint 3.1 fix:** persist batch request frames before submission, add a
 `retrieve_and_persist_batch()` entry point keyed by `custom_id`, atomic persist
 or failure per item, pipeline wiring in `run_ai_analysis_stage()`.
 
@@ -561,7 +570,7 @@ remaining rungs from §A15.5 — moved (same quote, different offsets), fuzzy
 (minor normalization change), renormalized (norm_version bump) — are marked
 `# Sprint 4 scope` in the code.
 
-**Sprint 4 fix:** implement all four rungs in order; emit `citation_resolution_events`
+**Sprint 3.1 fix:** implement all four rungs in order; emit `citation_resolution_events`
 rows with the rung used; set `stale_analysis` flag on any analysis whose
 citations fall back to fuzzy or below.
 
@@ -573,7 +582,7 @@ citation-enabled API response shape. The existing suite detects formula and
 parser regressions but cannot catch operational failures in the Sprint 3
 workflows.
 
-**Sprint 4 fix:** real anonymized SEC fixture tests for section extraction,
+**Sprint 3.1 fix:** real anonymized SEC fixture tests for section extraction,
 deterministic formula fixtures with independent expected values,
 offline-refresh tests, amendment-fallback tests, and a credential-gated
 integration test for the API citation response shape.
@@ -605,7 +614,7 @@ universe are deliberately excluded as unscreenable by Sprint 2.2
 not an artifact of this screen run. JPM was a pilot stress case chosen for
 "very long risk factors," not a production company.
 
-**Sprint 4 fix (if financials enter the universe):** a structural ToC signal
+**Sprint 3.1 fix (if financials enter the universe):** a structural ToC signal
 independent of character distance — e.g. requiring a preceding "TABLE OF
 CONTENTS" heading, or page-number/dot-leader density, or treating candidates
 past some fraction of the document as immune to `toc_cluster` once at least
@@ -627,6 +636,6 @@ blocks, independent of `claim_text`, so `claim_coverage` and citation
 correctness are unaffected. The stored `claim_text` for the affected claims
 carries a trailing `\n\n---`.
 
-**Sprint 4 fix:** add a `---`-only-line pattern to `_SPLIT_RE` so it's
+**Sprint 3.1 fix:** add a `---`-only-line pattern to `_SPLIT_RE` so it's
 recognized and discarded like the other delimiters, plus a regression test
 mirroring the pilot's actual model output shape.

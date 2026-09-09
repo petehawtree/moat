@@ -8,8 +8,15 @@ Usage:
   # Synchronous call for one or more tickers (calls API + persists to DB)
   python scripts/analyze.py --tickers AAPL MSFT NVDA
 
-  # Batch submission (returns immediately with batch_id; no W4/W5 yet)
-  python scripts/analyze.py --tickers AAPL MSFT NVDA --batch
+  # Batch submission (returns immediately with batch_id; persists a
+  # 'pending' analysis_attempts row per ticker; no W4/W5 yet)
+  python scripts/analyze.py --tickers AAPL MSFT NVDA --batch --run-id r1
+
+  # Retrieve + persist a completed batch (Sprint 3.1, item 2) — reads its
+  # work list back from the 'pending' rows the --batch call above wrote, so
+  # it's safe to run this in a separate process/session, and safe to re-run
+  # after a partial failure: only rows still 'pending' are retried.
+  python scripts/analyze.py --retrieve-batch <batch_id> --run-id r1
 
   # Choose model (default: claude-sonnet-4-6)
   python scripts/analyze.py --tickers AAPL --model claude-opus-4-8
@@ -31,7 +38,7 @@ import anthropic
 
 from moat.config import ANTHROPIC_API_KEY  # loads .env as a side-effect
 from moat.db.connection import get_connection, init_db
-from moat.analysis.caller import _prompt_sha256, call_sync, submit_batch
+from moat.analysis.caller import _prompt_sha256, call_sync
 from moat.analysis.parser import parse_and_validate
 from moat.analysis.persist import compute_bundle_key, find_cached_run, persist_result, _supersede_for_bundle, _write_cache_attempt
 from moat.analysis.pricing import DEFAULT_MODEL
@@ -47,39 +54,54 @@ from moat.ingest.section_extractor import NORM_VERSION
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze: W3→W4→W5")
-    parser.add_argument("--tickers", nargs="+", required=True, metavar="TICKER")
+    parser.add_argument("--tickers", nargs="+", metavar="TICKER",
+                        help="required unless --retrieve-batch is given")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--dry-run", action="store_true",
                         help="count tokens only; no API generation call")
     parser.add_argument("--batch", action="store_true",
                         help="submit via Batch API (50%% off; async)")
+    parser.add_argument("--retrieve-batch", default=None, metavar="BATCH_ID",
+                        help="retrieve and persist a previously submitted batch "
+                             "(end-to-end path — see moat/analysis/persist.py "
+                             "run_batch_retrieval()); --tickers not needed")
     parser.add_argument("--run-id", default=None,
                         help="explicit run_id (defaults to a fresh UUID)")
     args = parser.parse_args()
+
+    if not args.retrieve_batch and not args.tickers:
+        parser.error("--tickers is required unless --retrieve-batch is given")
 
     run_id = args.run_id or str(uuid.uuid4())
     init_db()
     conn = get_connection()
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+    if args.retrieve_batch:
+        from moat.analysis.persist import run_batch_retrieval
+        summary = run_batch_retrieval(client, args.retrieve_batch, run_id, conn, model_id=args.model)
+        print(json.dumps(summary, indent=2))
+        return
+
     if args.batch:
-        batch_id, partials = submit_batch(client, args.tickers, conn, model_id=args.model)
+        from moat.analysis.persist import submit_and_persist_batch
+        batch_id, attempt_ids = submit_and_persist_batch(
+            client, args.tickers, conn, run_id, model_id=args.model,
+        )
         out = {
             "batch_id": batch_id,
+            "run_id": run_id,
             "tickers": args.tickers,
             "model_id": args.model,
-            "partial_results": {
-                t: {
-                    "accession": p.accession,
-                    "custom_id": p.custom_id,
-                    "document_map": p.document_map,
-                    "prompt_sha256": p.prompt_sha256,
-                }
-                for t, p in partials.items()
-            },
+            "attempt_ids": attempt_ids,
         }
         print(json.dumps(out, indent=2))
-        print(f"\nBatch submitted: {batch_id}", file=sys.stderr)
+        print(
+            f"\nBatch submitted: {batch_id}\n"
+            f"Retrieve once complete with:\n"
+            f"  python scripts/analyze.py --retrieve-batch {batch_id} --run-id {run_id}",
+            file=sys.stderr,
+        )
         return
 
     for ticker in args.tickers:
@@ -92,15 +114,14 @@ def main() -> None:
             # Build the prompt and compute the bundle key BEFORE any API call.
             # This lets us return immediately on a cache hit with zero spend.
             from moat.analysis.caller import prepare_sections
-            sections = prepare_sections(
-                conn.execute(
-                    "SELECT accession_number FROM filings "
-                    "WHERE ticker = ? AND local_path IS NOT NULL "
-                    "ORDER BY period_of_report DESC LIMIT 1",
-                    (ticker,),
-                ).fetchone()["accession_number"],
-                conn,
-            )
+            filing_row = conn.execute(
+                "SELECT accession_number, period_of_report FROM filings "
+                "WHERE ticker = ? AND local_path IS NOT NULL "
+                "ORDER BY period_of_report DESC LIMIT 1",
+                (ticker,),
+            ).fetchone()
+            accession = filing_row["accession_number"]
+            sections = prepare_sections(accession, conn)
             section_texts  = {k: v[0] for k, v in sections.items()}
             filing_doc_ids = {k: v[1] for k, v in sections.items()}
             # gap_sections must be computed identically to call_sync()'s, or the
@@ -108,12 +129,7 @@ def main() -> None:
             # here diverges from the one call_sync() actually sends/stores.
             content, document_map = build_request(
                 section_texts, ticker,
-                conn.execute(
-                    "SELECT period_of_report FROM filings "
-                    "WHERE ticker = ? AND local_path IS NOT NULL "
-                    "ORDER BY period_of_report DESC LIMIT 1",
-                    (ticker,),
-                ).fetchone()["period_of_report"] or "unknown",
+                filing_row["period_of_report"] or "unknown",
                 filing_doc_ids,
                 gap_sections=compute_gap_sections(section_texts),
             )
@@ -158,7 +174,7 @@ def main() -> None:
                 _supersede_for_bundle(conn, ticker, bundle_key, run_id)
                 attempt_id = _write_cache_attempt(
                     conn, run_id, ticker, args.model, prompt_sha,
-                    PROTOCOL_VERSION, reused_from, now,
+                    PROTOCOL_VERSION, reused_from, now, accession=accession,
                 )
                 conn.commit()
                 print(json.dumps({

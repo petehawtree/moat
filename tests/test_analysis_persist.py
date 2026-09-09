@@ -5,6 +5,7 @@ import json
 import sqlite3
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,6 +17,7 @@ from moat.analysis.persist import (
     compute_bundle_key,
     find_cached_run,
     persist_result,
+    run_analysis,
 )
 from moat.analysis.prompt import ANALYSIS_TYPES
 
@@ -40,6 +42,15 @@ def _make_db(tmp_path):
             section_id TEXT,
             norm_version TEXT,
             doc_sha256 TEXT,
+            local_path TEXT,
+            extraction_method TEXT
+        );
+        CREATE TABLE filings (
+            accession_number TEXT PRIMARY KEY,
+            ticker TEXT,
+            form_type TEXT,
+            filing_date TEXT,
+            period_of_report TEXT,
             local_path TEXT
         );
         CREATE TABLE ai_analysis (
@@ -70,7 +81,8 @@ def _make_db(tmp_path):
         CREATE TABLE analysis_attempts (
             attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id TEXT, ticker TEXT,
-            batch_id TEXT, custom_id TEXT,
+            batch_id TEXT, custom_id TEXT UNIQUE,
+            accession_number TEXT,
             model_id TEXT, prompt_sha256 TEXT,
             protocol_version TEXT, document_map TEXT,
             usage_json TEXT, cost_estimate REAL,
@@ -430,3 +442,64 @@ class TestPersistResultCacheHit:
         assert attempt is not None
         assert attempt["outcome"] == "persisted"
         assert "cache_hit" in attempt["failure_reason"]
+
+
+# ---------------------------------------------------------------------------
+# run_analysis — amendment fallback (Sprint 3.1, item 4 test-coverage gap)
+#
+# Decision 3 (sprint-3-plan.md): prefer the most recent 10-K/A; if its
+# section extraction fails, retry with the original 10-K for the same
+# period. No test exercised this before Sprint 3.1.
+# ---------------------------------------------------------------------------
+
+class TestRunAnalysisAmendmentFallback:
+    def _seed_filings(self, conn):
+        conn.execute(
+            "INSERT INTO filings (accession_number, ticker, form_type, filing_date, "
+            "period_of_report, local_path) VALUES (?,?,?,?,?,?)",
+            ("0000-02-000002", "TST", "10-K/A", "2024-04-20", "2023-12-31", "amendment.htm"),
+        )
+        conn.execute(
+            "INSERT INTO filings (accession_number, ticker, form_type, filing_date, "
+            "period_of_report, local_path) VALUES (?,?,?,?,?,?)",
+            ("0000-01-000001", "TST", "10-K", "2024-02-15", "2023-12-31", "original.htm"),
+        )
+        conn.commit()
+
+    def test_falls_back_to_original_10k_when_amendment_extraction_fails(self, tmp_path):
+        conn = _make_db(tmp_path)
+        self._seed_filings(conn)
+
+        # Amendment's own filing_documents row is absent and its on-disk file
+        # (patched in via filings.local_path -> a real short file) is too
+        # short to be a usable full_fallback -> prepare_sections() raises for
+        # accession 0000-02-000002. The original 10-K already has usable
+        # sections cached, so run_analysis() must retry with it instead of
+        # failing the ticker outright.
+        amendment_path = tmp_path / "amendment.htm"
+        amendment_path.write_text("<html><body>Part III only, nothing else here.</body></html>")
+        conn.execute(
+            "UPDATE filings SET local_path = ? WHERE accession_number = '0000-02-000002'",
+            (str(amendment_path),),
+        )
+        conn.commit()
+
+        for fdi, section_id in enumerate(("item_1", "item_1a", "item_7"), start=1):
+            path = tmp_path / f"{section_id}.txt"
+            path.write_text(f"{section_id} content, plenty of words to be non-trivial.")
+            _insert_doc(
+                conn, fdi, hashlib.sha256(path.read_bytes()).hexdigest(), path,
+                section_id=section_id, accession="0000-01-000001",
+            )
+        conn.commit()
+
+        client = MagicMock()
+        client.messages.count_tokens.return_value = SimpleNamespace(input_tokens=123)
+
+        with patch("moat.analysis.persist.NORM_VERSION", "v1"), \
+             patch("moat.analysis.caller.NORM_VERSION", "v1"):
+            result = run_analysis("TST", "run1", client, conn, dry_run=True)
+
+        assert result["outcome"] == "dry_run"
+        # Confirms extraction actually happened against the fallback filing.
+        client.messages.count_tokens.assert_called_once()

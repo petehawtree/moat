@@ -65,6 +65,9 @@ _ADDED_COLUMNS = {
         "superseded_by_run_id": "TEXT",
         "reused_from_run_id":   "TEXT",
         "claim_coverage":       "REAL",
+        # Sprint 3.1 (item 3): set by cite.py --reanchor when a citation
+        # resolves at 'fuzzy' or 'unresolved'.
+        "stale_analysis":       "INTEGER NOT NULL DEFAULT 0",
     },
 }
 
@@ -121,6 +124,63 @@ def _retire_legacy(conn) -> list[str]:
     return retired
 
 
+def _widen_analysis_attempts_outcome(conn) -> list[str]:
+    """Add 'pending' to analysis_attempts.outcome's CHECK constraint (Sprint 3.1).
+
+    Batch submissions now persist a request frame the moment they're
+    submitted, before any result exists (item 2's fix — see
+    moat/analysis/persist.py) — a fourth state alongside 'persisted',
+    'validation_failed', 'api_error', 'refused'. SQLite can't ALTER a CHECK
+    constraint in place, so this recreates the table like _retire_legacy(),
+    preserving every row. No other table has an FK into analysis_attempts.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='analysis_attempts'"
+    ).fetchone()
+    if row is None or "'pending'" in row["sql"]:
+        return []  # table doesn't exist yet, or already widened
+
+    # Copy whatever columns the old table actually has — this runs before the
+    # _ADDED_COLUMNS loop below, so accession_number may or may not be present
+    # yet on an old-shape DB; either way nothing is lost.
+    old_cols = [r["name"] for r in conn.execute("PRAGMA table_info(analysis_attempts)")]
+    cols_sql = ", ".join(f'"{c}"' for c in old_cols)
+
+    conn.executescript(
+        f"""
+        BEGIN;
+        ALTER TABLE analysis_attempts RENAME TO analysis_attempts_old;
+        CREATE TABLE analysis_attempts (
+            attempt_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id           TEXT NOT NULL REFERENCES pipeline_runs(run_id),
+            ticker           TEXT NOT NULL REFERENCES companies(ticker),
+            batch_id         TEXT,
+            custom_id        TEXT UNIQUE,
+            accession_number TEXT,
+            model_id         TEXT NOT NULL,
+            prompt_sha256    TEXT NOT NULL,
+            protocol_version TEXT NOT NULL,
+            document_map     TEXT NOT NULL,
+            usage_json       TEXT,
+            cost_estimate    REAL,
+            outcome          TEXT NOT NULL CHECK (outcome IN
+                               ('pending','persisted','validation_failed','api_error','refused')),
+            failure_reason   TEXT,
+            raw_response     TEXT,
+            created_at       TEXT NOT NULL
+        );
+        INSERT INTO analysis_attempts ({cols_sql})
+        SELECT {cols_sql} FROM analysis_attempts_old;
+        DROP TABLE analysis_attempts_old;
+        COMMIT;
+        """
+    )
+    return [
+        "analysis_attempts.outcome: widened CHECK to include 'pending'",
+        "analysis_attempts.accession_number",
+    ]
+
+
 def _migrate(conn) -> list[str]:
     """Add any columns missing from an existing database. Returns what it added.
 
@@ -129,10 +189,12 @@ def _migrate(conn) -> list[str]:
     those rows were ingested before we retained the information, and we
     can't invent it retroactively (docs/PRD_ADDENDUM.md §A4).
 
-    The one documented exception — ai_analysis.citations — is handled
-    separately by _retire_legacy().
+    The documented exceptions — ai_analysis.citations and
+    analysis_attempts.outcome/accession_number — are handled separately by
+    _retire_legacy() and _widen_analysis_attempts_outcome().
     """
     applied = []
+    applied += _widen_analysis_attempts_outcome(conn)
     for table, columns in _ADDED_COLUMNS.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         if not existing:

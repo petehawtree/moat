@@ -157,6 +157,36 @@ def test_parse_claims_asserted_claims_have_citations():
         assert c.citations, f"asserted claim has no citations: {c.claim_text!r}"
 
 
+def test_parse_claims_strips_trailing_divider_glued_onto_cited_block():
+    """Sprint 3.1 item 5b: the model's own '---' divider between sections
+    routinely lands inside the same cited content block as the section's
+    last claim (confirmed on AAPL, KO, JPM in the Sprint 3 pilot) — a plain
+    .strip() doesn't remove it since it isn't leading/trailing whitespace."""
+    blocks = [
+        _block("## BUSINESS QUALITY\n\nCLAIM: "),
+        _block("Revenue grew 10% to $100B.\n\n---", [_cite(0, 0, 10, "Revenue gr")]),
+        _block("\n\n## MOAT\n\nCLAIM: "),
+        _block("Ecosystem switching costs are high.", [_cite(0, 50, 60, "Ecosystem ")]),
+    ]
+    claims = _parse_claims(_reconstruct_stream(blocks))
+    bq = [c for c in claims if c.analysis_type == "business_quality"]
+    assert len(bq) == 1
+    assert bq[0].claim_text == "Revenue grew 10% to $100B."
+    assert "-" not in bq[0].claim_text
+
+
+def test_parse_claims_strips_trailing_divider_on_last_section_too():
+    """Same bug, but on the stream's very last block (no next header to
+    arrive in a later block at all)."""
+    blocks = [
+        _block("## RISK\n\nCLAIM: "),
+        _block("Tariff exposure in China is material.\n\n---\n", [_cite(0, 90, 100, "Tariff exp")]),
+    ]
+    claims = _parse_claims(_reconstruct_stream(blocks))
+    assert len(claims) == 1
+    assert claims[0].claim_text == "Tariff exposure in China is material."
+
+
 def test_parse_claims_claim_order_per_section():
     claims = _parse_claims(_reconstruct_stream(_standard_blocks()))
     bq = sorted(

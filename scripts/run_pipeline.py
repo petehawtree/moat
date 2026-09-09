@@ -45,8 +45,11 @@ def new_run_id() -> str:
 
 
 def start_run(conn, run_id: str) -> None:
+    # INSERT OR IGNORE: --retrieve-batch-id reuses the run_id a prior --batch
+    # submission already registered via _ensure_pipeline_run(); this must not
+    # raise on that already-existing row (Sprint 3.1, item 2).
     conn.execute(
-        "INSERT INTO pipeline_runs (run_id, started_at, status) VALUES (?, ?, 'running')",
+        "INSERT OR IGNORE INTO pipeline_runs (run_id, started_at, status) VALUES (?, ?, 'running')",
         (run_id, datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
@@ -161,6 +164,88 @@ def _latest_quality_run_id(conn) -> str | None:
     return row["run_id"] if row else None
 
 
+def _run_batch_submission_and_retrieval(
+    client,
+    tickers: list[str],
+    run_id: str,
+    conn,
+    model_id: str,
+    dry_run: bool,
+    poll_interval: float,
+    poll_timeout: float,
+) -> None:
+    """Cache-check, submit, poll, and retrieve — the batch path, end-to-end.
+
+    Cache hits are resolved with zero API calls and never enter the batch —
+    submit_batch() has no cache check of its own, so skipping them here is
+    what keeps a re-run of an already-analyzed universe free in batch mode
+    too. Everything else is submit_and_persist_batch() + run_batch_retrieval()
+    (moat/analysis/persist.py); a poll timeout leaves the batch's 'pending'
+    rows exactly as submit_and_persist_batch() wrote them — nothing is lost,
+    re-run this stage with --retrieve-batch-id to finish later.
+    """
+    from moat.analysis.persist import (
+        find_ticker_bundle, persist_cache_hit, run_batch_retrieval,
+        submit_and_persist_batch,
+    )
+
+    to_submit: list[str] = []
+    outcomes: dict[str, int] = {}
+
+    for ticker in tickers:
+        info = find_ticker_bundle(ticker, model_id, conn)
+        if "error" in info:
+            outcomes["api_error"] = outcomes.get("api_error", 0) + 1
+            if not dry_run:
+                from moat.analysis.persist import write_stage_failure
+                write_stage_failure(ticker, run_id, info["error"], model_id, conn)
+            print(f"    {ticker}: api_error [{info['error']}]")
+            continue
+        if info["reused_from"]:
+            if not dry_run:
+                persist_cache_hit(
+                    ticker, run_id, model_id, info["reused_from"], info["bundle_key"],
+                    info["prompt_sha"], info["accession"], conn,
+                )
+            outcomes["cache_hit"] = outcomes.get("cache_hit", 0) + 1
+            print(f"    {ticker}: cache_hit (reused from {info['reused_from']})")
+            continue
+        to_submit.append(ticker)
+
+    print(f"  ai_analysis batch: {len(to_submit)} to submit, "
+          f"{outcomes.get('cache_hit', 0)} cache hits, {outcomes.get('api_error', 0)} pre-batch errors")
+
+    if dry_run:
+        print("  ai_analysis batch: dry-run — not submitting")
+        return
+    if not to_submit:
+        print("  ai_analysis batch: nothing to submit")
+        return
+
+    batch_id, attempt_ids = submit_and_persist_batch(client, to_submit, conn, run_id, model_id=model_id)
+    print(f"  ai_analysis batch: submitted {batch_id} ({len(attempt_ids)} tickers)")
+
+    deadline = time.monotonic() + poll_timeout
+    status = "in_progress"
+    while time.monotonic() < deadline:
+        status = client.messages.batches.retrieve(batch_id).processing_status
+        if status == "ended":
+            break
+        time.sleep(poll_interval)
+
+    if status != "ended":
+        print(
+            f"  ai_analysis batch: poll timeout ({poll_timeout:.0f}s) — batch {batch_id} "
+            f"still '{status}'. Nothing lost: re-run with --retrieve-batch-id {batch_id} "
+            f"--run-id {run_id} once it ends."
+        )
+        return
+
+    summary = run_batch_retrieval(client, batch_id, run_id, conn, model_id=model_id)
+    print(f"  ai_analysis batch: retrieved {batch_id} -> {summary['outcomes']} "
+          f"({summary['still_pending']} still pending)")
+
+
 def run_ai_analysis_stage(
     conn,
     run_id: str,
@@ -168,6 +253,10 @@ def run_ai_analysis_stage(
     model_id: str | None = None,
     dry_run: bool = False,
     cost_cap_usd: float | None = None,
+    batch: bool = False,
+    retrieve_batch_id: str | None = None,
+    batch_poll_interval: float = 30.0,
+    batch_poll_timeout: float = 3600.0,
 ) -> None:
     """W1→W3→W4→W5 for every ticker that passed the quant screen.
 
@@ -178,11 +267,22 @@ def run_ai_analysis_stage(
     offline=True: skip W1 network calls; use whatever is already on disk.
     Each company is cache-checked before any API call; an unchanged bundle
     makes zero API calls and costs nothing toward the cap.
+
+    retrieve_batch_id: skip W1/submission entirely and just retrieve + persist
+    a previously submitted batch (Sprint 3.1, item 2's end-to-end path).
+    Resumable — see moat.analysis.persist.run_batch_retrieval().
+
+    batch=True: submit the synchronous path's per-ticker work as one Batch
+    API call instead, then poll until the batch ends and retrieve/persist
+    it in the same invocation. Cache hits are still resolved with zero API
+    calls and are never included in the batch. If polling times out, the
+    batch has already been persisted as 'pending' rows (submit_and_persist_batch)
+    — re-run with retrieve_batch_id to finish later; nothing is lost.
     """
     # Lazy imports — keep AI deps out of module-level load for other stages.
     import anthropic as _anthropic
     from moat.config import ANTHROPIC_API_KEY
-    from moat.analysis.persist import run_analysis
+    from moat.analysis.persist import run_analysis, run_batch_retrieval
     from moat.analysis.pricing import DEFAULT_MODEL, PILOT_CAP_USD
     from moat.ingest.filing_fetcher import run_for_ticker as w1_fetch
 
@@ -190,6 +290,17 @@ def run_ai_analysis_stage(
         model_id = DEFAULT_MODEL
     if cost_cap_usd is None:
         cost_cap_usd = PILOT_CAP_USD
+
+    if retrieve_batch_id is not None:
+        if not ANTHROPIC_API_KEY:
+            raise RuntimeError("ANTHROPIC_API_KEY not set — cannot retrieve batch")
+        client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        summary = run_batch_retrieval(client, retrieve_batch_id, run_id, conn, model_id=model_id)
+        print(
+            f"  ai_analysis: retrieved batch {retrieve_batch_id} -> {summary['outcomes']} "
+            f"({summary['still_pending']} still pending)"
+        )
+        return
 
     # --- Find screened tickers ---
     quality_run = _latest_quality_run_id(conn)
@@ -235,6 +346,13 @@ def run_ai_analysis_stage(
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY not set — cannot run AI analysis")
     client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    if batch:
+        _run_batch_submission_and_retrieval(
+            client, w1_ok, run_id, conn, model_id, dry_run,
+            batch_poll_interval, batch_poll_timeout,
+        )
+        return
 
     outcomes: dict[str, int] = {}
     accumulated_cost = 0.0
@@ -318,6 +436,20 @@ def main() -> None:
     parser.add_argument("--offline", action="store_true", help="ai_analysis: skip W1 network calls, use cached filings only")
     parser.add_argument("--cost-cap", type=float, default=None, metavar="USD",
                         help="ai_analysis: halt when accumulated cost exceeds this (default: $15.00 pilot cap)")
+    parser.add_argument("--batch", action="store_true",
+                        help="ai_analysis: submit via Batch API (50%% off), poll, and retrieve "
+                             "in this one invocation — cache hits are skipped, never batched")
+    parser.add_argument("--retrieve-batch-id", default=None, metavar="BATCH_ID",
+                        help="ai_analysis: skip submission — just retrieve + persist a batch "
+                             "a prior --batch run submitted (resumable; use --run-id to match)")
+    parser.add_argument("--batch-poll-interval", type=float, default=30.0, metavar="SECONDS",
+                        help="ai_analysis --batch: seconds between status polls (default: 30)")
+    parser.add_argument("--batch-poll-timeout", type=float, default=3600.0, metavar="SECONDS",
+                        help="ai_analysis --batch: give up polling after this long (default: 3600); "
+                             "the batch itself is unaffected — retrieve it later with --retrieve-batch-id")
+    parser.add_argument("--run-id", default=None,
+                        help="explicit run_id (defaults to a fresh one) — required to match a prior "
+                             "--batch submission's run_id when using --retrieve-batch-id")
     args = parser.parse_args()
 
     if args.init_db:
@@ -327,7 +459,7 @@ def main() -> None:
             return
 
     conn = get_connection()
-    run_id = new_run_id()
+    run_id = args.run_id or new_run_id()
     start_run(conn, run_id)
     print(f"Starting pipeline run {run_id} from stage '{args.from_stage}'")
 
@@ -360,6 +492,10 @@ def main() -> None:
                     model_id=args.model,
                     dry_run=args.dry_run,
                     cost_cap_usd=args.cost_cap,
+                    batch=args.batch,
+                    retrieve_batch_id=args.retrieve_batch_id,
+                    batch_poll_interval=args.batch_poll_interval,
+                    batch_poll_timeout=args.batch_poll_timeout,
                 )
             else:
                 print(f"-> stage '{stage}': not yet implemented (see docs/PRD_ADDENDUM.md sprint plan)")

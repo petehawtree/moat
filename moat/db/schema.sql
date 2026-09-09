@@ -202,6 +202,10 @@ CREATE TABLE IF NOT EXISTS ai_analysis (
     superseded_by_run_id    TEXT,
     reused_from_run_id      TEXT,           -- non-NULL means no API call was made
     claim_coverage          REAL,           -- asserted claims cited ÷ asserted claims; must be 1.0
+    stale_analysis          INTEGER NOT NULL DEFAULT 0,  -- Sprint 3.1: set by cite.py --reanchor
+                                             -- when any of its citations resolves at 'fuzzy' or
+                                             -- 'unresolved' (§A15.5) — the anchor is trusted less,
+                                             -- not deleted or re-pointed.
     created_at              TEXT NOT NULL,
     PRIMARY KEY (run_id, ticker, analysis_type)
 );
@@ -259,12 +263,18 @@ CREATE TABLE IF NOT EXISTS citation_resolution_events (
 
 -- Every API request frame, kept whether the attempt succeeded or failed (§A15.11).
 -- custom_id is the idempotency key used for batch retrieval; UNIQUE allows NULL.
+-- 'pending' (Sprint 3.1): a batch request frame written at submission time,
+-- before any result exists — see moat/analysis/persist.py's
+-- submit_and_persist_batch()/run_batch_retrieval(). UPSERTed to a terminal
+-- outcome in place (ON CONFLICT(custom_id)) once the batch item resolves, so
+-- retrieval is resumable: a second call only sees the rows still 'pending'.
 CREATE TABLE IF NOT EXISTS analysis_attempts (
     attempt_id       INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id           TEXT NOT NULL REFERENCES pipeline_runs(run_id),
     ticker           TEXT NOT NULL REFERENCES companies(ticker),
     batch_id         TEXT,
     custom_id        TEXT UNIQUE,
+    accession_number TEXT,             -- filing pinned at request time (Sprint 3.1)
     model_id         TEXT NOT NULL,
     prompt_sha256    TEXT NOT NULL,
     protocol_version TEXT NOT NULL,
@@ -272,7 +282,7 @@ CREATE TABLE IF NOT EXISTS analysis_attempts (
     usage_json       TEXT,
     cost_estimate    REAL,
     outcome          TEXT NOT NULL CHECK (outcome IN
-                       ('persisted','validation_failed','api_error','refused')),
+                       ('pending','persisted','validation_failed','api_error','refused')),
     failure_reason   TEXT,
     raw_response     TEXT,
     created_at       TEXT NOT NULL

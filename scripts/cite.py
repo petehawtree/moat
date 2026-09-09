@@ -28,7 +28,9 @@ Claim states:
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -201,16 +203,152 @@ def _print_run_header(run_id: str, ticker: str, conn) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Reanchor
+# Reanchor — citation resolution ladder (§A15.5)
+#
+# Six rungs, tried in order, first hit wins. The anchor (the citations row
+# itself) is never touched — only citation_resolution_events records which
+# rung answered, so an 'unresolved' result is recorded, not silently retried
+# forever or papered over by re-pointing the anchor at a lookalike span.
 # ---------------------------------------------------------------------------
 
+# Below this similarity ratio a fuzzy candidate isn't a match — it's noise.
+_FUZZY_FLOOR = 0.60
+
+# Rungs at or below this are "degraded": the exact bytes written at analysis
+# time are gone, and this ladder found something on scent rather than on
+# offset. stale_analysis is set on the analysis when its citations land here.
+_DEGRADED_RESULTS = {"fuzzy", "unresolved"}
+
+# Unicode variants normalize.py folds — matched interchangeably here too, so
+# a pre-fold quote still finds its post-fold text (and vice versa).
+_PUNCT_CLASSES = {
+    '"': '["“”]',
+    "'": "['‘’]",
+    "-": "[-‐‑‒–—]",
+}
+
+
+def _whitespace_flexible_pattern(quote: str) -> str | None:
+    """Build a regex matching `quote` with runs of whitespace and common
+    unicode punctuation variants treated as interchangeable, so offsets
+    invalidated by a norm_version bump can still be found by content."""
+    tokens = quote.split()
+    if not tokens:
+        return None
+    escaped = []
+    for tok in tokens:
+        parts = [_PUNCT_CLASSES.get(ch, re.escape(ch)) for ch in tok]
+        escaped.append("".join(parts))
+    return r"\s+".join(escaped)
+
+
+def _find_renormalized(text: str, quote: str) -> tuple[int, int] | None:
+    """Rung 4: whitespace/normalization-insensitive exact-content search."""
+    pattern = _whitespace_flexible_pattern(quote)
+    if pattern is None:
+        return None
+    m = re.search(pattern, text)
+    if not m:
+        return None
+    return m.start(), m.end()
+
+
+def _find_fuzzy(text: str, quote: str) -> tuple[int, int, float] | None:
+    """Rung 5: longest common contiguous run between quote and text, as a
+    fraction of the quote's length. A moved quote with light edits (a typo
+    fix, a renumbered cross-reference) still shares most of its bytes with
+    its new location; this is what finds it. Above _FUZZY_FLOOR only."""
+    if not quote:
+        return None
+    matcher = difflib.SequenceMatcher(None, quote, text, autojunk=False)
+    match = matcher.find_longest_match(0, len(quote), 0, len(text))
+    if match.size == 0:
+        return None
+    score = match.size / len(quote)
+    if score < _FUZZY_FLOOR:
+        return None
+    return match.b, match.b + match.size, score
+
+
+def _resolve_citation(cite_row, conn) -> dict:
+    """Run the six-rung ladder for one citation. Never raises — a filesystem
+    or DB miss at any rung just falls through to the next one.
+
+    Returns {"result", "score", "doc_sha256", "start", "end"}.
+    """
+    accession    = cite_row["accession_number"]
+    section_id   = cite_row["section_id"]
+    norm_version = cite_row["norm_version"]
+    quote        = cite_row["quote"]
+
+    own = conn.execute(
+        "SELECT doc_sha256, local_path FROM filing_documents "
+        "WHERE accession_number = ? AND section_id = ? AND norm_version = ?",
+        (accession, section_id, norm_version),
+    ).fetchone()
+    own_text = None
+    if own is not None:
+        path = Path(own["local_path"])
+        if path.exists():
+            own_text = path.read_text(encoding="utf-8")
+
+    # Rung 1: exact — same doc_sha256, offsets still land on the stored quote.
+    if own is not None and own_text is not None and own["doc_sha256"] == cite_row["doc_sha256"]:
+        start, end = cite_row["start_char"], cite_row["end_char"]
+        if 0 <= start < end <= len(own_text) and own_text[start:end] == quote:
+            return {"result": "exact", "score": 1.0, "doc_sha256": own["doc_sha256"],
+                    "start": start, "end": end}
+
+    # Rung 2: moved — exact quote search within the same section.
+    if own_text is not None:
+        idx = own_text.find(quote)
+        if idx != -1:
+            return {"result": "moved", "score": 1.0, "doc_sha256": own["doc_sha256"],
+                    "start": idx, "end": idx + len(quote)}
+
+    # Rung 3: moved_section — exact quote search across every other section
+    # of the same filing (e.g. re-extraction drew the item boundary differently).
+    siblings = conn.execute(
+        "SELECT doc_sha256, local_path FROM filing_documents "
+        "WHERE accession_number = ? AND norm_version = ? AND section_id != ?",
+        (accession, norm_version, section_id),
+    ).fetchall()
+    for sib in siblings:
+        path = Path(sib["local_path"])
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        idx = text.find(quote)
+        if idx != -1:
+            return {"result": "moved_section", "score": 1.0, "doc_sha256": sib["doc_sha256"],
+                    "start": idx, "end": idx + len(quote)}
+
+    # Rung 4: renormalized — whitespace/unicode-insensitive search, own section.
+    if own_text is not None:
+        hit = _find_renormalized(own_text, quote)
+        if hit is not None:
+            start, end = hit
+            return {"result": "renormalized", "score": 1.0, "doc_sha256": own["doc_sha256"],
+                    "start": start, "end": end}
+
+    # Rung 5: fuzzy — similarity floor, own section only.
+    if own_text is not None:
+        hit = _find_fuzzy(own_text, quote)
+        if hit is not None:
+            start, end, score = hit
+            return {"result": "fuzzy", "score": score, "doc_sha256": own["doc_sha256"],
+                    "start": start, "end": end}
+
+    # Rung 6: nothing above the floor anywhere it was looked for.
+    return {"result": "unresolved", "score": None, "doc_sha256": None, "start": None, "end": None}
+
+
 def _reanchor(ticker: str, conn) -> None:
-    """Run the resolution ladder for every current citation for this ticker.
-
-    Only the 'exact' rung is implemented (byte equality — same as write-time).
-    Further rungs (moved, renormalized, fuzzy) are Sprint 4 scope.
-
-    Writes citation_resolution_events rows and prints a summary.
+    """Run the six-rung resolution ladder for every current citation for this
+    ticker. Writes one citation_resolution_events row per citation (never an
+    overwrite — see module note above) and sets ai_analysis.stale_analysis on
+    any (run_id, ticker, analysis_type) whose citations included a fuzzy or
+    unresolved result. Prints a summary.
     """
     from datetime import datetime, timezone
 
@@ -218,7 +356,7 @@ def _reanchor(ticker: str, conn) -> None:
 
     claims = conn.execute(
         """
-        SELECT ac.claim_id, ac.analysis_type, ac.claim_order
+        SELECT ac.claim_id, ac.run_id, ac.analysis_type, ac.claim_order
         FROM analysis_claims ac
         JOIN ai_analysis aa ON aa.run_id = ac.run_id AND aa.ticker = ac.ticker
                            AND aa.analysis_type = ac.analysis_type
@@ -227,7 +365,8 @@ def _reanchor(ticker: str, conn) -> None:
         (ticker,),
     ).fetchall()
 
-    total = exact = unresolved = 0
+    tally: dict[str, int] = {}
+    degraded_analyses: set[tuple[str, str]] = set()  # (run_id, analysis_type)
 
     for claim in claims:
         cites = conn.execute(
@@ -236,14 +375,12 @@ def _reanchor(ticker: str, conn) -> None:
         ).fetchall()
 
         for cite in cites:
-            total += 1
-            state, detail = _citation_state(cite, conn)
+            resolved = _resolve_citation(cite, conn)
+            result = resolved["result"]
+            tally[result] = tally.get(result, 0) + 1
 
-            result = "exact" if state == "CURRENT" else "unresolved"
-            if state == "CURRENT":
-                exact += 1
-            else:
-                unresolved += 1
+            if result in _DEGRADED_RESULTS:
+                degraded_analyses.add((claim["run_id"], claim["analysis_type"]))
 
             conn.execute(
                 """
@@ -253,22 +390,32 @@ def _reanchor(ticker: str, conn) -> None:
                 VALUES (?,?,?,?,?,?,?)
                 """,
                 (
-                    cite["citation_id"], now, result, 1.0 if result == "exact" else None,
-                    cite["doc_sha256"] if result == "exact" else None,
-                    cite["start_char"] if result == "exact" else None,
-                    cite["end_char"] if result == "exact" else None,
+                    cite["citation_id"], now, result, resolved["score"],
+                    resolved["doc_sha256"], resolved["start"], resolved["end"],
                 ),
             )
 
+    for run_id, analysis_type in degraded_analyses:
+        conn.execute(
+            "UPDATE ai_analysis SET stale_analysis = 1 "
+            "WHERE run_id = ? AND ticker = ? AND analysis_type = ?",
+            (run_id, ticker, analysis_type),
+        )
+
     conn.commit()
 
+    total = sum(tally.values())
     print(f"\n=== Reanchor: {ticker} ===")
     print(f"    Citations checked: {total}")
-    print(f"    exact:             {exact}")
-    print(f"    unresolved:        {unresolved}")
+    for result in ("exact", "moved", "moved_section", "renormalized", "fuzzy", "unresolved"):
+        if tally.get(result):
+            print(f"    {result:<14}{tally[result]}")
     if total > 0:
-        pct = 100 * exact / total
-        print(f"    exact rate:        {pct:.1f}%")
+        exact_rate = 100 * tally.get("exact", 0) / total
+        print(f"    exact rate:        {exact_rate:.1f}%")
+    if degraded_analyses:
+        print(f"    stale_analysis set on {len(degraded_analyses)} analysis(es) "
+              f"(fuzzy or unresolved citations)")
     print(f"    events written:    {total}")
     print()
 

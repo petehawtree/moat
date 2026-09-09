@@ -5,6 +5,7 @@ All tests here are offline (no network). Network-touching functions
 and are not tested here.
 """
 import hashlib
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -233,3 +234,194 @@ def test_store_document_sha256_matches(tmp_path, monkeypatch):
     dest = _store_document("0000012345", "0000012345-23-000001", "doc.htm", content)
     stored = dest.read_bytes()
     assert hashlib.sha256(stored).hexdigest() == hashlib.sha256(content).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# run_for_ticker — Sprint 3.1 freshness fix
+#
+# Non-offline runs must always check SEC's submissions before trusting a
+# cached filing, and skip the document download only when the cached
+# accession matches what SEC currently reports as latest.
+# ---------------------------------------------------------------------------
+
+def _filings_conn():
+    """In-memory conn with the columns run_for_ticker's SQL actually touches."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE filings (
+            accession_number    TEXT PRIMARY KEY,
+            ticker              TEXT NOT NULL,
+            form_type           TEXT NOT NULL,
+            filing_date         TEXT NOT NULL,
+            period_of_report    TEXT,
+            document_url        TEXT NOT NULL,
+            primary_document_url TEXT,
+            local_path          TEXT,
+            content_hash        TEXT,
+            retrieved_at        TEXT NOT NULL
+        );
+        """
+    )
+    return conn
+
+
+def _insert_cached_filing(conn, tmp_path, accession, ticker="TST", content=None):
+    """Write a verified on-disk cache entry for `accession` and its filings row."""
+    content = content or (b"<html><body>" + b"x" * 15_000 + b"</body></html>")
+    path = tmp_path / f"{accession}.htm"
+    path.write_bytes(content)
+    sha = hashlib.sha256(content).hexdigest()
+    conn.execute(
+        "INSERT INTO filings (accession_number, ticker, form_type, filing_date, "
+        "period_of_report, document_url, local_path, content_hash, retrieved_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (accession, ticker, "10-K", "2024-02-15", "2023-12-31",
+         "https://example.com/index.htm", str(path), sha, "2024-02-16T00:00:00Z"),
+    )
+    conn.commit()
+    return path, sha
+
+
+def test_run_for_ticker_offline_no_cache_is_an_error():
+    from moat.ingest.filing_fetcher import run_for_ticker
+
+    conn = _filings_conn()
+    accession, err = run_for_ticker("TST", conn, offline=True)
+    assert accession is None
+    assert "offline" in err
+
+
+def test_run_for_ticker_offline_uses_cache_with_zero_network(tmp_path, monkeypatch):
+    """offline=True must never call fetch_submissions or the document fetcher."""
+    from moat.ingest.filing_fetcher import run_for_ticker
+
+    def _boom(*a, **kw):
+        raise AssertionError("offline run must not touch the network")
+
+    monkeypatch.setattr("moat.ingest.filing_fetcher.fetch_submissions", _boom)
+    monkeypatch.setattr("moat.ingest.filing_fetcher.fetch_filing_document", _boom)
+    monkeypatch.setattr("moat.ingest.filing_fetcher.lookup_cik", _boom)
+
+    conn = _filings_conn()
+    _insert_cached_filing(conn, tmp_path, "0001-24-000001")
+
+    accession, err = run_for_ticker("TST", conn, offline=True)
+    assert accession == "0001-24-000001"
+    assert err is None
+
+
+def test_run_for_ticker_non_offline_skips_download_when_accession_matches(tmp_path, monkeypatch):
+    """Cached accession == SEC's latest -> submissions is checked, download is not."""
+    from moat.ingest.filing_fetcher import run_for_ticker
+
+    conn = _filings_conn()
+    _insert_cached_filing(conn, tmp_path, "0001-24-000001")
+
+    monkeypatch.setattr("moat.ingest.filing_fetcher.lookup_cik", lambda ticker: "0000320193")
+    monkeypatch.setattr(
+        "moat.ingest.filing_fetcher.fetch_submissions",
+        lambda cik: {"filings": {"recent": {}}},  # select_latest_10k is patched below, so content doesn't matter
+    )
+    monkeypatch.setattr(
+        "moat.ingest.filing_fetcher.select_latest_10k",
+        lambda submissions: (
+            {"accession_number": "0001-24-000001", "form_type": "10-K",
+             "period_of_report": "2023-12-31", "filing_date": "2024-02-15",
+             "primary_document": "tst.htm"},
+            None,
+        ),
+    )
+
+    def _boom(*a, **kw):
+        raise AssertionError("accession matches cache — must not re-download")
+
+    monkeypatch.setattr("moat.ingest.filing_fetcher.fetch_filing_document", _boom)
+
+    accession, err = run_for_ticker("TST", conn, offline=False)
+    assert accession == "0001-24-000001"
+    assert err is None
+
+
+def test_run_for_ticker_non_offline_refetches_on_new_accession(tmp_path, monkeypatch):
+    """This is the freshness bug itself: SEC reports a newer accession than the
+    cache holds (a new 10-K/A filed since the initial fetch). The stale cache
+    must not be trusted — a fresh download must happen and overwrite it."""
+    from moat.ingest.filing_fetcher import run_for_ticker
+
+    conn = _filings_conn()
+    _insert_cached_filing(conn, tmp_path, "0001-24-000001")  # stale — an amendment supersedes it
+    monkeypatch.setattr("moat.ingest.filing_fetcher.FILING_DOCS_DIR", tmp_path)
+
+    monkeypatch.setattr("moat.ingest.filing_fetcher.lookup_cik", lambda ticker: "0000320193")
+    monkeypatch.setattr(
+        "moat.ingest.filing_fetcher.fetch_submissions",
+        lambda cik: {"filings": {"recent": {}}},
+    )
+    monkeypatch.setattr(
+        "moat.ingest.filing_fetcher.select_latest_10k",
+        lambda submissions: (
+            {"accession_number": "0002-24-000009", "form_type": "10-K/A",
+             "period_of_report": "2023-12-31", "filing_date": "2024-04-20",
+             "primary_document": "tst_a.htm"},
+            None,
+        ),
+    )
+
+    new_content = b"<html><body>" + b"y" * 15_000 + b"</body></html>"
+    fetch_calls = []
+
+    def _fake_fetch(cik, accession, primary_doc):
+        fetch_calls.append(accession)
+        return new_content, f"https://example.com/{accession}/{primary_doc}"
+
+    monkeypatch.setattr("moat.ingest.filing_fetcher.fetch_filing_document", _fake_fetch)
+
+    accession, err = run_for_ticker("TST", conn, offline=False)
+    assert err is None
+    assert accession == "0002-24-000009"
+    assert fetch_calls == ["0002-24-000009"]
+
+    row = conn.execute(
+        "SELECT local_path, content_hash FROM filings WHERE accession_number = ?",
+        (accession,),
+    ).fetchone()
+    assert row is not None
+    assert Path(row["local_path"]).read_bytes() == new_content
+    assert row["content_hash"] == hashlib.sha256(new_content).hexdigest()
+
+
+def test_run_for_ticker_non_offline_fetches_when_cache_row_absent(tmp_path, monkeypatch):
+    """No cache at all -> fetches and stores, same as a first run."""
+    from moat.ingest.filing_fetcher import run_for_ticker
+
+    conn = _filings_conn()
+    monkeypatch.setattr("moat.ingest.filing_fetcher.FILING_DOCS_DIR", tmp_path)
+    monkeypatch.setattr("moat.ingest.filing_fetcher.lookup_cik", lambda ticker: "0000320193")
+    monkeypatch.setattr(
+        "moat.ingest.filing_fetcher.fetch_submissions",
+        lambda cik: {"filings": {"recent": {}}},
+    )
+    monkeypatch.setattr(
+        "moat.ingest.filing_fetcher.select_latest_10k",
+        lambda submissions: (
+            {"accession_number": "0001-24-000001", "form_type": "10-K",
+             "period_of_report": "2023-12-31", "filing_date": "2024-02-15",
+             "primary_document": "tst.htm"},
+            None,
+        ),
+    )
+    content = b"<html><body>" + b"z" * 15_000 + b"</body></html>"
+    monkeypatch.setattr(
+        "moat.ingest.filing_fetcher.fetch_filing_document",
+        lambda cik, accession, primary_doc: (content, "https://example.com/tst.htm"),
+    )
+
+    accession, err = run_for_ticker("TST", conn, offline=False)
+    assert err is None
+    assert accession == "0001-24-000001"
+    row = conn.execute(
+        "SELECT local_path FROM filings WHERE accession_number = ?", (accession,),
+    ).fetchone()
+    assert Path(row["local_path"]).exists()

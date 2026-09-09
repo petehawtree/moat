@@ -298,6 +298,21 @@ def _rejection(text: str, cand: _Cand) -> Optional[str]:
 
 
 def _is_toc_cluster(text: str, pos: int) -> bool:
+    # Known gap, re-deferred in Sprint 3.1 (item 5a, sprint-3-1-plan.md):
+    # a real IBR-stub Item 7 (JPM) followed immediately by equally short IBR
+    # stubs for 7A/8/9/9A/9B trips this forward-only proximity heuristic —
+    # 4+ distinct item headings within the window is indistinguishable from
+    # a genuine ToC using distance alone. Zero current production impact
+    # (93-company passed_screen has no Financials — Sprint 2.2 excludes the
+    # sector entirely). The correct fix needs a structural signal
+    # independent of distance (a preceding "TABLE OF CONTENTS" heading, or
+    # treating candidates as immune once a primary section has already
+    # resolved at high confidence earlier in the document) — the latter
+    # requires a second extraction pass this function doesn't have, and a
+    # backward-looking-window attempt at a distance-based fix already
+    # regressed AAPL/KO once (see docs/sprints/sprint-3-plan.md). Left as-is
+    # rather than risking that regression for a sector currently excluded
+    # from the universe; revisit if/when Financials re-enter it.
     # Forward-only: a ToC entry is immediately followed by other item headings
     # in the same compact block. A real section header at the start of content
     # is not — the next 6,000 chars are narrative, not more item numbers.

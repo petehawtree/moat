@@ -82,6 +82,17 @@ _HEADER_RE = re.compile(
 _CLAIM_PREFIX = "CLAIM:"
 _IE_PREFIX    = "INSUFFICIENT EVIDENCE:"
 
+# Sprint 3.1 (item 5b): the model volunteers a markdown horizontal rule
+# between the four protocol sections — not requested by the prompt, but a
+# common enough model habit (confirmed on AAPL, KO, JPM in the Sprint 3
+# pilot). It routinely lands inside the same content block as the section's
+# last cited claim (citation blocks aren't split by _SPLIT_RE, so the
+# trailing dashes end up glued onto claim_text via a plain .strip(), which
+# only trims whitespace). Stripped at the one place all claim text is
+# finalized (_add()) rather than added to _SPLIT_RE, which drives citation
+# vs. plain-block dispatch and isn't the layer this cosmetic issue lives at.
+_TRAILING_DIVIDER_RE = re.compile(r"\n*-{3,}\s*\Z")
+
 
 # ---------------------------------------------------------------------------
 # Step 1 — reconstruct a flat token stream from content blocks
@@ -144,6 +155,7 @@ def _parse_claims(stream: list[tuple[str, list[dict]]]) -> list[ParsedClaim]:
 
     def _add(text: str, status: str, citations: list[RawCitation]) -> None:
         nonlocal pending_claim
+        text = _TRAILING_DIVIDER_RE.sub("", text).rstrip()
         if not current_type or not text:
             return
         type_claim_counts[current_type] = type_claim_counts.get(current_type, 0) + 1

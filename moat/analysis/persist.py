@@ -191,6 +191,20 @@ def persist_result(
             conn.commit()
             return attempt_id
 
+        # ---- Case 1c: batch item error (no message was ever generated) ----
+        # retrieve_batch() sets stop_reason="api_error" for a batch result of
+        # type "error" — the item itself failed on Anthropic's side. There's
+        # no content to parse, so this must not fall through to Case 3/4,
+        # which would misfile it as a validation failure.
+        if result.stop_reason == "api_error":
+            attempt_id = _write_attempt(
+                conn, run_id, result, bundle_key, now,
+                outcome="api_error",
+                failure_reason="batch_item_error",
+            )
+            conn.commit()
+            return attempt_id
+
         # ---- Case 3/4: validation failed or no parsed result ----
         if parsed is None or not parsed.is_valid:
             failure = "; ".join((parsed.validation_errors if parsed else ["no parsed result"]))
@@ -301,10 +315,10 @@ def write_stage_failure(
         conn.execute(
             """
             INSERT INTO analysis_attempts
-              (run_id, ticker, batch_id, custom_id, model_id, prompt_sha256,
-               protocol_version, document_map, usage_json, cost_estimate,
-               outcome, failure_reason, raw_response, created_at)
-            VALUES (?,?,NULL,NULL,?,?,?,?,?,?,?,?,NULL,?)
+              (run_id, ticker, batch_id, custom_id, accession_number, model_id,
+               prompt_sha256, protocol_version, document_map, usage_json,
+               cost_estimate, outcome, failure_reason, raw_response, created_at)
+            VALUES (?,?,NULL,NULL,NULL,?,?,?,?,?,?,?,?,NULL,?)
             """,
             (
                 run_id, ticker,
@@ -340,18 +354,41 @@ def _write_attempt(
     outcome: str,
     failure_reason: str | None = None,
 ) -> int:
+    """Write (or, for a batch item, resolve) this ticker's analysis_attempts row.
+
+    result.custom_id is only set for batch items — sync calls always pass
+    NULL, and SQLite's UNIQUE never treats NULLs as conflicting, so this is a
+    plain INSERT for every sync call. For a batch item, submit_and_persist_batch()
+    already wrote a 'pending' row under this exact custom_id; ON CONFLICT
+    updates it in place rather than inserting a second row (custom_id is
+    UNIQUE), which is how retrieval resolves a pending frame to its outcome.
+    """
     doc_map = {int(k): v for k, v in result.document_map.items()}
     conn.execute(
         """
         INSERT INTO analysis_attempts
-          (run_id, ticker, batch_id, custom_id, model_id, prompt_sha256,
-           protocol_version, document_map, usage_json, cost_estimate,
-           outcome, failure_reason, raw_response, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          (run_id, ticker, batch_id, custom_id, accession_number, model_id,
+           prompt_sha256, protocol_version, document_map, usage_json,
+           cost_estimate, outcome, failure_reason, raw_response, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(custom_id) DO UPDATE SET
+            run_id           = excluded.run_id,
+            batch_id         = excluded.batch_id,
+            accession_number = excluded.accession_number,
+            model_id         = excluded.model_id,
+            prompt_sha256    = excluded.prompt_sha256,
+            protocol_version = excluded.protocol_version,
+            document_map     = excluded.document_map,
+            usage_json       = excluded.usage_json,
+            cost_estimate    = excluded.cost_estimate,
+            outcome          = excluded.outcome,
+            failure_reason   = excluded.failure_reason,
+            raw_response     = excluded.raw_response,
+            created_at       = excluded.created_at
         """,
         (
             run_id, result.ticker,
-            result.batch_id, result.custom_id,
+            result.batch_id, result.custom_id, result.accession,
             result.model_id, result.prompt_sha256,
             result.protocol_version,
             json.dumps(doc_map),
@@ -362,6 +399,11 @@ def _write_attempt(
             now,
         ),
     )
+    if result.custom_id:
+        return conn.execute(
+            "SELECT attempt_id FROM analysis_attempts WHERE custom_id = ?",
+            (result.custom_id,),
+        ).fetchone()[0]
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
@@ -378,17 +420,18 @@ def _write_cache_attempt(
     protocol_version: str,
     reused_from_run_id: str,
     now: str,
+    accession: str | None = None,
 ) -> int:
     """Write the analysis_attempts audit row for a cache-hit (no API call made)."""
     conn.execute(
         """
         INSERT INTO analysis_attempts
-          (run_id, ticker, batch_id, custom_id, model_id, prompt_sha256,
-           protocol_version, document_map, usage_json, cost_estimate,
-           outcome, failure_reason, raw_response, created_at)
-        VALUES (?,?,NULL,NULL,?,?,?,?,?,?,?,?,NULL,?)
+          (run_id, ticker, batch_id, custom_id, accession_number, model_id,
+           prompt_sha256, protocol_version, document_map, usage_json,
+           cost_estimate, outcome, failure_reason, raw_response, created_at)
+        VALUES (?,?,NULL,NULL,?,?,?,?,?,?,?,?,?,NULL,?)
         """,
-        (run_id, ticker, model_id, prompt_sha256,
+        (run_id, ticker, accession, model_id, prompt_sha256,
          protocol_version,
          json.dumps({}),
          json.dumps({}),
@@ -398,6 +441,268 @@ def _write_cache_attempt(
          now),
     )
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# Cache precheck (Sprint 3.1, item 2 — used by the batch submission path)
+#
+# submit_batch() has no cache check of its own: every ticker handed to it
+# goes through a paid API call even if its bundle is already analyzed.
+# run_analysis() (the sync path) avoids that with an inline cache check, but
+# that logic lives inside one big function. These two are the same check
+# and the same copy-forward write, factored out so the batch path can skip
+# cache hits before spending anything, without duplicating run_analysis's
+# innards (which item 4 still owes a first test).
+# ---------------------------------------------------------------------------
+
+def find_ticker_bundle(ticker: str, model_id: str, conn) -> dict:
+    """Resolve the filing/sections/prompt for a ticker and check the cache.
+
+    Does the same W2/W3 prep call_sync() does, without calling the API.
+
+    Returns one of:
+      {"error": str}
+      {"reused_from": run_id_or_None, "bundle_key": str,
+       "accession": str, "prompt_sha": str}
+    """
+    filing = conn.execute(
+        "SELECT accession_number, period_of_report FROM filings "
+        "WHERE ticker = ? AND local_path IS NOT NULL "
+        "ORDER BY period_of_report DESC, filing_date DESC LIMIT 1",
+        (ticker,),
+    ).fetchone()
+    if not filing:
+        return {"error": "no_filing: no cached filing — run W1 first"}
+
+    accession = filing["accession_number"]
+    period    = filing["period_of_report"] or "unknown"
+
+    try:
+        sections = prepare_sections(accession, conn)
+    except ValueError as exc:
+        return {"error": f"extraction_failed: {exc}"}
+
+    section_texts  = {k: v[0] for k, v in sections.items()}
+    filing_doc_ids = {k: v[1] for k, v in sections.items()}
+    content, _ = build_request(
+        section_texts, ticker, period, filing_doc_ids,
+        gap_sections=compute_gap_sections(section_texts),
+    )
+    prompt_sha = _prompt_sha256(SYSTEM_PROMPT, content)
+
+    doc_sha256s = []
+    for fdi in filing_doc_ids.values():
+        row = conn.execute(
+            "SELECT doc_sha256 FROM filing_documents WHERE filing_document_id = ?",
+            (fdi,),
+        ).fetchone()
+        if row:
+            doc_sha256s.append(row["doc_sha256"])
+
+    bundle_key = compute_bundle_key(doc_sha256s, prompt_sha, model_id, NORM_VERSION, PROTOCOL_VERSION)
+    reused_from = find_cached_run(ticker, bundle_key, conn)
+    return {
+        "reused_from": reused_from,
+        "bundle_key":  bundle_key,
+        "accession":   accession,
+        "prompt_sha":  prompt_sha,
+    }
+
+
+def persist_cache_hit(
+    ticker: str,
+    run_id: str,
+    model_id: str,
+    reused_from: str,
+    bundle_key: str,
+    prompt_sha: str,
+    accession: str,
+    conn,
+) -> int:
+    """Copy an already-analyzed bundle forward under a new run_id. Zero API calls.
+
+    Same copy-forward + supersede + audit-attempt sequence as run_analysis()'s
+    cache-hit branch and persist_result()'s case 1, for callers (the batch
+    precheck) that need to do it before a CallResult exists.
+    """
+    _ensure_pipeline_run(run_id, conn)
+    now = datetime.now(timezone.utc).isoformat()
+    for at in ANALYSIS_TYPES:
+        orig = conn.execute(
+            "SELECT content, claim_coverage FROM ai_analysis "
+            "WHERE run_id = ? AND ticker = ? AND analysis_type = ?",
+            (reused_from, ticker, at),
+        ).fetchone()
+        if orig:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO ai_analysis
+                  (run_id, ticker, analysis_type, content, model,
+                   prompt_version, cache_key, is_current,
+                   reused_from_run_id, claim_coverage, created_at)
+                VALUES (?,?,?,?,?,?,?,1,?,?,?)
+                """,
+                (run_id, ticker, at, orig["content"], model_id,
+                 PROTOCOL_VERSION, bundle_key, reused_from, orig["claim_coverage"], now),
+            )
+    _supersede_for_bundle(conn, ticker, bundle_key, run_id)
+    attempt_id = _write_cache_attempt(
+        conn, run_id, ticker, model_id, prompt_sha, PROTOCOL_VERSION, reused_from, now,
+        accession=accession,
+    )
+    conn.commit()
+    return attempt_id
+
+
+# ---------------------------------------------------------------------------
+# Batch workflow (Sprint 3.1, item 2)
+#
+# submit_batch() (caller.py) was previously a dead end: it returned a
+# batch_id and in-memory partial CallResults that nothing ever persisted or
+# retrieved. The fix makes the batch durable at submission time and gives
+# retrieval a DB-only entry point:
+#   submit_and_persist_batch() — submits, then writes one 'pending'
+#     analysis_attempts row per ticker before returning.
+#   run_batch_retrieval()      — reconstructs its work list from those
+#     'pending' rows (not from any in-memory state) and persists each
+#     resolved item through the same persist_result() every other path
+#     uses — four analyses or an analysis_attempts row, never partial.
+# A crash between the two, or a process restart, loses nothing: the pending
+# rows are the queue, and a second run_batch_retrieval() call for the same
+# batch_id only sees whatever is still 'pending'.
+# ---------------------------------------------------------------------------
+
+def _write_pending_batch_attempts(
+    run_id: str,
+    partials: dict[str, CallResult],
+    conn,
+) -> dict[str, int]:
+    """Write a 'pending' request frame for every ticker in a submitted batch.
+
+    Called immediately after the Batch API confirms batch_id, before
+    returning to the caller — this is the durable record retrieval reads
+    back later; nothing else needs to survive in memory.
+    """
+    _ensure_pipeline_run(run_id, conn)
+    now = datetime.now(timezone.utc).isoformat()
+    attempt_ids: dict[str, int] = {}
+    for ticker, partial in partials.items():
+        doc_map = {int(k): v for k, v in partial.document_map.items()}
+        conn.execute(
+            """
+            INSERT INTO analysis_attempts
+              (run_id, ticker, batch_id, custom_id, accession_number, model_id,
+               prompt_sha256, protocol_version, document_map, usage_json,
+               cost_estimate, outcome, failure_reason, raw_response, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,NULL,?)
+            """,
+            (
+                run_id, ticker, partial.batch_id, partial.custom_id, partial.accession,
+                partial.model_id, partial.prompt_sha256, partial.protocol_version,
+                json.dumps(doc_map), json.dumps({}), 0.0, now,
+            ),
+        )
+        attempt_ids[ticker] = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    return attempt_ids
+
+
+def submit_and_persist_batch(
+    client,
+    tickers: list[str],
+    conn,
+    run_id: str,
+    model_id: str = DEFAULT_MODEL,
+) -> tuple[str, dict[str, int]]:
+    """Submit a batch and persist a pending request frame per ticker.
+
+    Returns (batch_id, {ticker: attempt_id}). See module note above — this
+    is what makes the batch resumable by run_batch_retrieval() alone.
+    """
+    from moat.analysis.caller import submit_batch
+
+    batch_id, partials = submit_batch(client, tickers, conn, model_id=model_id)
+    attempt_ids = _write_pending_batch_attempts(run_id, partials, conn)
+    return batch_id, attempt_ids
+
+
+def _load_pending_batch(conn, batch_id: str) -> dict[str, CallResult]:
+    """Reconstruct partial CallResults for a batch from their persisted
+    request frames — the DB, not any in-memory state, is the source of truth
+    for what a batch retrieval still owes."""
+    rows = conn.execute(
+        "SELECT ticker, custom_id, accession_number, model_id, prompt_sha256, "
+        "protocol_version, document_map FROM analysis_attempts "
+        "WHERE batch_id = ? AND outcome = 'pending'",
+        (batch_id,),
+    ).fetchall()
+    partials: dict[str, CallResult] = {}
+    for row in rows:
+        doc_map = {int(k): v for k, v in json.loads(row["document_map"]).items()}
+        partials[row["ticker"]] = CallResult(
+            ticker=row["ticker"],
+            accession=row["accession_number"],
+            model_id=row["model_id"],
+            stop_reason="pending",
+            content_blocks=[],
+            document_map=doc_map,
+            usage={},
+            prompt_sha256=row["prompt_sha256"],
+            protocol_version=row["protocol_version"],
+            cost_estimate=0.0,
+            is_batch=True,
+            batch_id=batch_id,
+            custom_id=row["custom_id"],
+        )
+    return partials
+
+
+def run_batch_retrieval(
+    client,
+    batch_id: str,
+    run_id: str,
+    conn,
+    model_id: str = DEFAULT_MODEL,
+) -> dict:
+    """Retrieve a batch's results and persist every item. Resumable.
+
+    Only call once the batch status is 'ended' — this does not poll.
+    Loads its work list from 'pending' analysis_attempts rows for this
+    batch_id; a ticker with no such row (already resolved by a prior call,
+    or never submitted) is simply not revisited.
+    """
+    from moat.analysis.caller import retrieve_batch
+
+    partials = _load_pending_batch(conn, batch_id)
+    if not partials:
+        return {"batch_id": batch_id, "outcomes": {}, "still_pending": 0}
+
+    hydrated = retrieve_batch(client, batch_id, partials, model_id=model_id)
+
+    outcomes: dict[str, int] = {}
+    still_pending = 0
+    for ticker, result in hydrated.items():
+        if result.stop_reason == "pending":
+            # Not present in the batch's results yet — status should be
+            # 'ended' by the time this is called, but retrieve_batch() takes
+            # that on faith and doesn't poll. Leave it pending for a later call.
+            still_pending += 1
+            continue
+
+        # "refusal" and "api_error" carry no generated content — persist_result()
+        # writes the attempts row straight from stop_reason and must not be
+        # handed a parsed response for either.
+        parsed = None
+        if result.stop_reason not in ("refusal", "api_error"):
+            parsed = parse_and_validate(result, conn)
+
+        attempt_id = persist_result(result, parsed, run_id, conn)
+        outcome = conn.execute(
+            "SELECT outcome FROM analysis_attempts WHERE attempt_id = ?", (attempt_id,)
+        ).fetchone()["outcome"]
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+
+    return {"batch_id": batch_id, "outcomes": outcomes, "still_pending": still_pending}
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +842,7 @@ def run_analysis(
         _supersede_for_bundle(conn, ticker, bundle_key, run_id)
         attempt_id = _write_cache_attempt(
             conn, run_id, ticker, model_id, prompt_sha,
-            PROTOCOL_VERSION, reused_from, now,
+            PROTOCOL_VERSION, reused_from, now, accession=accession,
         )
         conn.commit()
         return {

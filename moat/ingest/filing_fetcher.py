@@ -8,7 +8,15 @@ W1 acceptance (sprint-3-plan.md):
 - Retrieval validated on HTTP status, minimum length, and parseability.
 - Source URL, CIK and retrieval time recorded on filings rows.
 - filings.local_path / content_hash populated as the raw receipt.
-- A second run re-reads bytes from disk without a network request.
+- offline=True re-reads bytes from disk with zero network requests.
+
+Sprint 3.1 fix (freshness): W1's original non-offline fast path returned the
+cached filing on a bare local-file check, with no comparison against what SEC
+currently reports as the latest 10-K/10-K/A — a new filing or amendment filed
+after the initial fetch was invisible. Non-offline runs now always fetch
+submissions metadata first and select the latest accepted filing; the primary
+document download is short-circuited only when the cached accession already
+matches that selection. offline=True is unchanged: it never contacts SEC.
 """
 from __future__ import annotations
 
@@ -221,6 +229,28 @@ def _cached_filing(ticker: str, conn) -> tuple[str, str] | None:
     return row["accession_number"], row["local_path"]
 
 
+def _cached_filing_for_accession(accession: str, conn) -> str | None:
+    """Return local_path if a verified cache entry exists for this exact accession.
+
+    Used by the non-offline freshness check: the download is short-circuited
+    only when the row on disk is for the accession SEC currently reports as
+    latest, not merely "some" cached filing for the ticker.
+    """
+    row = conn.execute(
+        "SELECT local_path, content_hash FROM filings "
+        "WHERE accession_number = ? AND local_path IS NOT NULL AND content_hash IS NOT NULL",
+        (accession,),
+    ).fetchone()
+    if not row:
+        return None
+    path = Path(row["local_path"])
+    if not path.exists():
+        return None
+    if hashlib.sha256(path.read_bytes()).hexdigest() != row["content_hash"]:
+        return None
+    return row["local_path"]
+
+
 def _try_store_filing(ticker: str, cik: str, filing: dict, conn) -> None:
     """Fetch and store a secondary filing (original 10-K fallback). Best-effort.
 
@@ -286,21 +316,23 @@ def run_for_ticker(
     Returns (accession_number, error_or_None).
 
     On success: filings.local_path, content_hash, and primary_document_url
-    are populated. A second call with an unchanged filing returns immediately
-    from the on-disk cache with no network request.
+    are populated.
+
+    offline=True: reuse whatever is already on disk; do not contact SEC.
+    Zero network requests.
+
+    offline=False (default): always fetches submissions metadata from SEC
+    and selects the latest accepted 10-K/10-K/A for the period (Sprint 3.1
+    freshness fix — see module docstring). The primary-document download is
+    skipped only when the cache already holds a verified copy of that exact
+    accession; a new filing or amendment invalidates the cache automatically.
 
     When the best candidate is a 10-K/A amendment, also pre-fetches the
     original 10-K for the same period (best-effort) so the extraction fallback
     in persist.py can retry without an additional W1 call.
-
-    offline=True: reuse whatever is already on disk; do not contact SEC.
     """
-    # Fast path: verified cache entry → no network calls at all.
-    cached = _cached_filing(ticker, conn)
-    if cached and not offline:
-        return cached[0], None
-
     if offline:
+        cached = _cached_filing(ticker, conn)
         if cached:
             return cached[0], None
         return None, f"offline: no cached filing for {ticker}"
@@ -319,6 +351,11 @@ def run_for_ticker(
 
     accession   = filing["accession_number"]
     primary_doc = filing["primary_document"]
+
+    # Freshness check: short-circuit the download only when the cache already
+    # holds a verified copy of the accession SEC currently reports as latest.
+    if _cached_filing_for_accession(accession, conn):
+        return accession, None
 
     if not primary_doc:
         return None, f"primaryDocument empty for {accession}"

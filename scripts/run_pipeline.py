@@ -225,27 +225,45 @@ def _run_batch_submission_and_retrieval(
     print(f"  ai_analysis batch: {len(to_submit)} to submit, "
           f"{outcomes.get('cache_hit', 0)} cache hits, {outcomes.get('api_error', 0)} pre-batch errors")
 
-    if dry_run:
-        print("  ai_analysis batch: dry-run — not submitting")
-        return
     if not to_submit:
         print("  ai_analysis batch: nothing to submit")
         return
 
-    # Preflight cap check (free — count_tokens makes no generation call):
-    # submit only as many tickers as project to stay under cost_cap_usd.
+    # Preflight cap check (free — count_tokens makes no generation call, so
+    # this runs even under --dry-run: it's the real per-ticker/total cost
+    # projection, not a placeholder). Real runs submit only as many tickers
+    # as project to stay under cost_cap_usd; --dry-run reports the same
+    # numbers and stops here.
     capped_tickers: list[str] = []
     projected_cost = 0.0
+    per_ticker_cost: dict[str, float] = {}
     for ticker in to_submit:
         resp = client.messages.count_tokens(
             model=model_id, system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": contents[ticker]}],
         )
         ticker_cost = estimate_projected_cost(resp.input_tokens, model_id, is_batch=True)
+        per_ticker_cost[ticker] = ticker_cost
+        if dry_run:
+            print(f"    {ticker}: {resp.input_tokens:,} input tokens, ${ticker_cost:.4f} projected")
+            continue
         if projected_cost + ticker_cost > cost_cap_usd:
             break
         projected_cost += ticker_cost
         capped_tickers.append(ticker)
+
+    if dry_run:
+        total_projected = sum(per_ticker_cost.values())
+        print(
+            f"  ai_analysis batch: dry-run — ${total_projected:.3f} projected for "
+            f"{len(to_submit)} tickers, cap ${cost_cap_usd:.2f}"
+        )
+        if total_projected > cost_cap_usd:
+            over_by = total_projected - cost_cap_usd
+            print(f"    projected total exceeds the cap by ${over_by:.3f} — "
+                  f"a real run would submit fewer than {len(to_submit)} tickers "
+                  f"and hold the rest for a follow-up run")
+        return
 
     if len(capped_tickers) < len(to_submit):
         print(

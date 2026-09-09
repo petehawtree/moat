@@ -94,3 +94,42 @@ def test_cache_hits_never_count_against_the_cap(tmp_path):
     submitted_tickers = mock_submit.call_args[0][1]
     assert submitted_tickers == ["KO"]
     assert client.messages.count_tokens.call_count == 1  # only for KO, not AAPL
+
+
+def test_dry_run_projects_cost_without_submitting(tmp_path, capsys):
+    """--dry-run must still run the free count_tokens() preflight (that's
+    the whole point of a cost-establishing dry run) but never call
+    submit_and_persist_batch()."""
+    conn = MagicMock()
+    client = _fake_client(input_tokens=1000)
+
+    with patch("moat.analysis.persist.find_ticker_bundle", side_effect=lambda t, m, c: _fake_bundle(t)), \
+         patch("moat.analysis.persist.submit_and_persist_batch") as mock_submit:
+        _run_batch_submission_and_retrieval(
+            client, ["AAPL", "KO", "JPM"], "run1", conn,
+            "claude-sonnet-4-6", dry_run=True,
+            poll_interval=0.01, poll_timeout=0, cost_cap_usd=35.0,
+        )
+
+    mock_submit.assert_not_called()
+    assert client.messages.count_tokens.call_count == 3  # projected for every to-submit ticker
+    out = capsys.readouterr().out
+    assert "dry-run" in out
+    assert "projected" in out
+
+
+def test_dry_run_flags_when_projected_total_exceeds_cap(tmp_path, capsys):
+    conn = MagicMock()
+    client = _fake_client(input_tokens=1000)  # ~$0.0615/ticker on sonnet batch pricing
+
+    with patch("moat.analysis.persist.find_ticker_bundle", side_effect=lambda t, m, c: _fake_bundle(t)), \
+         patch("moat.analysis.persist.submit_and_persist_batch") as mock_submit:
+        _run_batch_submission_and_retrieval(
+            client, ["AAPL", "KO", "JPM"], "run1", conn,
+            "claude-sonnet-4-6", dry_run=True,
+            poll_interval=0.01, poll_timeout=0, cost_cap_usd=0.1,
+        )
+
+    mock_submit.assert_not_called()
+    out = capsys.readouterr().out
+    assert "exceeds the cap" in out

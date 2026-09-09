@@ -1,9 +1,11 @@
 # Sprint 3.1 — citation/batch backlog + the authorized 90-company run
 
-**Status:** Items 1–5 done, and independently judge-reviewed twice (below).
-**Item 6 not started** — holds for a separate go-ahead, and its scope is
-now **70 companies, not 90** (see [Judge review](#judge-review) and
-[Next up](#next-up)). **Plan:** [sprint-3-1-plan.md](sprint-3-1-plan.md)
+**Status:** Items 1–5 done, and independently judge-reviewed three times
+(below). **Item 6 not started** — holds for a separate go-ahead. Its scope
+is now **69 companies, not 90**, and a free `--dry-run` already confirmed
+the real projected cost: **$17.35**, well under the $35 cap (see [Judge
+review](#judge-review) and [Next up](#next-up)). **Plan:**
+[sprint-3-1-plan.md](sprint-3-1-plan.md)
 
 ## Goal
 
@@ -188,16 +190,54 @@ sprint-table row, and this retro's own §A17 cross-reference already
 covered the test-coverage gap by naming the fix as its own future sprint's
 job rather than this one's).
 
+## Dry run (free) — cost established, one more bug found
+
+`--batch --dry-run` was extended (this sprint) to run the real preflight
+cost projection — free `count_tokens()` calls, no generation, no spend —
+rather than stopping before it. Run for real against the 71-ticker
+candidate list (91 passed, minus §A17's 20 exclusions):
+
+- **AAPL**: cache hit, $0 (already analyzed in the pilot).
+- **GOOGL**: `no_filing` error — see below.
+- **69 tickers**: real per-ticker projections, ranging $0.12 (LIN) to
+  $0.48 (MRK). **Total projected: $17.351** — well under the $35 cap, and
+  under the plan's original ~$27.90 estimate for a larger company count.
+  Full per-ticker breakdown: `.judge/` isn't the right home for this one —
+  see the run's own stdout, reproducible with the command in
+  [Next up](#next-up).
+
+**GOOGL's `no_filing` error is a real bug, not a fluke** — see
+[§A18](../PRD_ADDENDUM.md#a18-dual-class-tickers-sharing-a-cik-silently-orphan-the-second-tickers-filing-row)
+and [GitHub issue #3](https://github.com/petehawtree/moat/issues/3). GOOG
+and GOOGL share one CIK and file identically; whichever ticker's W1 fetch
+runs first claims the shared `filings` row, silently orphaning the other's
+own ticker-keyed lookups. Excluded via `--exclude` alongside §A17's 20,
+same reasoning: a correct fix (resolve via CIK, not `filings.ticker`,
+across several call sites) isn't something to rush right before a live
+spend for the one company it currently affects.
+
 ## Next up
 
-**Item 6 — the 70-company run — holds for a separate go-ahead.** Per
+**Item 6 — the 69-company run — holds for a separate go-ahead.** Per
 discussion at the start of this sprint: the run spends real money and
 submits filing data to the Batch API, so it doesn't proceed on items 1–5
-landing alone. Scope corrected from the plan's "90" to **70**: the fresh
-screen (91, not 93) minus AAPL (already analyzed) minus the 20 tickers
-§A17 excludes for known debt/REIT data-quality gaps. Also still open,
-deferred to when the run happens rather than decided in the abstract now:
-sample size and selection method for the human read of the analyses (the
-pilot's convention — reading all 12 of a 3-company pilot — doesn't scale
-directly, and the plan deliberately left this a discussion point rather
-than deciding it sight-unseen).
+landing alone, or on a free dry run alone. Scope corrected from the plan's
+"90" to **69**: the fresh screen (91, not 93) minus AAPL (already
+analyzed) minus 21 exclusions (§A17's 20 debt/REIT tickers + §A18's
+GOOGL). Cost is no longer an open question — $17.35, confirmed above.
+Reproduce with:
+
+```
+python scripts/run_pipeline.py --from-stage ai_analysis --batch --dry-run --cost-cap 35 \
+  --exclude A ADSK ALAB ALNY AMT DDOG DECK DXCM GRMN LULU MNST NOW PLTR PM RMD ROL SBAC SHOP VRTX WSM GOOGL
+```
+
+Still open, deferred to when the run happens rather than decided in the
+abstract now: sample size and selection method for the human read of the
+analyses (the pilot's convention — reading all 12 of a 3-company pilot —
+doesn't scale directly to 69, and the plan deliberately left this a
+discussion point rather than deciding it sight-unseen). The per-ticker
+token counts from this dry run are one candidate input for a stratified
+sample — they're a proxy for filing size/complexity, not for analysis
+quality, but a spread across that range is a more principled slice than
+an arbitrary N.

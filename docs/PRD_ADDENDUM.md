@@ -1269,3 +1269,29 @@ slot — not yet named, since neither Sprint 4 (valuation) nor Sprint 3.1
 Filed as GitHub issues so they don't depend on this paragraph alone:
 [#1](https://github.com/petehawtree/moat/issues/1) (debt-tag extraction),
 [#2](https://github.com/petehawtree/moat/issues/2) (Real Estate scoring).
+
+### A18 Dual-class tickers sharing a CIK silently orphan the second ticker's filing row
+
+Found running a real (free, `--dry-run`) pass over item 6's actual 71-ticker
+candidate list — the pilot's 3 single-class tickers couldn't have surfaced
+this. `filings.accession_number` is the table's primary key, but GOOG and
+GOOGL share one CIK (`0001652044`) and file identically — same accession.
+GOOG's W1 fetch ran first this run and claimed that row (`ticker='GOOG'`);
+GOOGL's own fetch hit `ON CONFLICT(accession_number) DO UPDATE`
+(`moat/ingest/filing_fetcher.py`), which updates the file/hash but never
+the `ticker` column, so GOOGL's own `WHERE ticker = 'GOOGL'` lookups later
+find nothing — reported as `no_filing`, reading as "no filing available"
+when the filing is genuinely cached, just under its sibling ticker.
+
+Full blast radius in the current universe: three dual-class pairs share a
+CIK (`GOOGL/GOOG`, `FOXA/FOX`, `NWSA/NWS`); only GOOGL/GOOG are currently
+in the passed-screen set, so this bites exactly one company in item 6.
+
+**Decision (confirmed 2026-09-09):** exclude, don't fix here, same
+reasoning as §A17 — a correct fix means resolving a ticker's filing via
+CIK rather than the `filings.ticker` column across several call sites
+(`filing_fetcher.py`'s cache checks, `persist.py`'s `find_ticker_bundle()`
+and `run_analysis()`), not a one-line patch, and not something to rush
+right before a live spend. GOOGL is excluded via `run_pipeline.py
+--exclude` alongside §A17's 20 tickers. Filed as [GitHub issue
+#3](https://github.com/petehawtree/moat/issues/3).

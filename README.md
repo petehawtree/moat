@@ -22,7 +22,7 @@ Gold = the one thing no sprint replaces.
 
 ## Status
 
-**Sprint 3.1 — citation/batch backlog closed; screen refreshed; the 90-company run corrected to 70. Items 1–5 done, item 6 pending.**
+**Sprint 3.1 — citation/batch backlog closed; screen refreshed; the 90-company run corrected to 69. Items 1–5 done, item 6 pending.**
 - Retro: [sprint-3-1.md](docs/sprints/sprint-3-1.md). Plan:
   [sprint-3-1-plan.md](docs/sprints/sprint-3-1-plan.md).
 - Non-offline filing fetches now check SEC freshness before trusting the
@@ -37,7 +37,11 @@ Gold = the one thing no sprint replaces.
   data-quality gaps in that 91: incomplete debt-tag extraction (18
   companies) and Real Estate still scored on metrics §A14 already flagged
   as invalid for that sector. Excluded — not fixed — from the pending
-  90-company AI run, which is now **70 companies**. Full detail: addendum
+  90-company AI run, which is now **69 companies** (91 passed, minus AAPL
+  already analyzed, minus 21 excluded — the 20 debt/REIT tickers plus
+  GOOGL, a dual-class-ticker filing-lookup collision found by the
+  --dry-run itself, [§A18](docs/PRD_ADDENDUM.md#a18-dual-class-tickers-sharing-a-cik-silently-orphan-the-second-tickers-filing-row)). A dry run (free) confirmed the projected
+  cost: **$17.35** for the 69, well under the $35 cap. Full detail: addendum
   [§A17](docs/PRD_ADDENDUM.md#a17-sprint-31s-judge-pass-found-two-pre-existing-sprint-2-defects--excluded-from-item-6-not-fixed-there).
 
 **Sprint 3 — AI qualitative analysis, citation-enforced. Done.**
@@ -137,7 +141,7 @@ see the sprint table below.
 | 2.1 | Ingest data integrity + filing provenance — **done** | [sprint-2-1.md](docs/sprints/sprint-2-1.md) |
 | 2.2 | Data integrity: FCF, REIT revenue, FAIL vs UNAVAILABLE — **done** | [sprint-2-2.md](docs/sprints/sprint-2-2.md) |
 | 3 | AI business/moat/management/risk analysis (citation-enforced) — **done** | [sprint-3.md](docs/sprints/sprint-3.md) |
-| 3.1 | Citation/batch backlog + the 70-company AI run — items 1–5 **done**, item 6 pending | [sprint-3-1.md](docs/sprints/sprint-3-1.md) |
+| 3.1 | Citation/batch backlog + the 69-company AI run — items 1–5 **done**, item 6 pending | [sprint-3-1.md](docs/sprints/sprint-3-1.md) |
 | 4 | Owner Earnings DCF + supporting valuation methods | |
 | 5 | Investment Committee + one-page Investment Brief | |
 | 6 | Watchlist monitoring | |

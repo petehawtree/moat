@@ -40,8 +40,14 @@ Gold = the one thing no sprint replaces.
   90-company AI run, which is now **69 companies** (91 passed, minus AAPL
   already analyzed, minus 21 excluded — the 20 debt/REIT tickers plus
   GOOGL, a dual-class-ticker filing-lookup collision found by the
-  --dry-run itself, [§A18](docs/PRD_ADDENDUM.md#a18-dual-class-tickers-sharing-a-cik-silently-orphan-the-second-tickers-filing-row)). A dry run (free) confirmed the projected
-  cost: **$17.35** for the 69, well under the $35 cap. Full detail: addendum
+  --dry-run itself, [§A18](docs/PRD_ADDENDUM.md#a18-dual-class-tickers-sharing-a-cik-silently-orphan-the-second-tickers-filing-row)).
+- A $1.80 mini-pilot on the largest/smallest outlier filings (MRK, PEG,
+  LIN) found `last_toc_cluster_pos` was scoped to the whole document
+  instead of front matter — 81% of the 69 were hitting `full_fallback`
+  (sending the entire filing) because of it, not the rare edge case
+  earlier assessed as zero-impact. Fixed; full_fallback dropped to 30%,
+  and item 6's real projected cost dropped **$17.35 → $12.15**, confirmed
+  by re-running the dry run. Full detail: addendum
   [§A17](docs/PRD_ADDENDUM.md#a17-sprint-31s-judge-pass-found-two-pre-existing-sprint-2-defects--excluded-from-item-6-not-fixed-there).
 
 **Sprint 3 — AI qualitative analysis, citation-enforced. Done.**

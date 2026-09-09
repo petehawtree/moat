@@ -2,9 +2,10 @@
 
 **Status:** Items 1–5 done, and independently judge-reviewed three times
 (below). **Item 6 not started** — holds for a separate go-ahead. Its scope
-is now **69 companies, not 90**, and a free `--dry-run` already confirmed
-the real projected cost: **$17.35**, well under the $35 cap (see [Judge
-review](#judge-review) and [Next up](#next-up)). **Plan:**
+is now **69 companies, not 90** (2 already analyzed via a real mini-pilot
+that also found and fixed a systemic extraction bug — see [Mini-pilot](#mini-pilot-real-spend-180--found-a-systemic-extraction-bug)).
+Real projected cost for the rest: **$12.15**, well under the $35 cap (see
+[Judge review](#judge-review) and [Next up](#next-up)). **Plan:**
 [sprint-3-1-plan.md](sprint-3-1-plan.md)
 
 ## Goal
@@ -194,17 +195,12 @@ job rather than this one's).
 
 `--batch --dry-run` was extended (this sprint) to run the real preflight
 cost projection — free `count_tokens()` calls, no generation, no spend —
-rather than stopping before it. Run for real against the 71-ticker
-candidate list (91 passed, minus §A17's 20 exclusions):
+rather than stopping before it. First run, against the 71-ticker candidate
+list (91 passed, minus §A17's 20 exclusions):
 
 - **AAPL**: cache hit, $0 (already analyzed in the pilot).
 - **GOOGL**: `no_filing` error — see below.
-- **69 tickers**: real per-ticker projections, ranging $0.12 (LIN) to
-  $0.48 (MRK). **Total projected: $17.351** — well under the $35 cap, and
-  under the plan's original ~$27.90 estimate for a larger company count.
-  Full per-ticker breakdown: `.judge/` isn't the right home for this one —
-  see the run's own stdout, reproducible with the command in
-  [Next up](#next-up).
+- **69 tickers**: real per-ticker projections. **Total projected: $17.351.**
 
 **GOOGL's `no_filing` error is a real bug, not a fluke** — see
 [§A18](../PRD_ADDENDUM.md#a18-dual-class-tickers-sharing-a-cik-silently-orphan-the-second-tickers-filing-row)
@@ -216,16 +212,61 @@ same reasoning: a correct fix (resolve via CIK, not `filings.ticker`,
 across several call sites) isn't something to rush right before a live
 spend for the one company it currently affects.
 
+## Mini-pilot (real spend, $1.80) — found a systemic extraction bug
+
+The dry run's per-ticker token counts ran 39k (LIN) to 279k (MRK) — a 7x
+spread worth stress-testing the way JPM stress-tested the pilot. Ran
+`scripts/analyze.py --tickers MRK PEG LIN` (sync, real spend) on the three
+biggest outliers plus the smallest:
+
+- **PEG, LIN**: `persisted`, coverage 1.0.
+- **MRK**: `validation_failed` — one asserted claim (a debt figure) had no
+  citation. Correctly handled: only an `analysis_attempts` row was
+  written, no partial analysis.
+
+Both MRK and PEG had fallen back to `full_fallback` — sending the *entire*
+695k/792k-char document instead of targeted sections. Checking the
+extraction trace found why, and it wasn't a fluke: `last_toc_cluster_pos`
+was computed as the single latest `toc_cluster` rejection *anywhere in the
+document*, including the ordinary Item 7A/8/9/9A/9B cluster — short,
+tightly packed headings in essentially every normal 10-K, not just JPM's
+IBR-stub case. **56 of the 69 real candidates (81%) hit this** — item 5a's
+"zero current impact" framing was true only for the narrower thing it
+measured (Financials on the stale 93-set), not for the actual production
+universe. Fixed (see the code-history commit and
+[sprint-3-section-extraction-rules.md](sprint-3-section-extraction-rules.md)'s
+criterion-6 amendment): a `toc_cluster` rejection only counts toward
+`last_toc_cluster_pos` when it sits at or before 20% of document length —
+a threshold chosen from a measured, clean gap in the real data (7
+companies at 8.8–13.3%, everything else at 30.1%+).
+
+Re-extracting the affected companies under the fix (55 cleared; PEG's
+cache was left alone — it already has real citations from the mini-pilot)
+and re-running the same dry run:
+
+| | Before fix | After fix |
+|---|---|---|
+| full_fallback rate | 56/69 (81%) | 21/69 (30%) |
+| Total projected cost | $17.351 | **$12.149** |
+
+The remaining 21 are confirmed different, unrelated causes (checked
+AMGN/MO: tie-break ambiguity between multiple valid assignments; ZTS/UNH:
+no consistent assignment found at all; NFLX: one section under its length
+floor) — a more heterogeneous set than the one root cause this fix
+addresses. Tracked, not chased further here:
+[GitHub issue #4](https://github.com/petehawtree/moat/issues/4).
+
 ## Next up
 
 **Item 6 — the 69-company run — holds for a separate go-ahead.** Per
 discussion at the start of this sprint: the run spends real money and
 submits filing data to the Batch API, so it doesn't proceed on items 1–5
-landing alone, or on a free dry run alone. Scope corrected from the plan's
-"90" to **69**: the fresh screen (91, not 93) minus AAPL (already
-analyzed) minus 21 exclusions (§A17's 20 debt/REIT tickers + §A18's
-GOOGL). Cost is no longer an open question — $17.35, confirmed above.
-Reproduce with:
+landing alone, on a free dry run alone, or on the mini-pilot alone. Scope:
+the fresh screen (91, not 93) minus AAPL (already analyzed) minus 21
+exclusions (§A17's 20 debt/REIT tickers + §A18's GOOGL) = 69 companies (2
+— PEG, LIN — already analyzed via the mini-pilot, leaving 67 left to
+submit). Cost is no longer an open question — **$12.149**, confirmed
+above, well under the $35 cap. Reproduce with:
 
 ```
 python scripts/run_pipeline.py --from-stage ai_analysis --batch --dry-run --cost-cap 35 \

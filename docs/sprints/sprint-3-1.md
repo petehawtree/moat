@@ -1,8 +1,9 @@
 # Sprint 3.1 — citation/batch backlog + the authorized 90-company run
 
-**Status:** Items 1–5 done. **Item 6 (the 90-company run) not started** —
-holds for a separate go-ahead before spending against the Batch API; see
-[Next up](#next-up). **Plan:** [sprint-3-1-plan.md](sprint-3-1-plan.md)
+**Status:** Items 1–5 done, and independently judge-reviewed twice (below).
+**Item 6 not started** — holds for a separate go-ahead, and its scope is
+now **70 companies, not 90** (see [Judge review](#judge-review) and
+[Next up](#next-up)). **Plan:** [sprint-3-1-plan.md](sprint-3-1-plan.md)
 
 ## Goal
 
@@ -115,14 +116,74 @@ existing `_migrate()` pattern (no drops, no backfill):
   `citations` rows preserved; `--reanchor` against the real pilot data
   (AAPL/KO/JPM) resolves all 99 at `exact`, as expected.
 
+## Judge review
+
+Run twice via `./judge.sh` against this branch (reports in `.judge/`, not
+committed). **First pass** (`judge-report-20260909-131716.md`) found three
+real Highs, all confirmed by direct code inspection before fixing, all in
+this sprint's own code:
+
+- Batch mode had no spend-cap enforcement — `_run_batch_submission_and_
+  retrieval()` never received `cost_cap_usd` at all. Fixed with a
+  preflight projection (free `count_tokens()` calls, same assumed-output
+  formula `--dry-run` uses) that caps how many tickers are ever submitted.
+- The batch cache-precheck (`find_ticker_bundle()`) had no amendment
+  fallback, unlike the sync path. Fixed by factoring
+  `_resolve_sections_with_amendment_fallback()` out of `run_analysis()` so
+  both paths share it and can't drift again.
+- `_reanchor()` joined `analysis_claims` straight on the current
+  `ai_analysis.run_id`, but a cache-forward row stores no claims of its
+  own (they live under `reused_from_run_id`) — every cached/reused
+  analysis silently reanchored zero citations. Fixed to join through
+  `COALESCE(reused_from_run_id, run_id)`.
+
+That pass also flagged the persisted 93-company `passed_screen` set as
+stale relative to current code (it predates commit `e8a824f`). Re-running
+screen+quality (no API cost) confirmed it exactly: **91/505, not 93** —
+EBAY/GEN/KVUE/VLTO/VRSN drop out, AZO/CRWD/SBAC newly pass, and KO/JPM (2
+of the pilot's 3 already-analyzed companies) no longer pass at all.
+
+**Second pass** (`judge-report-20260909-134928.md`), against the fixes and
+the fresh screen data, confirmed all three Highs resolved and surfaced two
+more issues in this sprint's own code — a MEDIUM (fixed) and a LOW (fixed,
+second time it was raised):
+
+- The `moved`/`moved_section`/`renormalized` rungs accepted the *first*
+  exact-content match with no check it was the right one — confirmed real:
+  the JPM pilot corpus already has citations whose quote appears twice in
+  the same document. Fixed with `_disambiguate()`: a repeated match is
+  only accepted when exactly one occurrence's surrounding text matches the
+  citation's own stored prefix/suffix (§A15.3); otherwise the rung falls
+  through. `fuzzy` (rung 5) deliberately still doesn't disambiguate — a
+  documented, bounded limitation, not folded into this fix.
+- The live API test's `ANTHROPIC_API_KEY`-presence gate meant a bare
+  `pytest` in this repo's own configured environment could make a real
+  network call and fail non-deterministically. Now requires
+  `RUN_LIVE_API_TESTS=1` explicitly.
+
+It also surfaced two Highs that are **not** Sprint 3.1 scope — real,
+independently confirmed, but in already-shipped Sprint 2.1/2.2 code
+(`fundamentals_edgar.py` debt-tag extraction; `quant_screen.py` scoring
+Real Estate on metrics §A14 already flagged as invalid for that sector,
+still unfixed). Written up as [PRD_ADDENDUM.md
+§A17](../PRD_ADDENDUM.md#a17-sprint-31s-judge-pass-found-two-pre-existing-sprint-2-defects--excluded-from-item-6-not-fixed-there)
+rather than fixed on this branch. Decision: exclude the 20 affected
+tickers from item 6 via `run_pipeline.py`'s new `--exclude` flag (an
+operational filter, not a change to the persisted screen data) and track
+the real fix as its own future sprint slot.
+
+160 tests now (114 at the start of this sprint).
+
 ## Next up
 
-**Item 6 — the 90-company run — holds for a separate go-ahead.** Per
-discussion at the start of this sprint: the run spends real money
-(~$27.90, inside the $35 production cap) and submits every remaining
-company's filing data to the Batch API, so it doesn't proceed on items 1–5
-landing alone. Also still open, deferred to when the run happens rather
-than decided in the abstract now: sample size and selection method for the
-human read of the 90 analyses (the pilot's convention — reading all 12 of a
-3-company pilot — doesn't scale directly, and the plan deliberately left
-this a discussion point rather than deciding it sight-unseen).
+**Item 6 — the 70-company run — holds for a separate go-ahead.** Per
+discussion at the start of this sprint: the run spends real money and
+submits filing data to the Batch API, so it doesn't proceed on items 1–5
+landing alone. Scope corrected from the plan's "90" to **70**: the fresh
+screen (91, not 93) minus AAPL (already analyzed) minus the 20 tickers
+§A17 excludes for known debt/REIT data-quality gaps. Also still open,
+deferred to when the run happens rather than decided in the abstract now:
+sample size and selection method for the human read of the analyses (the
+pilot's convention — reading all 12 of a 3-company pilot — doesn't scale
+directly, and the plan deliberately left this a discussion point rather
+than deciding it sight-unseen).

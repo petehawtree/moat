@@ -294,6 +294,7 @@ def run_ai_analysis_stage(
     retrieve_batch_id: str | None = None,
     batch_poll_interval: float = 30.0,
     batch_poll_timeout: float = 3600.0,
+    exclude_tickers: set[str] | None = None,
 ) -> None:
     """W1→W3→W4→W5 for every ticker that passed the quant screen.
 
@@ -315,6 +316,13 @@ def run_ai_analysis_stage(
     calls and are never included in the batch. If polling times out, the
     batch has already been persisted as 'pending' rows (submit_and_persist_batch)
     — re-run with retrieve_batch_id to finish later; nothing is lost.
+
+    exclude_tickers: skip these even though they passed_screen=1. For a
+    known-bad screen result that hasn't been fixed at the source yet
+    (PRD_ADDENDUM.md §A17: the 20260909T124824Z run's debt-tag gaps and
+    unscreenable REITs) — an operational exclusion, not a change to the
+    persisted screen data itself, which stays an honest record of what the
+    screen actually computed.
     """
     # Lazy imports — keep AI deps out of module-level load for other stages.
     import anthropic as _anthropic
@@ -354,6 +362,12 @@ def run_ai_analysis_stage(
             (quality_run,),
         )
     ]
+    if exclude_tickers:
+        excluded_here = [t for t in tickers if t in exclude_tickers]
+        tickers = [t for t in tickers if t not in exclude_tickers]
+        if excluded_here:
+            print(f"  ai_analysis: excluding {len(excluded_here)} tickers "
+                  f"(--exclude): {excluded_here}")
     print(
         f"  ai_analysis: {len(tickers)} tickers from quality run {quality_run}"
         + ("  [offline]" if offline else "")
@@ -487,6 +501,10 @@ def main() -> None:
     parser.add_argument("--run-id", default=None,
                         help="explicit run_id (defaults to a fresh one) — required to match a prior "
                              "--batch submission's run_id when using --retrieve-batch-id")
+    parser.add_argument("--exclude", nargs="+", default=None, metavar="TICKER",
+                        help="ai_analysis: skip these tickers even though they passed_screen=1 "
+                             "(operational exclusion for a known-bad screen result; "
+                             "see PRD_ADDENDUM.md §A17)")
     args = parser.parse_args()
 
     if args.init_db:
@@ -533,6 +551,7 @@ def main() -> None:
                     retrieve_batch_id=args.retrieve_batch_id,
                     batch_poll_interval=args.batch_poll_interval,
                     batch_poll_timeout=args.batch_poll_timeout,
+                    exclude_tickers=set(args.exclude) if args.exclude else None,
                 )
             else:
                 print(f"-> stage '{stage}': not yet implemented (see docs/PRD_ADDENDUM.md sprint plan)")

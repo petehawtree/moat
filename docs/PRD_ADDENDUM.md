@@ -1213,3 +1213,56 @@ owner-earnings stream, not by the discount rate itself.
   explicitly (an undefined/flagged margin of safety, not a formula that
   silently flips sign) before the first company with a negative bear
   scenario reaches the dashboard.
+
+### A17 Sprint 3.1's judge pass found two pre-existing Sprint 2 defects — excluded from item 6, not fixed there
+
+Sprint 3.1's external judge review (`.judge/judge-report-20260909-134928.md`)
+surfaced two real, confirmed defects in code Sprint 3.1 doesn't own —
+`moat/ingest/fundamentals_edgar.py`'s debt-tag extraction (Sprint 2.1) and
+`moat/screen/quant_screen.py`'s sector-applicability exclusions (Sprint
+2.2) — only because re-running screen+quality against current code (also
+this pass: see below) gave the judge a current dataset to check debt
+figures against. Confirmed by direct inspection, not taken on the judge's
+word:
+
+- **Debt-tag extraction omits common debt concepts.** The candidate tag
+  list misses `LongTermDebt` and
+  `LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities`.
+  **18 of the 91 companies** passing the `20260909T124824Z` screen run
+  have `total_debt IS NULL` (confirmed: A, ADSK, ALAB, ALNY, DDOG, DECK,
+  DXCM, GRMN, LULU, MNST, NOW, PLTR, PM, RMD, ROL, SHOP, VRTX, WSM) — the
+  debt/FCF metric isn't scored *against* them, it's silently excluded from
+  their denominator, which can inflate a composite score built on fewer
+  assessed metrics. AMT stores $3.39bn debt against SEC's actual
+  $37.2bn-including-current-maturities figure (0.9x reported vs. 9.8x
+  actual — an absolute-floor failure hiding behind wrong data, not a
+  missing one).
+- **Real Estate is scored on metrics this repository already documents as
+  invalid for the sector — a re-confirmation, not a new discovery.** §A14
+  excludes Financials from FCF/debt scoring via `SECTOR_INAPPLICABLE_METRICS`
+  and explicitly named Real Estate as "the obvious next candidate for the
+  same treatment... not done here — flagged rather than quietly extended
+  beyond what the review evidenced." That flag is still open: Real Estate
+  isn't in `SECTOR_INAPPLICABLE_METRICS`, so AMT and SBAC pass using
+  FCF-margin and debt/FCF when FFO/AFFO is the documented correct basis.
+
+**Decision (confirmed 2026-09-09):** exclude, don't fix here. Both are real
+defects in already-shipped Sprint 2.1/2.2 code, not Sprint 3.1 scope (items
+1–5, sprint-3-1-plan.md) — fixing a debt-tag hierarchy and adding a REIT
+exclusion properly is its own piece of work, not a patch bolted onto a
+citation/batch-workflow branch. For item 6 (the 90-company run), the 20
+affected tickers (18 null-debt ∪ {AMT, SBAC}, no overlap) are passed via
+`run_pipeline.py --exclude` (Sprint 3.1's new operational-exclusion flag —
+filters the ai_analysis stage's ticker list without touching the persisted
+`quality_scores` row, which stays an honest record of what the screen
+actually computed). Net effect on item 6's scope: **70 companies, not 90**
+— re-running screen+quality against current code already dropped the
+count from 93 to 91 (see sprint-3-1.md), and this exclusion removes 20 more
+of the 91 (one, AAPL, is already analyzed either way).
+
+**Tracked, not silently dropped:** a debt-tag hierarchy fix (prefer
+"including current maturities" totals; otherwise sum validated non-current
++ current variants; real-fact regression fixtures for A/ADSK/AMT) and a
+Real Estate `SECTOR_INAPPLICABLE_METRICS` entry belong in their own sprint
+slot — not yet named, since neither Sprint 4 (valuation) nor Sprint 3.1
+(citation/batch) is the right home for a quant-screen data-quality fix.

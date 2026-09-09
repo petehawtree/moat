@@ -242,22 +242,75 @@ def _whitespace_flexible_pattern(quote: str) -> str | None:
     return r"\s+".join(escaped)
 
 
-def _find_renormalized(text: str, quote: str) -> tuple[int, int] | None:
-    """Rung 4: whitespace/normalization-insensitive exact-content search."""
+def _disambiguate(
+    text: str, candidates: list[tuple[int, int]], prefix: str, suffix: str,
+) -> tuple[int, int] | None:
+    """Pick the one candidate span whose surrounding text matches the
+    citation's own stored prefix/suffix — §A15.3's repeated-quote
+    disambiguator, and a confirmed gap (judge report 20260909-134928): the
+    moved/moved_section/renormalized rungs used to accept the *first*
+    occurrence of an exact-content match with no check that it was the
+    right one, so a quote repeated elsewhere in the filing (confirmed to
+    happen in the JPM pilot corpus) could silently resolve to different
+    evidence than the citation actually supports.
+
+    Zero candidates -> None (not found at this rung). One candidate -> it,
+    unconditionally (nothing to disambiguate). Multiple candidates -> only
+    the single one whose exact context matches; if none or more than one
+    do, None — falling through to the next rung beats guessing.
+    """
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    matches = [
+        (s, e) for s, e in candidates
+        if text[max(0, s - len(prefix)): s] == prefix
+        and text[e: e + len(suffix)] == suffix
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _find_all_exact(text: str, quote: str) -> list[tuple[int, int]]:
+    """Every non-overlapping occurrence of `quote` in `text`."""
+    if not quote:
+        return []
+    spans = []
+    start = 0
+    while True:
+        idx = text.find(quote, start)
+        if idx == -1:
+            break
+        spans.append((idx, idx + len(quote)))
+        start = idx + 1
+    return spans
+
+
+def _find_renormalized(text: str, quote: str, prefix: str, suffix: str) -> tuple[int, int] | None:
+    """Rung 4: whitespace/normalization-insensitive exact-content search,
+    disambiguated the same way as rungs 2/3 when the pattern matches more
+    than once."""
     pattern = _whitespace_flexible_pattern(quote)
     if pattern is None:
         return None
-    m = re.search(pattern, text)
-    if not m:
-        return None
-    return m.start(), m.end()
+    candidates = [(m.start(), m.end()) for m in re.finditer(pattern, text)]
+    return _disambiguate(text, candidates, prefix, suffix)
 
 
 def _find_fuzzy(text: str, quote: str) -> tuple[int, int, float] | None:
     """Rung 5: longest common contiguous run between quote and text, as a
     fraction of the quote's length. A moved quote with light edits (a typo
     fix, a renumbered cross-reference) still shares most of its bytes with
-    its new location; this is what finds it. Above _FUZZY_FLOOR only."""
+    its new location; this is what finds it. Above _FUZZY_FLOOR only.
+
+    Known limitation, not fixed here: unlike rungs 2-4, this does not
+    disambiguate a quote with light edits repeated at more than one
+    location — it takes the single longest match difflib finds. Rungs 2-4
+    are exact-content searches where a repeat is unambiguous to detect and
+    dangerous to guess at (§A15.3); fuzzy is already the last, approximate
+    rung before 'unresolved', and folding prefix/suffix into an inherently
+    approximate similarity match is a larger redesign than this fix covers.
+    """
     if not quote:
         return None
     matcher = difflib.SequenceMatcher(None, quote, text, autojunk=False)
@@ -280,6 +333,8 @@ def _resolve_citation(cite_row, conn) -> dict:
     section_id   = cite_row["section_id"]
     norm_version = cite_row["norm_version"]
     quote        = cite_row["quote"]
+    prefix       = cite_row["prefix"] or ""
+    suffix       = cite_row["suffix"] or ""
 
     own = conn.execute(
         "SELECT doc_sha256, local_path FROM filing_documents "
@@ -299,15 +354,21 @@ def _resolve_citation(cite_row, conn) -> dict:
             return {"result": "exact", "score": 1.0, "doc_sha256": own["doc_sha256"],
                     "start": start, "end": end}
 
-    # Rung 2: moved — exact quote search within the same section.
+    # Rung 2: moved — exact quote search within the same section. A repeated
+    # quote is disambiguated by prefix/suffix (§A15.3), not just taken as the
+    # first hit — see _disambiguate()'s docstring for why that used to be a
+    # silent-wrong-pointer risk.
     if own_text is not None:
-        idx = own_text.find(quote)
-        if idx != -1:
+        hit = _disambiguate(own_text, _find_all_exact(own_text, quote), prefix, suffix)
+        if hit is not None:
+            start, end = hit
             return {"result": "moved", "score": 1.0, "doc_sha256": own["doc_sha256"],
-                    "start": idx, "end": idx + len(quote)}
+                    "start": start, "end": end}
 
     # Rung 3: moved_section — exact quote search across every other section
-    # of the same filing (e.g. re-extraction drew the item boundary differently).
+    # of the same filing (e.g. re-extraction drew the item boundary
+    # differently). A sibling with an unresolvable repeat is skipped in
+    # favor of one with a unique match, rather than accepted blindly.
     siblings = conn.execute(
         "SELECT doc_sha256, local_path FROM filing_documents "
         "WHERE accession_number = ? AND norm_version = ? AND section_id != ?",
@@ -318,14 +379,15 @@ def _resolve_citation(cite_row, conn) -> dict:
         if not path.exists():
             continue
         text = path.read_text(encoding="utf-8")
-        idx = text.find(quote)
-        if idx != -1:
+        hit = _disambiguate(text, _find_all_exact(text, quote), prefix, suffix)
+        if hit is not None:
+            start, end = hit
             return {"result": "moved_section", "score": 1.0, "doc_sha256": sib["doc_sha256"],
-                    "start": idx, "end": idx + len(quote)}
+                    "start": start, "end": end}
 
     # Rung 4: renormalized — whitespace/unicode-insensitive search, own section.
     if own_text is not None:
-        hit = _find_renormalized(own_text, quote)
+        hit = _find_renormalized(own_text, quote, prefix, suffix)
         if hit is not None:
             start, end = hit
             return {"result": "renormalized", "score": 1.0, "doc_sha256": own["doc_sha256"],

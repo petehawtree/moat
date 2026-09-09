@@ -10,18 +10,24 @@ document_index/start_char_index/end_char_index/cited_text, where cited_text
 is a true byte-exact substring of the source document at those offsets —
 the exact property W4's write-path assertion depends on (§A15.5).
 
-Skipped unless ANTHROPIC_API_KEY is set. This is the one test in the suite
-that costs money (a fraction of a cent on claude-haiku) and needs live
-credentials — it is not run by a bare `pytest`/CI invocation that lacks a
-key, and this repo does not run it automatically either.
+Skipped unless RUN_LIVE_API_TESTS=1 is set explicitly. This is the one
+test in the suite that costs money (a fraction of a cent on claude-haiku)
+and needs live credentials, network access, and a live ANTHROPIC_API_KEY —
+gating on RUN_LIVE_API_TESTS rather than the key's mere presence (judge
+report 20260909-131716/134928, LOW) matters because moat.config loads
+.env as an import-time side effect: any developer with a key configured
+for normal (paid, intentional) use of this repo would otherwise have a
+bare `pytest` silently make a real network call, non-deterministically
+fail the whole suite on a DNS/connectivity hiccup, and spend money none of
+that developer's other test runs do.
 """
 import os
 
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="requires a live ANTHROPIC_API_KEY — makes one real, minimal (~$0.001) API call",
+    os.environ.get("RUN_LIVE_API_TESTS") != "1",
+    reason="opt-in only — set RUN_LIVE_API_TESTS=1 to make one real, minimal (~$0.001) API call",
 )
 
 

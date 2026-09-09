@@ -10,7 +10,7 @@ import sqlite3
 
 import pytest
 
-from scripts.cite import _reanchor, _resolve_citation
+from scripts.cite import _DEGRADED_RESULTS, _reanchor, _resolve_citation
 
 
 def _conn():
@@ -172,6 +172,81 @@ def test_rung6_unresolved(tmp_path):
     assert result["result"] == "unresolved"
     assert result["score"] is None
     assert result["doc_sha256"] is None
+
+
+# ---------------------------------------------------------------------------
+# Repeated-quote disambiguation (confirmed MEDIUM finding, judge report
+# 20260909-134928: rungs 2/3/4 used to accept the *first* occurrence of an
+# exact-content match with no check it was the right one — a real risk
+# since the JPM pilot corpus already has citations whose quote appears
+# twice in the same document.)
+# ---------------------------------------------------------------------------
+
+def test_rung2_moved_disambiguates_repeated_quote_via_context(tmp_path):
+    """The quote 'competition is intense' appears twice; only the second
+    occurrence's surrounding text matches this citation's stored
+    prefix/suffix. The resolver must land on that one, not the first."""
+    conn = _conn()
+    quote = "competition is intense"
+    text = (
+        f"In the widget segment, {quote} and margins are thin.\n\n"
+        f"In the gadget segment, {quote} but growth remains strong."
+    )
+    sha = _write_section(conn, tmp_path, "0001", "item_7", text)
+
+    second_start = text.rindex(quote)
+    prefix = text[second_start - 20:second_start]
+    suffix = text[second_start + len(quote): second_start + len(quote) + 20]
+
+    cite = _make_citation(conn, "0001", "item_7", "stale_sha", 0, len(quote), quote)
+    # _make_citation doesn't take prefix/suffix; set them directly.
+    conn.execute(
+        "UPDATE citations SET prefix = ?, suffix = ? WHERE citation_id = ?",
+        (prefix, suffix, cite["citation_id"]),
+    )
+    cite = conn.execute("SELECT * FROM citations WHERE citation_id = ?", (cite["citation_id"],)).fetchone()
+
+    result = _resolve_citation(cite, conn)
+    assert result["result"] == "moved"
+    assert result["start"] == second_start
+
+
+def test_rung2_moved_falls_through_to_fuzzy_when_context_cannot_disambiguate(tmp_path):
+    """Same repeated quote, but the citation's stored prefix/suffix don't
+    match *either* occurrence exactly — rungs 2-4 (the exact-content rungs)
+    must not guess which one is right, so this falls all the way through
+    to fuzzy (which doesn't disambiguate — see _find_fuzzy's docstring).
+    Landing on 'fuzzy' rather than 'moved' is the point: it correctly
+    reports lower confidence in *which* occurrence, not just that the text
+    exists somewhere, and 'fuzzy' is in _DEGRADED_RESULTS so the owning
+    analysis gets flagged stale."""
+    conn = _conn()
+    quote = "competition is intense"
+    text = f"First: {quote}. Second: {quote}."
+    _write_section(conn, tmp_path, "0001", "item_7", text)
+
+    cite = _make_citation(conn, "0001", "item_7", "stale_sha", 0, len(quote), quote)
+    conn.execute(
+        "UPDATE citations SET prefix = ?, suffix = ? WHERE citation_id = ?",
+        ("nothing that appears in the text", "nor this", cite["citation_id"]),
+    )
+    cite = conn.execute("SELECT * FROM citations WHERE citation_id = ?", (cite["citation_id"],)).fetchone()
+
+    result = _resolve_citation(cite, conn)
+    assert result["result"] == "fuzzy"
+    assert result["result"] in _DEGRADED_RESULTS
+
+
+def test_rung2_moved_is_unresolved_when_quote_is_truly_gone(tmp_path):
+    """Belt-and-suspenders: when the quote doesn't exist anywhere (not even
+    for fuzzy to partially match), the ladder still ends at unresolved."""
+    conn = _conn()
+    _write_section(conn, tmp_path, "0001", "item_7", "Nothing related remains in this section.")
+    quote = "a very specific claim that is now completely gone from the filing text"
+    cite = _make_citation(conn, "0001", "item_7", "stale_sha", 0, len(quote), quote)
+
+    result = _resolve_citation(cite, conn)
+    assert result["result"] == "unresolved"
 
 
 def test_missing_filing_documents_row_is_unresolved_not_a_crash(tmp_path):

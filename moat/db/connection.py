@@ -13,10 +13,21 @@ SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
 
 def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
-    """Return a connection with foreign keys enabled and Row access."""
+    """Return a connection with foreign keys enabled and Row access.
+
+    WAL mode + a busy timeout so two pipeline stages writing to the same
+    file concurrently (e.g. Sprint 3.1's AI-analysis persistence and
+    Sprint 4's valuation/ingest work, run from separate sessions against
+    the same data/moat.db) wait out a lock instead of raising
+    `database is locked` immediately. WAL is a property of the database
+    file, not the connection — setting it here is idempotent and safe to
+    run on every connect.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.row_factory = sqlite3.Row
     return conn
 

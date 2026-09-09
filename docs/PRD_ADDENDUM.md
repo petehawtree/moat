@@ -1266,3 +1266,6 @@ of the 91 (one, AAPL, is already analyzed either way).
 Real Estate `SECTOR_INAPPLICABLE_METRICS` entry belong in their own sprint
 slot — not yet named, since neither Sprint 4 (valuation) nor Sprint 3.1
 (citation/batch) is the right home for a quant-screen data-quality fix.
+Filed as GitHub issues so they don't depend on this paragraph alone:
+[#1](https://github.com/petehawtree/moat/issues/1) (debt-tag extraction),
+[#2](https://github.com/petehawtree/moat/issues/2) (Real Estate scoring).

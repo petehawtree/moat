@@ -1,11 +1,11 @@
 # Sprint 3.1 — citation/batch backlog + the authorized 90-company run
 
-**Status:** Items 1–5 done, and independently judge-reviewed three times
-(below). **Item 6 not started** — holds for a separate go-ahead. Its scope
-is now **69 companies, not 90** (2 already analyzed via a real mini-pilot
-that also found and fixed a systemic extraction bug — see [Mini-pilot](#mini-pilot-real-spend-180--found-a-systemic-extraction-bug)).
-Real projected cost for the rest: **$12.15**, well under the $35 cap (see
-[Judge review](#judge-review) and [Next up](#next-up)). **Plan:**
+**Status: done.** Items 1–5 closed and independently judge-reviewed three
+times (below). **Item 6 ran**: 70 companies now have current analyses (not
+90 — see [Judge review](#judge-review)), for **$11.13 total** real spend
+($1.80 mini-pilot + $9.32 batch — the batch came in under its own $12.15
+projection), well under the $35 cap. A live batch-submission bug was found
+and fixed on the first real attempt (below) — no money was lost. **Plan:**
 [sprint-3-1-plan.md](sprint-3-1-plan.md)
 
 ## Goal
@@ -256,29 +256,50 @@ floor) — a more heterogeneous set than the one root cause this fix
 addresses. Tracked, not chased further here:
 [GitHub issue #4](https://github.com/petehawtree/moat/issues/4).
 
+## Item 6 — the run
+
+Submitted for real: 67 companies via the Batch API (AAPL, LIN, PEG
+resolved as $0 cache hits — already analyzed via the pilot/mini-pilot).
+
+**First attempt crashed before spending anything.** `submit_batch()`
+referenced `anthropic.types.MessageCreateParamsNonStreaming`, which the
+installed SDK (`anthropic` 0.121.0) no longer re-exports at that path —
+an `AttributeError` on the very first request, before
+`client.messages.batches.create()` was ever called. No batch was
+submitted, no partial state was written. Root cause: every batch test
+before this mocked `submit_batch()`/`caller.submit_batch` itself, so
+nothing had ever exercised its request construction against the real
+installed package. Fixed by building the request dict directly instead of
+through the SDK's type-checking-only construction path (which is what can
+silently move between SDK versions); a new test — mocking only the
+network call, not `submit_batch()` itself — was confirmed to fail with the
+identical error before the fix, pass after.
+
+**Second attempt succeeded completely.** Batch `msgbatch_01DHyAxaXzgmuhZaFjfSqo9M`:
+67 submitted, 67 persisted, 0 pending, 0 failed. Real cost **$9.324**
+(under its own $12.149 projection — batch discount plus real output
+running under the 8k-token assumption). MRK, which had failed citation
+validation in the mini-pilot on `full_fallback`'s 279k-token full
+document, persisted cleanly this time at 107k tokens under the fixed,
+targeted extraction — one data point, but the right direction.
+
+One harmless side effect of the crash-and-retry, cleaned up: the crashed
+attempt's cache-hit resolution for AAPL/LIN/PEG had already written their
+`analysis_attempts` audit rows before the crash; the successful retry
+re-resolved and wrote a second set (cache hits aren't keyed by `custom_id`
+the way batch items are, so nothing deduplicated them). No cost or data
+impact — `ai_analysis` itself is correctly deduplicated by `(run_id,
+ticker, analysis_type)` regardless — just doubled audit rows, deleted
+manually (kept the retry's).
+
+**Total real spend for item 6: $11.128** ($1.804 mini-pilot + $9.324
+batch), against the plan's original ~$27.90 estimate and the $35 cap.
+**70 companies now have current analyses** (280 `ai_analysis` rows, 2,312
+citations).
+
 ## Next up
 
-**Item 6 — the 69-company run — holds for a separate go-ahead.** Per
-discussion at the start of this sprint: the run spends real money and
-submits filing data to the Batch API, so it doesn't proceed on items 1–5
-landing alone, on a free dry run alone, or on the mini-pilot alone. Scope:
-the fresh screen (91, not 93) minus AAPL (already analyzed) minus 21
-exclusions (§A17's 20 debt/REIT tickers + §A18's GOOGL) = 69 companies (2
-— PEG, LIN — already analyzed via the mini-pilot, leaving 67 left to
-submit). Cost is no longer an open question — **$12.149**, confirmed
-above, well under the $35 cap. Reproduce with:
-
-```
-python scripts/run_pipeline.py --from-stage ai_analysis --batch --dry-run --cost-cap 35 \
-  --exclude A ADSK ALAB ALNY AMT DDOG DECK DXCM GRMN LULU MNST NOW PLTR PM RMD ROL SBAC SHOP VRTX WSM GOOGL
-```
-
-Still open, deferred to when the run happens rather than decided in the
-abstract now: sample size and selection method for the human read of the
-analyses (the pilot's convention — reading all 12 of a 3-company pilot —
-doesn't scale directly to 69, and the plan deliberately left this a
-discussion point rather than deciding it sight-unseen). The per-ticker
-token counts from this dry run are one candidate input for a stratified
-sample — they're a proxy for filing size/complexity, not for analysis
-quality, but a spread across that range is a more principled slice than
-an arbitrary N.
+**The human read.** Per the plan's own definition of done, sample size and
+selection method were left a discussion point rather than decided
+sight-unseen — now there's real output to choose from, not just
+token-count proxies.

@@ -22,7 +22,7 @@ Gold = the one thing no sprint replaces.
 
 ## Status
 
-**Sprint 3.1 — citation/batch backlog closed; screen refreshed; the 90-company run corrected to 69. Items 1–5 done, item 6 pending.**
+**Sprint 3.1 — citation/batch backlog closed; screen refreshed; the 90-company run corrected to 70 and completed. Done.**
 - Retro: [sprint-3-1.md](docs/sprints/sprint-3-1.md). Plan:
   [sprint-3-1-plan.md](docs/sprints/sprint-3-1-plan.md).
 - Non-offline filing fetches now check SEC freshness before trusting the
@@ -46,9 +46,16 @@ Gold = the one thing no sprint replaces.
   instead of front matter — 81% of the 69 were hitting `full_fallback`
   (sending the entire filing) because of it, not the rare edge case
   earlier assessed as zero-impact. Fixed; full_fallback dropped to 30%,
-  and item 6's real projected cost dropped **$17.35 → $12.15**, confirmed
-  by re-running the dry run. Full detail: addendum
-  [§A17](docs/PRD_ADDENDUM.md#a17-sprint-31s-judge-pass-found-two-pre-existing-sprint-2-defects--excluded-from-item-6-not-fixed-there).
+  and item 6's projected cost dropped **$17.35 → $12.15**. Full detail:
+  addendum [§A17](docs/PRD_ADDENDUM.md#a17-sprint-31s-judge-pass-found-two-pre-existing-sprint-2-defects--excluded-from-item-6-not-fixed-there).
+- **Item 6 ran: 70 companies now have current analyses, $11.13 total real
+  spend** ($1.80 mini-pilot + $9.32 batch — under its own $12.15
+  projection), well under the $35 cap. The first real batch submission
+  crashed immediately on an SDK version mismatch
+  (`anthropic.types.MessageCreateParamsNonStreaming`, never actually
+  exercised by any prior test) — no money lost, fixed, retried, succeeded
+  completely: 67/67 persisted, 0 failed. See [sprint-3-1.md](docs/sprints/sprint-3-1.md)
+  for the full account.
 
 **Sprint 3 — AI qualitative analysis, citation-enforced. Done.**
 - Retro: [sprint-3.md](docs/sprints/sprint-3.md). Plan:
@@ -147,7 +154,7 @@ see the sprint table below.
 | 2.1 | Ingest data integrity + filing provenance — **done** | [sprint-2-1.md](docs/sprints/sprint-2-1.md) |
 | 2.2 | Data integrity: FCF, REIT revenue, FAIL vs UNAVAILABLE — **done** | [sprint-2-2.md](docs/sprints/sprint-2-2.md) |
 | 3 | AI business/moat/management/risk analysis (citation-enforced) — **done** | [sprint-3.md](docs/sprints/sprint-3.md) |
-| 3.1 | Citation/batch backlog + the 69-company AI run — items 1–5 **done**, item 6 pending | [sprint-3-1.md](docs/sprints/sprint-3-1.md) |
+| 3.1 | Citation/batch backlog + the 70-company AI run — **done** | [sprint-3-1.md](docs/sprints/sprint-3-1.md) |
 | 4 | Owner Earnings DCF + supporting valuation methods | |
 | 5 | Investment Committee + one-page Investment Brief | |
 | 6 | Watchlist monitoring | |

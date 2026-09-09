@@ -22,6 +22,24 @@ Gold = the one thing no sprint replaces.
 
 ## Status
 
+**Sprint 3.1 — citation/batch backlog closed; screen refreshed; the 90-company run corrected to 70. Items 1–5 done, item 6 pending.**
+- Retro: [sprint-3-1.md](docs/sprints/sprint-3-1.md). Plan:
+  [sprint-3-1-plan.md](docs/sprints/sprint-3-1-plan.md).
+- Non-offline filing fetches now check SEC freshness before trusting the
+  cache; the batch submission path is wired end-to-end (persist → poll →
+  retrieve, resumable) with its own spend-cap enforcement; the citation
+  resolution ladder implements all six §A15.5 rungs with repeated-quote
+  disambiguation; 114 → 160 tests.
+- Re-running screen+quality against current code (unchanged since Sprint
+  3) dropped the passing count from **93/505 to 91/505** — the persisted
+  Sprint 2.2 figure below predates a code change. Independent (Codex)
+  judge review across three passes then found two pre-existing, still-open
+  data-quality gaps in that 91: incomplete debt-tag extraction (18
+  companies) and Real Estate still scored on metrics §A14 already flagged
+  as invalid for that sector. Excluded — not fixed — from the pending
+  90-company AI run, which is now **70 companies**. Full detail: addendum
+  [§A17](docs/PRD_ADDENDUM.md#a17-sprint-31s-judge-pass-found-two-pre-existing-sprint-2-defects--excluded-from-item-6-not-fixed-there).
+
 **Sprint 3 — AI qualitative analysis, citation-enforced. Done.**
 - Retro: [sprint-3.md](docs/sprints/sprint-3.md). Plan:
   [sprint-3-plan.md](docs/sprints/sprint-3-plan.md). Citation architecture:
@@ -119,6 +137,7 @@ see the sprint table below.
 | 2.1 | Ingest data integrity + filing provenance — **done** | [sprint-2-1.md](docs/sprints/sprint-2-1.md) |
 | 2.2 | Data integrity: FCF, REIT revenue, FAIL vs UNAVAILABLE — **done** | [sprint-2-2.md](docs/sprints/sprint-2-2.md) |
 | 3 | AI business/moat/management/risk analysis (citation-enforced) — **done** | [sprint-3.md](docs/sprints/sprint-3.md) |
+| 3.1 | Citation/batch backlog + the 70-company AI run — items 1–5 **done**, item 6 pending | [sprint-3-1.md](docs/sprints/sprint-3-1.md) |
 | 4 | Owner Earnings DCF + supporting valuation methods | |
 | 5 | Investment Committee + one-page Investment Brief | |
 | 6 | Watchlist monitoring | |

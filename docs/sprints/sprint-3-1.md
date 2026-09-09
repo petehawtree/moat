@@ -118,10 +118,10 @@ existing `_migrate()` pattern (no drops, no backfill):
 
 ## Judge review
 
-Run twice via `./judge.sh` against this branch (reports in `.judge/`, not
-committed). **First pass** (`judge-report-20260909-131716.md`) found three
-real Highs, all confirmed by direct code inspection before fixing, all in
-this sprint's own code:
+Run three times via `./judge.sh` against this branch (reports in `.judge/`,
+not committed). **First pass** (`judge-report-20260909-131716.md`) found
+three real Highs, all confirmed by direct code inspection before fixing,
+all in this sprint's own code:
 
 - Batch mode had no spend-cap enforcement — `_run_batch_submission_and_
   retrieval()` never received `cost_cap_usd` at all. Fixed with a
@@ -173,6 +173,20 @@ operational filter, not a change to the persisted screen data) and track
 the real fix as its own future sprint slot.
 
 160 tests now (114 at the start of this sprint).
+
+**Third pass** (`judge-report-20260909-143940.md`), after the exclude
+mechanism and the README/addendum updates below, confirmed a clean state
+on everything this sprint owns: **159 passed, 0 failed, 1 skipped
+(the opt-in live test) — test-suite verdict PASS**. The judge additionally
+re-parsed all three persisted pilot responses and independently
+re-verified all 99 citation hashes, offsets, and quotes against local
+filing receipts (all valid, 91/91 asserted claims cited). The two Highs
+are the same already-documented §A17 items, restated once more (a MEDIUM
+about test coverage for those same two issues, and a LOW that the README
+was stale — both addressed: README now has a Sprint 3.1 status block and
+sprint-table row, and this retro's own §A17 cross-reference already
+covered the test-coverage gap by naming the fix as its own future sprint's
+job rather than this one's).
 
 ## Next up
 

@@ -302,4 +302,14 @@ citations).
 **The human read.** Per the plan's own definition of done, sample size and
 selection method were left a discussion point rather than decided
 sight-unseen — now there's real output to choose from, not just
-token-count proxies.
+token-count proxies. Sample chosen (confirmed 2026-09-09): **12 companies,
+48 analyses** — one per GICS sector, all cleanly targeted-extraction, plus
+three deliberate `full_fallback` stress picks (issue #4's still-unresolved
+group):
+
+- **Baseline** (one per sector, targeted extraction): META, ORLY, COST,
+  EQT, GILD, VRSK, ADBE, CRH, NEE
+- **High-risk** (`full_fallback`, issue #4): NFLX, UNH, BALL
+
+Not yet done as of this retro — `python scripts/cite.py TICKER` for each,
+same as the pilot's 12-analysis read.

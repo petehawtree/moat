@@ -379,17 +379,25 @@ def submit_batch(
         sha = _prompt_sha256(SYSTEM_PROMPT, content)
         cid = _custom_id(ticker, sha)
 
-        requests.append(
-            anthropic.types.MessageCreateParamsNonStreaming(
-                model=model_id,
-                max_tokens=64_000,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": content}],
+        # Sprint 3.1 fix: anthropic.types.MessageCreateParamsNonStreaming was
+        # never re-exported at the top-level anthropic.types module in the
+        # installed SDK (0.121.0) -- only the message_create_params submodule
+        # has it, and even there it's a TypedDict, which at runtime just
+        # builds this exact dict. Constructing the dict directly avoids
+        # depending on a type-checking-only import path that can move
+        # between SDK versions -- this call was never actually exercised
+        # end-to-end before (every batch test mocked submit_batch/caller
+        # itself), so the drift went uncaught until item 6's first real run.
+        requests.append({
+            "custom_id": cid,
+            "params": {
+                "model": model_id,
+                "max_tokens": 64_000,
+                "system": SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": content}],
                 # Note: batch fallbacks param is rejected on the Batches API (API fact #2)
-            )
-        )
-        # Store as a BatchRequestParam the SDK expects
-        requests[-1] = {"custom_id": cid, "params": requests[-1]}
+            },
+        })
 
         partial[ticker] = CallResult(
             ticker=ticker,

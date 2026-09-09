@@ -98,6 +98,25 @@ see sprint-3-plan.md § Deferred to Sprint 4, "`toc_cluster` misreads a real
 IBR-stub run as a table of contents"). Zero impact on the current
 passed_screen universe (no Financials pass the quant screen); deferred.
 
+**Sprint 3.1 amendment — criterion 6 was scoped wrong, not just gapped.**
+Running Sprint 3.1's item 6 mini-pilot (MRK, PEG, NVDA/ADBE/COST spot
+checks) found `last_toc_cluster_pos` computed as the single latest
+`toc_cluster` rejection *anywhere in the document* — including the
+ordinary Item 7A/8/9/9A/9B cluster, which is short and tightly packed in
+essentially every normal 10-K (not just JPM's IBR-stub case) and reliably
+trips the same 4-headings-in-3,000-chars rule that's meant to catch a real
+front-matter ToC. Measured distribution across the item-6 candidate
+list's 55 `full_fallback` companies with a `toc_cluster` rejection: 7 sit
+at 8.8–13.3% of document length (plausibly genuine front-matter ToCs), the
+rest at 30.1–97.8% (the 7A–9B cluster or later) — a clean, wide gap.
+**Criterion 6 revised:** only `toc_cluster` rejections at or before **20%**
+of the normalized document length count toward `last_toc_cluster_pos`; a
+rejection past that point no longer disqualifies an earlier, otherwise-valid
+candidate from `high` confidence. 20% sits with wide margin on both sides
+of the measured gap (13.3% / 30.1%). Before the fix, 56/69 (81%) of the
+item-6 candidate list hit `full_fallback` for this reason alone — not the
+"zero impact" edge case the JPM gap above was assessed as.
+
 ## Step 3 — assignment and tie-break
 
 Survivors are assigned in document order under one constraint: **the chosen
@@ -164,8 +183,11 @@ wanted failed it."*
 3. Length ≥ the section's `HIGH_FLOOR`.
 4. Length ≤ `SECTION_MAX_RATIO` of the normalized document.
 5. Alphabetic ratio ≥ `ALPHA_RATIO_MIN`.
-6. The span begins after the last rejected `toc_cluster` candidate in the
-   document.
+6. The span begins after the last rejected `toc_cluster` candidate that sits
+   at or before **20%** of the normalized document length (Sprint 3.1
+   amendment, below — a rejection past that point is the ordinary Item
+   7A–9B cluster, not a real ToC, and must not disqualify an earlier
+   candidate).
 
 **`low`** — the section was extracted and cleared every hard floor, but at
 least one `high` criterion failed. The specific criterion is recorded; "low"

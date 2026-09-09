@@ -364,3 +364,58 @@ def test_fixture_8_boundary_cross_reference_not_truncated():
     sec7 = result.sections["item_7"]
     assert sec7.end_boundary_key == "item_7a"
     assert sec7.length > 15_000, f"item_7 length={sec7.length} — looks truncated"
+
+
+# ---------------------------------------------------------------------------
+# Fixture 9: a late toc_cluster rejection must not disqualify an earlier,
+# genuine candidate from high confidence (Sprint 3.1 amendment, criterion 6 —
+# sprint-3-section-extraction-rules.md). Confirmed on real filings (NVDA,
+# ADBE, COST, PEG, MRK, ...): the ordinary Item 7A/8/9/9A/9B cluster near
+# the end of a normal 10-K is short and tightly packed — exactly what
+# toc_cluster's "4+ item headings within 3,000 chars" rule is built to
+# catch — and a stray own-line item-shaped mention within that cluster
+# (not a genuine ToC) used to poison last_toc_cluster_pos for the entire
+# document, dragging every earlier, correctly-bounded section down to
+# 'low' and forcing full_fallback. 56/69 (81%) of Sprint 3.1's real item-6
+# candidate list hit this before the fix.
+# ---------------------------------------------------------------------------
+
+def _fixture_9_late_cluster() -> str:
+    """Well-formed body (item_1/1a/7 all high-quality per _standard_body),
+    followed by an end-of-filing Item 7A-9B cluster containing a stray,
+    own-line 'ITEM 1A' mention — not a cross-reference (starts its own
+    line), not a real second Risk Factors section, just item-shaped enough
+    to trip toc_cluster from its own position, late in the document."""
+    late_cluster = (
+        "ITEM 1A. RISK FACTORS\n\nSee above.\n\n"  # stray, own-line, ~70-99% into the doc
+        "ITEM 8. FINANCIAL STATEMENTS AND SUPPLEMENTARY DATA\n\n"
+        "See accompanying notes.\n\n"
+        "ITEM 9. CHANGES IN AND DISAGREEMENTS WITH ACCOUNTANTS\n\nNone.\n\n"
+        "ITEM 9A. CONTROLS AND PROCEDURES\n\nEffective.\n\n"
+        "ITEM 9B. OTHER INFORMATION\n\nNone.\n"
+    )
+    return _standard_body() + late_cluster
+
+
+def test_fixture_9_late_toc_cluster_does_not_disqualify_earlier_sections():
+    text = _fixture_9_late_cluster()
+    result = extract_sections(text)
+
+    # Confirm the fixture actually reproduces the bug's precondition: a
+    # toc_cluster rejection exists, and it's well past the front-matter
+    # window (otherwise this test would pass for the wrong reason).
+    item1a_cands = result.trace["candidates"]["item_1a"]
+    late_rejections = [c for c in item1a_cands if c["rejection"] == "toc_cluster"]
+    assert late_rejections, f"expected a toc_cluster rejection; got {item1a_cands}"
+    assert late_rejections[-1]["pos"] / len(text) > 0.5, (
+        "fixture precondition failed: the toc_cluster rejection needs to be "
+        "well past the front-matter window for this test to mean anything"
+    )
+
+    for s in ("item_1", "item_1a", "item_7"):
+        sec = result.sections[s]
+        assert sec.confidence == "high", (
+            f"{s}: confidence={sec.confidence}, low_reasons={sec.low_reasons} — "
+            f"a late toc_cluster rejection must not drag this down"
+        )
+    assert result.overall_method == "sections"

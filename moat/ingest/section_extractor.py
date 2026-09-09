@@ -183,9 +183,22 @@ def extract_sections(normalized_text: str) -> ExtractionResult:
             _Cand(c.section, c.pos, c.end, c.has_title, rej)
         )
 
-    # Last position of any toc_cluster-rejected candidate (for high criterion 6)
+    # Last position of any toc_cluster-rejected candidate within the
+    # document's front matter (for high criterion 6) — Sprint 3.1 amendment,
+    # sprint-3-section-extraction-rules.md. Originally unbounded ("anywhere
+    # in the document"), which meant the ordinary Item 7A/8/9/9A/9B cluster
+    # — short, tightly packed real headings in essentially every normal
+    # 10-K, not just an IBR-stub filer — reliably tripped toc_cluster late
+    # in the document and disqualified an earlier, correctly-bounded item_7
+    # (or item_1/1a) from ever reaching high confidence. A genuine
+    # front-matter ToC sits within the first ~15% of a 10-K; 20% is a wide
+    # margin on the measured gap (7 real candidates at 8.8-13.3%, the rest —
+    # all the 7A-9B-cluster false signals — at 30.1% or later).
+    _FRONT_MATTER_FRACTION = 0.20
+    front_matter_end = doc_len * _FRONT_MATTER_FRACTION
     last_toc_pos = max(
-        (c.pos for cs in primary_cands.values() for c in cs if c.rejection == "toc_cluster"),
+        (c.pos for cs in primary_cands.values() for c in cs
+         if c.rejection == "toc_cluster" and c.pos <= front_matter_end),
         default=-1,
     )
 

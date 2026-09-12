@@ -311,5 +311,20 @@ group):
   EQT, GILD, VRSK, ADBE, CRH, NEE
 - **High-risk** (`full_fallback`, issue #4): NFLX, UNH, BALL
 
-Not yet done as of this retro — `python scripts/cite.py TICKER` for each,
-same as the pilot's 12-analysis read.
+**Done (2026-09-12).** Read via `python scripts/cite.py TICKER` for each,
+same as the pilot's 12-analysis read, then evaluated by an LLM against the
+PRD and this addendum, and that eval checked against the database. Full
+report: [`judge-report-sprint-3-1-citation-sample-read-2026-09-12.md`](../judge-reports/judge-report-sprint-3-1-citation-sample-read-2026-09-12.md).
+
+Coverage and citation-grounding hold exactly (401 claims: 361 asserted with
+397 citations between them, 40 correctly marked `insufficient_evidence`,
+zero uncited assertions, zero cited insufficiency claims). Three open gaps
+carried forward, none of them Sprint 3.1 blockers:
+
+- Management analyses aren't labelled "thin" per §A15.9, though they're
+  10-K-only as designed.
+- Entailment (quote *supports* the claim) remains unverified per §A15.2 —
+  explicitly out of scope for Sprint 3, needs a human/entailment pass later.
+- `companies.exchange` is `NULL` for BALL, CRH, EQT, NEE, UNH, VRSK —
+  doesn't block anything yet but weakens auditing the US-only universe
+  constraint (§A1).

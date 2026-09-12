@@ -86,7 +86,17 @@ mismatch, a stale-row bypass in `prepare_sections()`, a diluted
 full-fallback rate denominator, and a `toc_cluster` false positive on
 inline cross-references. Full detail is in the commit history (`Sprint 3
 Round 4/5/6` commits and the two preceding un-numbered review-fix commits)
-rather than repeated here.
+rather than repeated here. The five underlying `./judge.sh` reports for
+this sprint (2026-09-07/08, `.judge/` is gitignored — see Sprint 3.1's
+"Judge review" section for why) are archived, untouched, as
+[`docs/judge-reports/judge-report-20260907-131641.md`](../judge-reports/judge-report-20260907-131641.md),
+[`…144449.md`](../judge-reports/judge-report-20260907-144449.md),
+[`…182737.md`](../judge-reports/judge-report-20260907-182737.md),
+[`…184150.md`](../judge-reports/judge-report-20260907-184150.md), and
+[`judge-report-20260908-113305.md`](../judge-reports/judge-report-20260908-113305.md) —
+not individually mapped to round numbers above; that mapping isn't
+recorded anywhere and reconstructing it from report content alone would be
+a guess.
 
 **The pilot itself found something the review rounds didn't: section
 extraction had likely never worked on a real filing.** Dry-running the

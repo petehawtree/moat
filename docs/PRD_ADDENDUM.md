@@ -1216,7 +1216,7 @@ owner-earnings stream, not by the discount rate itself.
 
 ### A17 Sprint 3.1's judge pass found two pre-existing Sprint 2 defects — excluded from item 6, not fixed there
 
-Sprint 3.1's external judge review (`.judge/judge-report-20260909-134928.md`)
+Sprint 3.1's external judge review ([`judge-reports/judge-report-20260909-134928.md`](judge-reports/judge-report-20260909-134928.md))
 surfaced two real, confirmed defects in code Sprint 3.1 doesn't own —
 `moat/ingest/fundamentals_edgar.py`'s debt-tag extraction (Sprint 2.1) and
 `moat/screen/quant_screen.py`'s sector-applicability exclusions (Sprint

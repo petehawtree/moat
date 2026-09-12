@@ -127,7 +127,7 @@ unintended writes, and a tracked report would show up as a new file on
 every subsequent run and false-positive that check — so the three reports
 are archived as tracked copies under
 [`docs/judge-reports/`](../judge-reports/). **First pass**
-([`judge-report-20260909-131716.md`](../judge-reports/judge-report-20260909-131716.md)) found
+([`judge-report-sprint-3-1-20260909-131716.md`](../judge-reports/judge-report-sprint-3-1-20260909-131716.md)) found
 three real Highs, all confirmed by direct code inspection before fixing,
 all in this sprint's own code:
 
@@ -151,7 +151,7 @@ screen+quality (no API cost) confirmed it exactly: **91/505, not 93** —
 EBAY/GEN/KVUE/VLTO/VRSN drop out, AZO/CRWD/SBAC newly pass, and KO/JPM (2
 of the pilot's 3 already-analyzed companies) no longer pass at all.
 
-**Second pass** ([`judge-report-20260909-134928.md`](../judge-reports/judge-report-20260909-134928.md)), against the fixes and
+**Second pass** ([`judge-report-sprint-3-1-20260909-134928.md`](../judge-reports/judge-report-sprint-3-1-20260909-134928.md)), against the fixes and
 the fresh screen data, confirmed all three Highs resolved and surfaced two
 more issues in this sprint's own code — a MEDIUM (fixed) and a LOW (fixed,
 second time it was raised):
@@ -182,7 +182,7 @@ the real fix as its own future sprint slot.
 
 160 tests now (114 at the start of this sprint).
 
-**Third pass** ([`judge-report-20260909-143940.md`](../judge-reports/judge-report-20260909-143940.md)), after the exclude
+**Third pass** ([`judge-report-sprint-3-1-20260909-143940.md`](../judge-reports/judge-report-sprint-3-1-20260909-143940.md)), after the exclude
 mechanism and the README/addendum updates below, confirmed a clean state
 on everything this sprint owns: **159 passed, 0 failed, 1 skipped
 (the opt-in live test) — test-suite verdict PASS**. The judge additionally

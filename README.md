@@ -17,8 +17,9 @@ and [what two code reviews found](docs/writeups/what-two-code-reviews-found.md).
 
 <img src="docs/img/architecture.svg" alt="Project Moat pipeline: three free data sources feed an ingestion stage that writes into one shared SQLite store; five stages read and write that same store in sequence, with a citation-enforcement rule at the AI Analysis stage; the output reaches a human who makes the final call, while a separate watchlist monitor loops back to re-trigger ingestion on its own." width="100%">
 
-Green = shipped (Sprint 0–3). Dashed = planned (Sprint 4–6, still stubs).
-Gold = the one thing no sprint replaces.
+Green = shipped (Sprint 0–3). Light green dashed = partially shipped
+(ranked dashboard live, Investment Brief still Sprint 5). Cream dashed =
+planned (Sprint 4–6, still stubs). Gold = the one thing no sprint replaces.
 
 ## Status
 

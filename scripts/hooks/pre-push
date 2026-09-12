@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+
+# Pre-push hook: runs the independent judge (./judge.sh) automatically
+# whenever a push updates refs/heads/main on the remote. No-op for pushes
+# to any other branch. See docs/PRD_ADDENDUM.md §A19.7 for the reasoning
+# behind this cadence (not every commit, not manually-remembered-once).
+#
+# ADVISORY by default: a failing judge gate does not block the push (see
+# §A19.7 for why — the gate has no way yet to accept the already-filed,
+# out-of-scope Sprint 2 defects tracked in §A17, so hard-blocking today
+# would fail on every push for reasons nobody intends to act on
+# immediately). Set JUDGE_ENFORCE=1 to make a failing gate block the push.
+#
+# One-time setup (hooks in .git/hooks/ are not tracked by git):
+#   git config core.hooksPath scripts/hooks
+
+set -euo pipefail
+
+pushing_to_main=0
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  if [[ "$remote_ref" == "refs/heads/main" ]]; then
+    pushing_to_main=1
+  fi
+done
+
+if [[ "$pushing_to_main" -eq 0 ]]; then
+  exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+if [[ ! -x ./judge.sh ]]; then
+  echo "pre-push: ./judge.sh not found or not executable — skipping automatic judge run." >&2
+  exit 0
+fi
+
+if ! command -v codex >/dev/null 2>&1; then
+  echo "pre-push: codex CLI not on PATH — skipping automatic judge run." >&2
+  echo "  Install: npm install -g @openai/codex" >&2
+  exit 0
+fi
+
+echo "pre-push: main is being updated — running ./judge.sh automatically (see docs/PRD_ADDENDUM.md §A19.7)..." >&2
+echo >&2
+
+set +e
+./judge.sh
+JUDGE_EXIT=$?
+set -e
+
+if [[ "$JUDGE_EXIT" -ne 0 ]]; then
+  echo >&2
+  echo "pre-push: judge quality gate did NOT pass (exit $JUDGE_EXIT)." >&2
+  echo "  Review the newest report in .judge/ before continuing this sprint." >&2
+  echo "  Archive it to docs/judge-reports/ if it's referenced anywhere (§A19.4)." >&2
+  if [[ "${JUDGE_ENFORCE:-0}" == "1" ]]; then
+    echo "  JUDGE_ENFORCE=1 is set — blocking this push." >&2
+    exit 1
+  fi
+  echo "  Not blocking this push (advisory mode — see §A19.7)." >&2
+fi
+
+exit 0

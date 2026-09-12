@@ -1295,3 +1295,132 @@ and `run_analysis()`), not a one-line patch, and not something to rush
 right before a live spend. GOOGL is excluded via `run_pipeline.py
 --exclude` alongside §A17's 20 tickers. Filed as [GitHub issue
 #3](https://github.com/petehawtree/moat/issues/3).
+
+### A19 Process guardrails carried forward from the Sprint 3/3.1 retro
+
+Sprint 3 and 3.1 shipped correct, well-tested code and still needed eight
+external judge passes plus a 12-company human/LLM read to find what they
+found. The findings themselves are in `sprint-3.md`/`sprint-3-1.md` and
+the archived reports in `docs/judge-reports/`. This section is the other
+half: what changes about *how the next sprint is run*, so the same class
+of thing is caught earlier or doesn't recur. These apply to Sprint 4
+onward, not just the sprint that produced them.
+
+#### A19.1 Dry-run the full candidate list for outliers before choosing what a human reads
+
+Sprint 3's pilot (3 tickers, hand-picked for variety) found the section-
+extraction bug. Sprint 3.1's dry-run (all 71 candidates, free) found the
+dual-class-ticker bug and the 7x token-count spread; its mini-pilot then
+targeted the outliers that dry-run surfaced, before the 12-company sample
+was chosen. In that order, each step found something the previous one
+couldn't.
+
+**Decision:** before any sprint picks a human-read/eval sample, run the
+cheapest possible pass over the *entire* current-scope candidate list
+looking for outliers and failures (a dry-run, a free recomputation, a
+distribution of some cheap proxy metric) — not just a "representative"
+sample chosen up front. Choose the sample from what that pass surfaces,
+same order as Sprint 3.1's dry-run → mini-pilot → 12-sample sequence.
+Sprint 4's plan already leaves its human-read sample size undecided; this
+is the answer — dry-run all companies in the current `quality_scores` pass
+set for obviously-wrong valuations first.
+
+#### A19.2 Check cache-forward/reused-run joins whenever a stage adds one
+
+Two separate Sprint 3.1 bugs (`_reanchor()`'s join, duplicated
+`analysis_attempts` audit rows) had the same root cause: a reused/cached
+run stores no rows of its own under its `run_id` — they live under
+`reused_from_run_id`. Any future stage that introduces a "skip recompute,
+copy the prior result forward" path must be checked, at review time, for
+every join that assumes the current `run_id` owns the data.
+
+#### A19.3 Sample the outlier deliberately, not just the typical case
+
+Sprint 3's pilot and Sprint 3.1's human-read sample both explicitly added
+stress picks (JPM for pilot; NFLX/UNH/BALL's `full_fallback` cases for the
+12-sample) on top of a "one per category" baseline. Keep doing this on
+purpose — a sample chosen only for representativeness will not contain the
+case that breaks the assumption.
+
+#### A19.4 Archive judge/eval reports in the same PR as the work they judge
+
+`.judge/` is correctly gitignored (§A19.7 explains why), but that also
+meant eight reports existed only on local disk, cited by filename in
+shipped docs, until asked for explicitly weeks later. **Decision:** when a
+judge or human/LLM-eval report is produced during a sprint and referenced
+in that sprint's retro or the addendum, a copy goes into
+`docs/judge-reports/` (named `judge-report-sprint-<N>-<timestamp-or-slug>.md`)
+in the same commit that references it — not left for a later, separate
+request to surface it.
+
+#### A19.5 After any extraction/parsing/scoring logic change, re-check that formerly-passing cases produce the *same* answer, not just *an* answer
+
+The TOC-regex bug (§A15.8) and the stale `passed_screen` set (91 vs. 93
+after re-running against current code, found by Sprint 3.1's first judge
+pass) are the same shape: a well-formed, plausible-looking output is not
+evidence that a changed heuristic still agrees with itself on cases it
+used to get right. **Decision:** a change to extraction, parsing, or
+scoring logic is not done until it's been diffed against its own prior
+output on the existing golden/regression fixtures — not just checked
+against new fixtures added for the change.
+
+#### A19.6 Decide the entailment and "thin"-labelling posture before Sprint 5 starts, not during it
+
+§A15.9 already scopes citation-entailment out of Sprint 3, and the
+12-company eval confirmed both gaps are still open: no management analysis
+is labelled thin, and some moat claims ("self-reinforcing loop",
+"difficult-to-replicate") extend past their literal cited excerpt. Sprint
+5 is where this stops being an internal-docs caveat and becomes a
+committee-facing brief. **Decision:** Sprint 5's plan must decide,
+explicitly, before implementation — not discover mid-build — one of:
+build a cheap second-pass entailment check as part of its definition of
+done, or surface the raw quote next to every inference in the brief UI so
+a human entailment-checks it inline. Either is acceptable; leaving it
+undecided and inheriting Sprint 3's citation-grounding as if it were
+sufficient is not.
+
+#### A19.7 Decision: `judge.sh` runs automatically before `main` is updated — advisory, not (yet) blocking
+
+**Decision:** a `pre-push` git hook (`scripts/hooks/pre-push`, enabled via
+`git config core.hooksPath scripts/hooks` — a one-time local setup, since
+`.git/hooks/` itself isn't tracked) runs `./judge.sh` automatically
+whenever a push updates `refs/heads/main` on the remote, and is a no-op
+for pushes to any other branch.
+
+**Why not every commit:** `judge.sh` shells out to an external LLM
+(`codex exec`) over the *whole current-scope repository*, not the diff —
+each run costs real time and money re-auditing code a prior run already
+passed. Commit-time granularity is also the wrong unit: normal commit
+hygiene during active work (WIP snapshots, fixups) would either be
+throttled by a multi-minute external audit on every commit or trained to
+avoid committing often, which is a worse outcome than the bug this is
+meant to catch.
+
+**Why not literally once per sprint either:** Sprint 3.1 needed three
+passes — one per round of fixes — because each pass's fixes needed
+independent re-verification, not just the developer's own confidence that
+the fix worked. That per-round re-run is a judgment call ("is this batch
+of fixes ready to check?") that doesn't map to a git event and isn't
+automated here; it stays a manual `./judge.sh` invocation, same as Sprint
+3.1 practiced. The hook automates the one checkpoint that *does* map
+cleanly to a git event and that every sprint shares regardless of how many
+internal fix-rounds it took: the point work is about to land on `main`.
+
+**Why advisory rather than blocking:** `judge.sh`'s pass/fail gate reads
+`Critical`/`High` counts straight off the report with no mechanism to
+accept an already-triaged, filed, out-of-scope defect. §A17's two
+pre-existing Sprint 2 defects (GitHub issues #1, #2) are exactly that —
+known, filed, deliberately not fixed yet — and every judge run since has
+kept re-reporting them as Highs (all eight archived reports return
+`FAIL`). A hard-blocking hook on `main` today would fail on every single
+push for a reason nobody intends to act on immediately, which trains
+`JUDGE_ENFORCE` to be reflexively bypassed rather than respected. The hook
+therefore always lets the push through, but prints the verdict and
+Critical/High counts prominently and points at the new report. Setting
+`JUDGE_ENFORCE=1` makes a failing gate actually block the push, for anyone
+who wants strict enforcement before that's fixed.
+
+**Revisit when:** `JUDGE_PROMPT.md`/`judge.sh` gain a mechanism to accept
+a known, filed, currently-out-of-scope defect (e.g., an allowlist file the
+gate checks findings against) — at that point the default should flip to
+blocking.

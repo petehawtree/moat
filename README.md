@@ -17,11 +17,33 @@ and [what two code reviews found](docs/writeups/what-two-code-reviews-found.md).
 
 <img src="docs/img/architecture.svg" alt="Project Moat pipeline: three free data sources feed an ingestion stage that writes into one shared SQLite store; five stages read and write that same store in sequence, with a citation-enforcement rule at the AI Analysis stage; the output reaches a human who makes the final call, while a separate watchlist monitor loops back to re-trigger ingestion on its own." width="100%">
 
-Green = shipped (Sprint 0–3). Light green dashed = partially shipped
-(ranked dashboard live, Investment Brief still Sprint 5). Cream dashed =
-planned (Sprint 4–6, still stubs). Gold = the one thing no sprint replaces.
+Green = shipped (Sprint 0–4). Light green dashed = partially shipped
+(ranked dashboard + valuation live, Investment Brief still Sprint 5).
+Cream dashed = planned (Sprint 5–6, still stubs). Gold = the one thing no
+sprint replaces.
 
 ## Status
+
+**Sprint 4 — Owner Earnings DCF + scenario valuation. Done.**
+- Retro: [sprint-4.md](docs/sprints/sprint-4.md). Plan:
+  [sprint-4-plan.md](docs/sprints/sprint-4-plan.md). Decisions/findings:
+  [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A16, §A20.
+- Owner Earnings DCF (bear/base/bull, two-stage with a Gordon-growth
+  terminal value) plus three supporting cross-checks — FCF yield,
+  EV/EBIT, P/E vs. own historical range — all sharing one sign-flip-guard
+  discipline (§A16.4/V3): a negative or zero denominator/intrinsic value
+  reports an explicit non-numeric verdict, never a misleading number.
+- 90/91 `passed_screen` companies valued (540 rows); BKNG excluded — a
+  real price/shares data inconsistency found while dry-running the full
+  set, not a code defect (§A20).
+- A stale-data bug found the same way (NVDA's DCF silently anchored on
+  15-year-old capex data) was fixed before shipping: the owner-earnings
+  series is now restricted to each company's own trailing 10 fiscal
+  years.
+- Dashboard shows DCF range, margin of safety (rendering a negative bear
+  case distinctly, never as a number), FCF yield, EV/EBIT, P/E, and a
+  per-company assumption drill-down. 218 tests passing (48 new this
+  sprint).
 
 **Sprint 3.1 — citation/batch backlog closed; screen refreshed; the 90-company run corrected to 70 and completed. Done.**
 - Retro: [sprint-3-1.md](docs/sprints/sprint-3-1.md). Plan:
@@ -129,8 +151,8 @@ planned (Sprint 4–6, still stubs). Gold = the one thing no sprint replaces.
 Run `python scripts/run_pipeline.py --init-db` (add `--init-only` to just create the schema) then
 `python scripts/run_pipeline.py --from-stage screen` to reproduce.
 
-Sprints 4-6 (valuation/committee/monitor) are still documented stubs —
-see the sprint table below.
+Sprints 5-6 (committee/monitor) are still documented stubs — see the
+sprint table below.
 
 ## Scope for now
 
@@ -156,7 +178,7 @@ see the sprint table below.
 | 2.2 | Data integrity: FCF, REIT revenue, FAIL vs UNAVAILABLE — **done** | [sprint-2-2.md](docs/sprints/sprint-2-2.md) |
 | 3 | AI business/moat/management/risk analysis (citation-enforced) — **done** | [sprint-3.md](docs/sprints/sprint-3.md) |
 | 3.1 | Citation/batch backlog + the 70-company AI run — **done** | [sprint-3-1.md](docs/sprints/sprint-3-1.md) |
-| 4 | Owner Earnings DCF + supporting valuation methods | |
+| 4 | Owner Earnings DCF + supporting valuation methods — **done** | [sprint-4.md](docs/sprints/sprint-4.md) |
 | 5 | Investment Committee + one-page Investment Brief | |
 | 6 | Watchlist monitoring | |
 

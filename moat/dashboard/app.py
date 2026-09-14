@@ -6,6 +6,7 @@ Run with: streamlit run moat/dashboard/app.py
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -148,5 +149,113 @@ else:
                 params=(run_id, pick),
             )
             st.dataframe(detail, use_container_width=True)
+
+    st.divider()
+    st.subheader("Sprint 4 — valuation")
+    st.caption(
+        "Owner Earnings DCF (bear/base/bull, docs/PRD_ADDENDUM.md §A16) plus three "
+        "supporting cross-checks — FCF yield, EV/EBIT, and P/E vs. the company's own "
+        "5-10yr range. **Margin of safety uses the bear scenario** — PRD §1's "
+        "conservative 'low end of the range', never the midpoint. A bear case whose "
+        "intrinsic value is zero or negative shows as its own label, never a number: "
+        "the naive `(low - price) / low` formula sign-flips on a negative low, making "
+        "the least-safe case look the safest (§A16.4 / V3's guard)."
+    )
+
+    latest_valuation_run = conn.execute(
+        """
+        SELECT run_id FROM pipeline_runs
+        WHERE run_id IN (SELECT DISTINCT run_id FROM valuations)
+          AND status != 'failed'
+        ORDER BY started_at DESC LIMIT 1
+        """
+    ).fetchone()
+
+    if latest_valuation_run is None:
+        st.info(
+            "No valuation results yet. Run "
+            "`python scripts/run_pipeline.py --from-stage valuation` after quality."
+        )
+    else:
+        v_run_id = latest_valuation_run["run_id"]
+        val = pd.read_sql_query(
+            """
+            SELECT v.ticker, c.name, c.sector, v.method, v.scenario,
+                   v.intrinsic_value_low, v.intrinsic_value_high, v.current_price,
+                   v.margin_of_safety_pct, v.key_assumptions
+            FROM valuations v JOIN companies c ON c.ticker = v.ticker
+            WHERE v.run_id = ?
+            """,
+            conn,
+            params=(v_run_id,),
+        )
+        val = _filter_by_sector(val)
+
+        def _bear_case_cell(row) -> str:
+            # NULL intrinsic_value_low means the DCF itself couldn't be
+            # computed for this company (no fiscal year with all of
+            # net_income/D&A/capex — see key_assumptions for the reason);
+            # that's a different, distinguishable case from a *computed*
+            # value that happens to be <= 0 (the guarded sign-flip case).
+            if pd.isna(row["intrinsic_value_low"]):
+                return "no data"
+            if row["intrinsic_value_low"] <= 0:
+                return "bear case: negative — not investable on this basis"
+            return f"{row['margin_of_safety_pct']:+.1%}"
+
+        summary_rows = []
+        for ticker, group in val.groupby("ticker"):
+            name = group["name"].iloc[0]
+            sector = group["sector"].iloc[0]
+            current_price = group["current_price"].iloc[0]
+            dcf = group[group["method"] == "owner_earnings_dcf"].set_index("scenario")
+            fcf_row = group[group["method"] == "fcf_yield"]
+            ev_row = group[group["method"] == "ev_ebit"]
+            pe_row = group[group["method"] == "pe_historical"]
+
+            row = {
+                "ticker": ticker, "name": name, "sector": sector,
+                "current_price": round(current_price, 2) if pd.notna(current_price) else None,
+            }
+            for scenario in ("bear", "base", "bull"):
+                value = dcf.loc[scenario, "intrinsic_value_low"] if scenario in dcf.index else None
+                row[f"dcf_{scenario}"] = round(value, 2) if pd.notna(value) else None
+            row["margin_of_safety"] = (
+                _bear_case_cell(dcf.loc["bear"]) if "bear" in dcf.index else "no data"
+            )
+            if not fcf_row.empty:
+                fcf_ka = json.loads(fcf_row.iloc[0]["key_assumptions"])
+                row["fcf_yield"] = f"{fcf_ka['fcf_yield']:.1%}" if "fcf_yield" in fcf_ka else "unavailable"
+            if not ev_row.empty:
+                ev_ka = json.loads(ev_row.iloc[0]["key_assumptions"])
+                row["ev_ebit"] = f"{ev_ka['ev_ebit_multiple']:.1f}x" if "ev_ebit_multiple" in ev_ka else "unavailable"
+            if not pe_row.empty:
+                pe_ka = json.loads(pe_row.iloc[0]["key_assumptions"])
+                current_pe = pe_ka.get("current")
+                row["pe_current"] = f"{current_pe:.1f}x" if current_pe is not None else "n/a"
+                row["pe_range_years"] = pe_ka.get("years_covered")
+                row["pe_low_confidence"] = pe_ka.get("low_confidence")
+            summary_rows.append(row)
+
+        summary = pd.DataFrame(summary_rows).sort_values("ticker")
+        st.caption(
+            f"Run `{v_run_id}` — {len(summary)} companies valued. "
+            f"P/E range low-confidence (< 5 years of own history): "
+            f"{int(summary['pe_low_confidence'].sum())}/{len(summary)} — "
+            "expected until price_history is backfilled beyond the current ~2yr "
+            "window for tickers ingested before Sprint 4 (see sprint-4.md)."
+        )
+        st.dataframe(summary, use_container_width=True, height=500)
+
+        st.markdown("**Full assumptions for one company** — the trailing owner-earnings "
+                     "series, growth/discount/terminal-growth inputs, and every "
+                     "supporting method's raw figures, not just the summary above.")
+        pick_val = st.selectbox("Ticker ", summary["ticker"].tolist()) if not summary.empty else None
+        if pick_val:
+            detail_rows = val[val["ticker"] == pick_val][["method", "scenario", "key_assumptions"]]
+            for _, r in detail_rows.iterrows():
+                label = r["method"] if r["scenario"] is None else f"{r['method']} ({r['scenario']})"
+                st.markdown(f"`{label}`")
+                st.json(json.loads(r["key_assumptions"]))
 
 conn.close()

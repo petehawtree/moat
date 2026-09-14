@@ -6,6 +6,7 @@ its output — same standard as §A12's regression tests.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -18,9 +19,12 @@ from moat.valuation.engine import (
     dcf_scenario,
     ev_ebit,
     fcf_yield,
+    historical_revenue_cagr,
     margin_of_safety,
     owner_earnings,
     pe_historical_range,
+    run_valuation,
+    scenario_growth_rates,
 )
 
 
@@ -316,3 +320,244 @@ def test_pe_historical_range_thin_history_flagged_not_silently_truncated():
 def test_pe_historical_range_zero_usable_years():
     result = pe_historical_range([None, None], current_pe=20.0)
     assert result == {"current": 20.0, "low": None, "high": None, "years_covered": 0, "low_confidence": True}
+
+
+# ---------------------------------------------------------------------
+# historical_revenue_cagr / scenario_growth_rates
+# ---------------------------------------------------------------------
+
+def test_historical_revenue_cagr_hand_computed():
+    """100 -> 133.1 over 3 years: (133.1/100)^(1/3) - 1 = 1.1 - 1 = 0.10 exactly
+    (1.1^3 = 1.331)."""
+    rows = [
+        {"fiscal_year": 2020, "revenue": 100.0},
+        {"fiscal_year": 2021, "revenue": 110.0},
+        {"fiscal_year": 2023, "revenue": 133.1},
+    ]
+    assert historical_revenue_cagr(rows) == pytest.approx(0.10)
+
+
+def test_historical_revenue_cagr_uses_first_and_last_not_a_trend_fit():
+    """Documented as endpoint CAGR, not a regression — a noisy middle year
+    must not change the result."""
+    steady = historical_revenue_cagr([{"fiscal_year": 2020, "revenue": 100.0}, {"fiscal_year": 2022, "revenue": 121.0}])
+    noisy_middle = historical_revenue_cagr(
+        [{"fiscal_year": 2020, "revenue": 100.0}, {"fiscal_year": 2021, "revenue": 9000.0}, {"fiscal_year": 2022, "revenue": 121.0}]
+    )
+    assert steady == pytest.approx(noisy_middle)
+
+
+def test_historical_revenue_cagr_needs_two_points():
+    assert historical_revenue_cagr([{"fiscal_year": 2020, "revenue": 100.0}]) is None
+    assert historical_revenue_cagr([]) is None
+
+
+def test_historical_revenue_cagr_ignores_missing_revenue_rows():
+    rows = [
+        {"fiscal_year": 2020, "revenue": 100.0},
+        {"fiscal_year": 2021, "revenue": None},
+        {"fiscal_year": 2022, "revenue": 121.0},
+    ]
+    assert historical_revenue_cagr(rows) == pytest.approx(0.10)
+
+
+def test_scenario_growth_rates_hand_computed():
+    """cagr=0.10 (from 100 -> 121 over 2 years): bear = 0.10 - 0.04 = 0.06,
+    base = 0.10, bull = 0.10 + 0.04 = 0.14."""
+    rows = [{"fiscal_year": 2020, "revenue": 100.0}, {"fiscal_year": 2022, "revenue": 121.0}]
+    result = scenario_growth_rates(rows)
+    assert result["bear"] == pytest.approx(0.06)
+    assert result["base"] == pytest.approx(0.10)
+    assert result["bull"] == pytest.approx(0.14)
+
+
+def test_scenario_growth_rates_no_history_defaults_to_flat_zero():
+    result = scenario_growth_rates([])
+    assert result == {"bear": pytest.approx(-0.04), "base": pytest.approx(0.0), "bull": pytest.approx(0.04)}
+
+
+def test_scenario_growth_rates_shrinking_company_bull_is_less_negative_than_bear():
+    """The additive design's whole point: for a shrinking company (negative
+    CAGR), bull must be the LEAST negative scenario, not the most — a
+    multiplicative spread gets this backwards (multiplying a negative
+    number by a bull multiplier > 1 makes it more negative)."""
+    rows = [{"fiscal_year": 2020, "revenue": 100.0}, {"fiscal_year": 2022, "revenue": 81.0}]  # -10%/yr
+    result = scenario_growth_rates(rows)
+    assert result["bear"] < result["base"] < result["bull"]
+
+
+def test_scenario_growth_rates_extreme_cagr_is_capped_both_before_and_after_spread():
+    """A 50% CAGR is capped to GROWTH_RATE_CEILING (0.20) as the base rate;
+    bull (base + 0.04 = 0.24) must be re-capped back down to 0.20, not
+    allowed to exceed the ceiling the base rate was just clamped to."""
+    rows = [{"fiscal_year": 2020, "revenue": 100.0}, {"fiscal_year": 2021, "revenue": 150.0}]  # +50%/yr
+    result = scenario_growth_rates(rows)
+    assert result["base"] == pytest.approx(0.20)
+    assert result["bull"] == pytest.approx(0.20)
+    assert result["bear"] == pytest.approx(0.16)
+
+
+# ---------------------------------------------------------------------
+# run_valuation (integration: real schema, temp DB)
+# ---------------------------------------------------------------------
+
+@pytest.fixture
+def valuation_db(tmp_path):
+    from moat.db.connection import get_connection, init_db
+
+    db_path = tmp_path / "valuation_test.db"
+    init_db(db_path=db_path)
+    conn = get_connection(db_path=db_path)
+    now = "2026-01-01T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO companies (ticker, name, universe, is_active, added_date) VALUES (?, ?, ?, 1, ?)",
+        ("TEST", "Test Co", "sp500", now),
+    )
+    conn.execute(
+        "INSERT INTO pipeline_runs (run_id, started_at, status) VALUES (?, ?, 'running')",
+        ("run1", now),
+    )
+    for fy, revenue, ni in ((2022, 1000.0, 150.0), (2023, 1100.0, 160.0), (2024, 1210.0, 175.0)):
+        conn.execute(
+            """
+            INSERT INTO fundamentals_annual (
+                ticker, fiscal_year, period_end_date, revenue, eps_diluted, net_income,
+                operating_income, free_cash_flow, operating_cash_flow, capex,
+                depreciation_amortization, working_capital_change, total_debt, cash_and_equiv,
+                shares_diluted, source, confidence, retrieved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sec_edgar', 'high', ?)
+            """,
+            (
+                "TEST", fy, f"{fy}-12-31", revenue, ni / 20.0, ni,
+                ni * 1.2, ni * 0.9, ni * 1.1, ni * 0.2,
+                ni * 0.3, 5.0, 200.0, 100.0,
+                20.0, now,
+            ),
+        )
+    for date_str, close in (("2022-12-30", 50.0), ("2023-12-29", 55.0), ("2024-12-31", 60.0), ("2026-01-01", 65.0)):
+        conn.execute(
+            "INSERT INTO price_history (ticker, date, close, source, retrieved_at) VALUES (?, ?, ?, 'yfinance', ?)",
+            ("TEST", date_str, close, now),
+        )
+    conn.commit()
+    yield conn
+    conn.close()
+
+
+def test_run_valuation_writes_six_rows(valuation_db):
+    conn = valuation_db
+    rows_written, error = run_valuation("TEST", "run1", conn)
+    assert error is None
+    assert rows_written == 6  # 3 DCF scenarios + fcf_yield + ev_ebit + pe_historical
+
+    persisted = conn.execute("SELECT * FROM valuations WHERE run_id = 'run1' AND ticker = 'TEST'").fetchall()
+    assert len(persisted) == 6
+    methods = {(r["method"], r["scenario"]) for r in persisted}
+    assert methods == {
+        ("owner_earnings_dcf", "bear"), ("owner_earnings_dcf", "base"), ("owner_earnings_dcf", "bull"),
+        ("fcf_yield", None), ("ev_ebit", None), ("pe_historical", None),
+    }
+
+
+def test_run_valuation_dcf_scenarios_are_ordered_and_priced_per_share(valuation_db):
+    conn = valuation_db
+    run_valuation("TEST", "run1", conn)
+    dcf = {
+        r["scenario"]: r["intrinsic_value_low"]
+        for r in conn.execute(
+            "SELECT scenario, intrinsic_value_low FROM valuations WHERE ticker='TEST' AND method='owner_earnings_dcf'"
+        )
+    }
+    assert dcf["bear"] < dcf["base"] < dcf["bull"]
+    # Owner earnings here run a few hundred dollars/year on a 20-share
+    # company — a per-share intrinsic value in the tens of dollars is the
+    # sanity bound that catches a forgotten /shares_diluted division
+    # (which would land in the thousands instead).
+    for value in dcf.values():
+        assert 1.0 < value < 500.0
+
+
+def test_run_valuation_current_price_is_latest_close(valuation_db):
+    conn = valuation_db
+    run_valuation("TEST", "run1", conn)
+    prices = {r["current_price"] for r in conn.execute("SELECT current_price FROM valuations WHERE ticker='TEST'")}
+    assert prices == {65.0}
+
+
+def test_run_valuation_is_idempotent_per_run_id(valuation_db):
+    conn = valuation_db
+    first_write, _ = run_valuation("TEST", "run1", conn)
+    second_write, _ = run_valuation("TEST", "run1", conn)
+    assert first_write == second_write == 6
+    count = conn.execute("SELECT COUNT(*) AS n FROM valuations WHERE ticker='TEST' AND run_id='run1'").fetchone()["n"]
+    assert count == 6  # upsert, not duplicate rows
+
+
+def test_run_valuation_missing_shares_diluted_is_an_explicit_error(valuation_db):
+    conn = valuation_db
+    conn.execute("UPDATE fundamentals_annual SET shares_diluted = NULL WHERE ticker='TEST'")
+    conn.commit()
+    rows_written, error = run_valuation("TEST", "run1", conn)
+    assert rows_written == 0
+    assert error is not None and "shares_diluted" in error
+    assert conn.execute("SELECT COUNT(*) AS n FROM valuations WHERE ticker='TEST'").fetchone()["n"] == 0
+
+
+def test_run_valuation_no_fundamentals_is_an_explicit_error(valuation_db):
+    conn = valuation_db
+    rows_written, error = run_valuation("NOPE", "run1", conn)
+    assert rows_written == 0
+    assert error == "no fundamentals_annual data"
+
+
+def test_run_valuation_dcf_ignores_stale_owner_earnings_data_outside_the_recent_window(valuation_db):
+    """Regression for a real bug found on live data (NVDA): a company
+    whose capex tag is only present in old fiscal years (outside the
+    trailing DEFAULT_PROJECTION_YEARS window) and NULL in every recent one
+    must report DCF as unavailable, not silently average the old years and
+    divide by today's (post-split) share count into a near-zero per-share
+    "intrinsic value" against a real price.
+    """
+    conn = valuation_db
+    now = "2026-01-01T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO companies (ticker, name, universe, is_active, added_date) VALUES (?, ?, ?, 1, ?)",
+        ("STALE", "Stale Co", "sp500", now),
+    )
+    # Old years (outside the trailing 10): full owner_earnings inputs, tiny company.
+    for fy in (2005, 2006, 2007):
+        conn.execute(
+            """
+            INSERT INTO fundamentals_annual (
+                ticker, fiscal_year, period_end_date, revenue, net_income,
+                depreciation_amortization, capex, shares_diluted, source, confidence, retrieved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sec_edgar', 'high', ?)
+            """,
+            ("STALE", fy, f"{fy}-12-31", 100.0, 10.0, 5.0, 3.0, 1000.0, now),
+        )
+    # Recent 10 years: capex NULL every year (the real NVDA-shaped gap).
+    for fy in range(2015, 2025):
+        conn.execute(
+            """
+            INSERT INTO fundamentals_annual (
+                ticker, fiscal_year, period_end_date, revenue, net_income,
+                depreciation_amortization, capex, shares_diluted, source, confidence, retrieved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'sec_edgar', 'high', ?)
+            """,
+            ("STALE", fy, f"{fy}-12-31", 10000.0, 5000.0, 400.0, 50_000_000.0, now),
+        )
+    conn.execute(
+        "INSERT INTO price_history (ticker, date, close, source, retrieved_at) VALUES (?, ?, ?, 'yfinance', ?)",
+        ("STALE", "2026-01-01", 200.0, now),
+    )
+    conn.commit()
+
+    run_valuation("STALE", "run1", conn)
+    dcf_rows = conn.execute(
+        "SELECT scenario, intrinsic_value_low, key_assumptions FROM valuations "
+        "WHERE ticker='STALE' AND method='owner_earnings_dcf'"
+    ).fetchall()
+    assert len(dcf_rows) == 3
+    for row in dcf_rows:
+        assert row["intrinsic_value_low"] is None
+        assert json.loads(row["key_assumptions"])["status"] == "unavailable"

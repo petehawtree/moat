@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1220" role="img" aria-label="Diagram: three free data sources feed an ingestion stage that writes into one shared SQLite store. Ingest, the sector-relative screen, the quality score, and citation-checked AI analysis are done and shipped; a ranked dashboard is live, with the one-page Investment Brief still to come; Owner Earnings valuation and the AI investment committee remain planned. The result reaches a human who makes the final call, while a separate watchlist monitor (also planned) loops back to re-trigger ingestion on its own.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1220" role="img" aria-label="Diagram: three free data sources feed an ingestion stage that writes into one shared SQLite store. Ingest, the sector-relative screen, the quality score, citation-checked AI analysis, and Owner Earnings valuation are done and shipped; a ranked dashboard is live, with the one-page Investment Brief still to come; the AI investment committee remains planned. The result reaches a human who makes the final call, while a separate watchlist monitor (also planned) loops back to re-trigger ingestion on its own.">
   <style>
     .node-title { font-family: Georgia, 'Times New Roman', serif; font-weight: 700; text-transform: uppercase; letter-spacing: 0.01em; fill: #1b2420; }
     .node-title-inv { fill: #f5f3e8; }
@@ -113,10 +113,9 @@
       <line x1="340" y1="726" x2="340" y2="754" class="flow-line" marker-end="url(#arrow)"></line>
 
       <!-- ================= STAGE 4: VALUATION ================= -->
-      <rect x="60" y="756" width="560" height="80" rx="3" class="box-planned"></rect>
-      <text x="590" y="772" text-anchor="end" class="tag" font-size="9">SPRINT 4</text>
-      <text x="340" y="790" text-anchor="middle" class="node-title" font-size="15">VALUATION</text>
-      <text x="340" y="812" text-anchor="middle" class="node-sub" font-size="11">Owner Earnings DCF · bear / base / bull scenarios</text>
+      <rect x="60" y="756" width="560" height="80" rx="3" class="box-done"></rect>
+      <text x="340" y="790" text-anchor="middle" class="node-title node-title-inv" font-size="15">VALUATION</text>
+      <text x="340" y="812" text-anchor="middle" class="node-sub node-sub-inv" font-size="11">Owner Earnings DCF (bear/base/bull) + 3 cross-checks — 90 companies</text>
 
       <line x1="340" y1="836" x2="340" y2="864" class="flow-line" marker-end="url(#arrow)"></line>
 
@@ -132,7 +131,7 @@
       <rect x="60" y="980" width="560" height="80" rx="3" class="box-partial"></rect>
       <text x="590" y="996" text-anchor="end" class="tag" font-size="9">BRIEF: SPRINT 5</text>
       <text x="340" y="1014" text-anchor="middle" class="node-title" font-size="15">RANKED DASHBOARD + BRIEF</text>
-      <text x="340" y="1036" text-anchor="middle" class="node-sub" font-size="11">coverage + ranked table live · Investment Brief still to come</text>
+      <text x="340" y="1036" text-anchor="middle" class="node-sub" font-size="11">coverage + ranked table + valuation live · Investment Brief still to come</text>
 
       <!-- branch to HUMAN and WATCHLIST -->
       <line x1="260" y1="1060" x2="200" y2="1102" class="flow-line" marker-end="url(#arrow)"></line>

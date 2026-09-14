@@ -1424,3 +1424,106 @@ who wants strict enforcement before that's fixed.
 a known, filed, currently-out-of-scope defect (e.g., an allowlist file the
 gate checks findings against) — at that point the default should flip to
 blocking.
+
+### A20 Sprint 4 V5/V6 execution notes: growth-rate derivation, and three real findings from running against the live database
+
+V2's `dcf_scenario()` takes `growth_rate` as a parameter but the addendum
+never says where a real company's growth_rate comes from — §A16.3 only
+fixes the discount rate and terminal growth. V5 (wiring `run_valuation()`
+against real data) had to decide this to run at all.
+
+**Decision:** derive it from the company's own trailing revenue CAGR
+(endpoint-to-endpoint, not a fitted trend — a documented limitation, not
+hidden), capped to `[-10%, +20%]`, with bear/base/bull an **additive**
+±4pp spread around that base rate (bear = base − 4pp, bull = base + 4pp).
+Additive, not multiplicative: a multiplicative spread (e.g. bear =
+base × 0.5) inverts for a shrinking company — multiplying an already-
+negative growth rate by a bull multiplier > 1 makes it *more* negative,
+the opposite of what "bull" should mean. Revenue CAGR rather than
+owner-earnings CAGR: more stable (reusing owner earnings' own noisy
+year-to-year series here would double up on exactly the smoothing problem
+`dcf_scenario()`'s trailing-average base already exists to solve), and
+implicitly conservative in PRD §1's sense — it assumes margins hold
+rather than assuming they expand. Same "starting point, not a final
+number" posture as `DISCOUNT_RATE`/`SCENARIO_TERMINAL_GROWTH` — see
+`moat/valuation/engine.py`'s `scenario_growth_rates()`.
+
+Per §A19.1's guardrail (dry-run the full candidate list for outliers
+before trusting anything), V5's first real run against all 91
+`passed_screen` companies was read end-to-end looking for implausible
+output before being treated as done. It found three real things:
+
+1. **Stale-data bug, found and fixed.** NVDA's `capex` tag is only
+   present in the ingested XBRL for FY2010-2012 (the pre-existing
+   capex-tag gap §A13 already documents at 155/505 companies — not new).
+   `owner_earnings()` correctly refuses to guess a missing capex, but
+   `run_valuation()`'s original assembly used *every* historically-
+   computable year regardless of age: it averaged those three ~15-year-old
+   data points (from when NVDA's net income was ~$600M/yr) and divided by
+   *today's* 24.5bn post-split diluted share count, producing a DCF of
+   $0.71/share against a real ~$217 price — correct arithmetic on stale,
+   unrepresentative inputs is still a wrong number. **Fixed:** the owner-
+   earnings series is now restricted to the company's own trailing
+   `DEFAULT_PROJECTION_YEARS` (10) fiscal years; a company whose *recent*
+   years are gapped now honestly reports DCF as unavailable instead of
+   reaching backward for old data. Regression test:
+   `test_run_valuation_dcf_ignores_stale_owner_earnings_data_outside_the_recent_window`.
+   Companies with all three DCF scenarios unavailable went from 6 to 8 as
+   a direct result (NVDA and BKNG newly correctly excluded, not newly
+   broken).
+
+2. **A real limitation, documented rather than papered over.** SHOP's
+   trailing owner-earnings series is `[-3,417M, 163M, 2,036M, 1,236M]` —
+   the 2022 GAAP net loss (stock-based comp/impairment-driven, not a data
+   error) drags the 4-year average to ~$4.5M, which the DCF then compounds
+   forward into a base-case value of $0.19/share against a real ~$155
+   price (margin of safety: -837%). This is the trailing-average smoothing
+   approach doing exactly what it says (§A16.2/V2's own docstring already
+   flagged this as "a starting-parameter decision... worth revisiting once
+   real output can be eyeballed") — arguably even a defensible ultra-
+   conservative read of a company whose own recent GAAP history includes a
+   near-total-loss year, not obviously wrong. Not changed here without a
+   deliberate methodology review (median vs. mean, weighting recent years
+   more heavily, and excluding a single-worst-year outlier all trade off
+   differently and none was decided in advance). **Mitigation shipped
+   instead:** `key_assumptions` now includes the full
+   `trailing_owner_earnings_series`, not just its average, so a number
+   like SHOP's is diagnosable from the dashboard rather than an
+   unexplained outlier — and the dashboard shows it plainly rather than
+   hiding it.
+
+3. **A real, isolated data anomaly (not a code bug), excluded pending
+   investigation.** BKNG's EV/EBIT computes to 0.96× and its current P/E
+   to 1.29× — implausible for a profitable, `passed_screen` company (the
+   next-lowest P/E in the same run is CMCSA at 4.76×, so this isn't a
+   sector-wide pattern). Traced to `market_cap = current_price ×
+   shares_diluted`: SEC's latest 10-K reports `shares_diluted` = 32.6M
+   (BKNG/Booking Holdings' real, long-standing low share count — no
+   restatement in `share_basis_changes`, so SEC's own data is internally
+   consistent), while the ingested `price_history` sits at $135-215 across
+   its full 2-year window — a price scale inconsistent with BKNG's known
+   multi-thousand-dollar-per-share history. Most likely explanation: a
+   stock split reflected in yfinance's (auto-adjusted) price series ahead
+   of SEC's latest ingested 10-K catching up to it — but this is not
+   confirmed, only the inconsistency is. No existing mechanism catches
+   this: `detect_share_basis_changes` (§A10) only compares SEC's *own*
+   restated share counts against each other, never cross-checks price
+   magnitude against fundamentals from a different source. **Decision:**
+   exclude BKNG operationally (same `--exclude` mechanism as §A17's
+   debt/REIT list) rather than ship a valuation built on an inconsistent
+   price/shares pair. **Not fixed here** — a real fix needs a plausibility
+   guard (e.g., flag when an implied P/E or market-cap-to-revenue ratio
+   falls outside a sane band) that doesn't exist yet and is a new,
+   cross-data-source validation class of its own, not a one-line patch.
+
+**Also confirmed, not a new problem:** every one of the 91 companies'
+P/E-range method reports `low_confidence = True` — 91/91, with 83 of them
+covering only 2 years of matched price history (5 cover 1, 3 cover 0).
+This is the exact backfill gap V1's own
+commit flagged as open (`fetch_price_history`'s 10y default only applies
+to *new* fetches; the incremental refresh path never backfilled the
+~2-year window most tickers already had) — the P/E-range method is
+correctly reporting its own thin coverage rather than hiding it (this
+work item's own acceptance bar), but it isn't yet a *useful* 5-10yr range
+for almost anyone. Backfilling the existing universe's price history
+remains the open question sprint-4-plan.md already named.

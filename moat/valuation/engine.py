@@ -6,6 +6,9 @@ cross-checks, not substitutes.
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+
 SCENARIOS = ["bear", "base", "bull"]
 
 # §A16.3: a single fixed, conservative discount rate applied uniformly
@@ -278,12 +281,326 @@ def pe_historical_range(historical_pe: list[float | None], current_pe: float | N
     }
 
 
-def run_valuation(ticker: str, run_id: str, conn) -> None:
-    """Full stage: compute all methods/scenarios, persist to `valuations`.
+# ---------------------------------------------------------------------
+# Growth-rate derivation for dcf_scenario()'s growth_rate parameter. §A16.3
+# fixes the discount rate and terminal growth; it says nothing about how a
+# per-company, per-scenario growth_rate is derived — that decision belongs
+# to whichever work item actually calls dcf_scenario() against real
+# companies, which is this one (V5). Same "starting-point heuristic, not
+# a locked-in final number, revisit against real output" posture as
+# DISCOUNT_RATE/SCENARIO_TERMINAL_GROWTH above.
+# ---------------------------------------------------------------------
 
-    TODO (Sprint 4, V5): assemble each method's inputs per company from the
-    DB (fundamentals_annual, price_history, quality_scores' current pass
-    set) and persist one row per (method, scenario) into `valuations`,
-    same pattern as W7's "read the latest successful run" fix.
+GROWTH_RATE_FLOOR = -0.10
+GROWTH_RATE_CEILING = 0.20
+
+# Additive, not multiplicative — bear = base - spread, bull = base + spread.
+# A multiplicative spread (e.g. bear = base * 0.5) breaks for a shrinking
+# company: multiplying an already-negative base growth rate by a number
+# > 1 for "bull" makes it MORE negative, the opposite of what bull should
+# mean. Additive keeps bear <= base <= bull regardless of the base rate's
+# sign.
+SCENARIO_GROWTH_SPREAD = 0.04
+SCENARIO_GROWTH_DIRECTION = {"bear": -1, "base": 0, "bull": 1}
+
+
+def historical_revenue_cagr(fundamentals_rows: list[dict]) -> float | None:
+    """CAGR of revenue across a company's own trailing fundamentals rows
+    (any order in — sorted internally by fiscal_year).
+
+    Endpoint CAGR (first usable year to last), not a trend fit across every
+    year — simple, but sensitive to whichever single year lands on either
+    endpoint; a real limitation, not hidden here as if this were a more
+    careful regression.
+
+    `None` with fewer than two usable (positive-revenue) years, or when
+    the years don't actually span any time (fiscal_year collision) — a
+    rate of change needs two distinct points, and a non-positive starting
+    revenue makes the ratio undefined.
     """
-    raise NotImplementedError
+    points = sorted(
+        ((r["fiscal_year"], r["revenue"]) for r in fundamentals_rows if r.get("revenue")),
+        key=lambda p: p[0],
+    )
+    if len(points) < 2:
+        return None
+    first_year, first_revenue = points[0]
+    last_year, last_revenue = points[-1]
+    years = last_year - first_year
+    if years <= 0 or first_revenue <= 0:
+        return None
+    return (last_revenue / first_revenue) ** (1 / years) - 1
+
+
+def scenario_growth_rates(fundamentals_rows: list[dict]) -> dict[str, float]:
+    """Derive a bear/base/bull `growth_rate` for `dcf_scenario()` from a
+    company's own historical revenue CAGR.
+
+    Revenue CAGR rather than owner-earnings CAGR: more stable (owner
+    earnings' single-year swings are exactly what averaging the trailing
+    series into `dcf_scenario()`'s base year already smooths out — reusing
+    that same noisy series here would double up on the same problem), and
+    implicitly conservative in the PRD §1 sense — it assumes margins hold
+    rather than assuming they expand.
+
+    No usable history falls back to a flat 0% base-case rate rather than a
+    guessed number PRD §1's conservative-assumptions principle wouldn't
+    otherwise license. The base rate is capped to
+    [GROWTH_RATE_FLOOR, GROWTH_RATE_CEILING] before the scenario spread is
+    applied, and each scenario's result is capped again after — a single
+    early hyper-growth or hyper-decline period must not compound unchecked
+    for `DEFAULT_PROJECTION_YEARS`, and the spread itself must not push a
+    scenario back out past the cap it was just clamped to.
+    """
+    cagr = historical_revenue_cagr(fundamentals_rows)
+    base_rate = 0.0 if cagr is None else max(GROWTH_RATE_FLOOR, min(GROWTH_RATE_CEILING, cagr))
+    return {
+        scenario: max(GROWTH_RATE_FLOOR, min(GROWTH_RATE_CEILING, base_rate + direction * SCENARIO_GROWTH_SPREAD))
+        for scenario, direction in SCENARIO_GROWTH_DIRECTION.items()
+    }
+
+
+# ---------------------------------------------------------------------
+# Stage orchestration (V5): the one place in this module that touches the
+# database. Everything above is a pure function over already-extracted
+# values (same design note as the supporting-methods section above) —
+# this function does the DB assembly those functions' docstrings deferred
+# here: fundamentals_annual + price_history reads, market cap from
+# price * shares_diluted, and price-near-period-end matching for the P/E
+# series.
+# ---------------------------------------------------------------------
+
+def _fundamentals_history(ticker: str, conn) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM fundamentals_annual WHERE ticker = ? ORDER BY fiscal_year", (ticker,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _price_history(ticker: str, conn) -> list[dict]:
+    rows = conn.execute(
+        "SELECT date, close FROM price_history WHERE ticker = ? ORDER BY date", (ticker,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _price_on_or_before(date_str: str | None, prices: list[dict]) -> float | None:
+    """Latest close on or before `date_str` — `prices` must already be
+    sorted ascending by date (see `_price_history`). Linear scan: fine at
+    this scale (a handful of fiscal-year lookups against a few thousand
+    price rows at most), not worth a bisect for the data volume here.
+    """
+    if date_str is None:
+        return None
+    candidate = None
+    for row in prices:
+        if row["date"] > date_str:
+            break
+        candidate = row["close"]
+    return candidate
+
+
+def _replace_valuations(conn, run_id: str, ticker: str, rows: list[dict]) -> None:
+    """Delete then re-insert this company's rows under this run_id, rather
+    than an `INSERT ... ON CONFLICT` upsert keyed on the table's own
+    (run_id, ticker, method, scenario) primary key.
+
+    That key includes `scenario`, which is legitimately NULL for the three
+    non-scenario methods (fcf_yield, ev_ebit, pe_historical) — and SQL
+    NULLs are never equal to each other for uniqueness purposes, so a
+    conflict on a repeat insert with the same NULL scenario never fires:
+    `ON CONFLICT` silently inserted a duplicate row instead of updating in
+    place. Caught by this stage's own idempotency test — delete-then-insert
+    sidesteps the NULL-in-composite-key behavior entirely rather than
+    working around it with a sentinel value that would also have to be
+    threaded through the schema comment and every future reader of this
+    table.
+    """
+    conn.execute("DELETE FROM valuations WHERE run_id = ? AND ticker = ?", (run_id, ticker))
+    conn.executemany(
+        """
+        INSERT INTO valuations (
+            run_id, ticker, method, scenario, intrinsic_value_low, intrinsic_value_high,
+            current_price, margin_of_safety_pct, key_assumptions, created_at
+        ) VALUES (
+            :run_id, :ticker, :method, :scenario, :intrinsic_value_low, :intrinsic_value_high,
+            :current_price, :margin_of_safety_pct, :key_assumptions, :created_at
+        )
+        """,
+        rows,
+    )
+
+
+def run_valuation(ticker: str, run_id: str, conn) -> tuple[int, str | None]:
+    """Full stage: compute all methods/scenarios for one company, persist
+    to `valuations`. Returns (rows_written, error) — same shape as
+    `fundamentals_edgar.run_for_ticker`/`prices.run_for_ticker`, for
+    `run_pipeline.py`'s stage loop to aggregate the same way ingest does.
+
+    One transaction per company (`conn.commit()`/`rollback()` here, not
+    per-row): either every row for this ticker under this `run_id` lands,
+    or none do — no partial company writes, this work item's own
+    acceptance bar. Idempotent per `run_id` via delete-then-reinsert (see
+    `_replace_valuations` for why that's used instead of an `ON CONFLICT`
+    upsert on the table's own primary key): re-running the same run_id
+    recomputes and replaces this ticker's rows in place rather than
+    erroring or duplicating. Cheap either way — this stage is
+    deterministic arithmetic over already-ingested data, no API cost to
+    avoid by skipping an unchanged recompute (§A16's cost section).
+
+    A company this can't value at all (no fundamentals, no price, no
+    shares_diluted for the per-share conversion DCF needs — see
+    `dcf_scenario`'s docstring) gets no rows and an explicit `error`
+    string back, not a silent skip — `run_pipeline.py`'s ingest stage
+    already reports failures this way, matching convention. A company
+    that *can* be valued but where one particular method can't (e.g. no
+    usable D&A for owner_earnings, or a thin price history for the P/E
+    range) still gets a row for that method, with the value columns NULL
+    and the reason recorded in `key_assumptions` — Definition of Done's
+    "full valuation or an explicit reason it doesn't" bar applies per
+    method, not just per company.
+    """
+    fundamentals_rows = _fundamentals_history(ticker, conn)
+    if not fundamentals_rows:
+        return 0, "no fundamentals_annual data"
+
+    prices = _price_history(ticker, conn)
+    if not prices:
+        return 0, "no price_history data"
+    current_price = prices[-1]["close"]
+
+    latest = fundamentals_rows[-1]
+    shares = latest.get("shares_diluted")
+    if not shares or shares <= 0:
+        # DCF's owner_earnings_series is a company-level (aggregate $)
+        # figure; every method here needs shares_diluted to convert to a
+        # price-comparable per-share value (DCF) or to build market_cap
+        # (FCF yield, EV/EBIT, P/E's implied price) — without it nothing
+        # in this stage produces a number comparable to current_price.
+        return 0, "no shares_diluted available for per-share/market-cap conversion"
+    market_cap = current_price * shares
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows: list[dict] = []
+
+    def base_row(method: str, scenario: str | None) -> dict:
+        return {
+            "run_id": run_id,
+            "ticker": ticker,
+            "method": method,
+            "scenario": scenario,
+            "intrinsic_value_low": None,
+            "intrinsic_value_high": None,
+            "current_price": current_price,
+            "margin_of_safety_pct": None,
+            "key_assumptions": "{}",
+            "created_at": now_iso,
+        }
+
+    # --- Primary method: Owner Earnings DCF, three scenarios ---
+    # Only the company's own trailing RECENT_YEARS_WINDOW fiscal years are
+    # eligible, not every historically-computable year regardless of age.
+    # Found on real data (NVDA): capex is only tagged for FY2010-2012 in
+    # this pipeline's ingest (the pre-existing capex-tag gap §A13 already
+    # documents, 155/505 companies) — with no recency filter, owner_earnings()
+    # silently used three 14+-year-old data points from when NVDA was a
+    # ~$600M-net-income company, averaged them, and divided by *today's*
+    # 24.5bn diluted share count (post-splits) to produce $0.71/share
+    # against a real ~$217 price. Correct arithmetic on stale, unrepresentative
+    # inputs is still a wrong number. Restricting to recent years means a
+    # company whose recent years are gapped now honestly reports DCF as
+    # unavailable (see below) instead of silently substituting ancient data.
+    recent_rows = fundamentals_rows[-DEFAULT_PROJECTION_YEARS:]
+    oe_series = [oe for r in recent_rows if (oe := owner_earnings(r)) is not None]
+    growth_rates = scenario_growth_rates(fundamentals_rows)
+    for scenario in SCENARIOS:
+        row = base_row("owner_earnings_dcf", scenario)
+        if not oe_series:
+            row["key_assumptions"] = json.dumps(
+                {
+                    "status": "unavailable",
+                    "reason": f"no fiscal year in the trailing {DEFAULT_PROJECTION_YEARS} has all of net_income/D&A/capex",
+                }
+            )
+            rows.append(row)
+            continue
+        growth_rate = growth_rates[scenario]
+        terminal_growth = SCENARIO_TERMINAL_GROWTH[scenario]
+        pv = dcf_scenario(oe_series, growth_rate=growth_rate, discount_rate=DISCOUNT_RATE, terminal_growth=terminal_growth)
+        per_share = pv / shares
+        row["intrinsic_value_low"] = per_share
+        row["intrinsic_value_high"] = per_share
+        row["margin_of_safety_pct"] = margin_of_safety(per_share, current_price)
+        row["key_assumptions"] = json.dumps(
+            {
+                "discount_rate": DISCOUNT_RATE,
+                "growth_rate": growth_rate,
+                "terminal_growth": terminal_growth,
+                "projection_years": DEFAULT_PROJECTION_YEARS,
+                "trailing_years_used": len(oe_series),
+                "base_owner_earnings_avg": sum(oe_series) / len(oe_series),
+                # Full series, not just its average — a base near zero or
+                # negative is indistinguishable from a normal one without
+                # seeing the years behind it (the SHOP finding: one real
+                # loss year can drag a short trailing average near zero;
+                # this makes that visible instead of hidden inside a
+                # single summary number).
+                "trailing_owner_earnings_series": oe_series,
+            }
+        )
+        rows.append(row)
+
+    # --- Supporting method: FCF yield ---
+    fcf_row = base_row("fcf_yield", None)
+    yield_value = fcf_yield(latest.get("free_cash_flow"), market_cap)
+    if yield_value is None:
+        fcf_row["key_assumptions"] = json.dumps(
+            {"status": "unavailable", "reason": "free_cash_flow unavailable (capex not ingested for the latest fiscal year)"}
+        )
+    else:
+        fcf_row["key_assumptions"] = json.dumps({"fcf_yield": yield_value, "market_cap": market_cap})
+    rows.append(fcf_row)
+
+    # --- Supporting method: EV/EBIT ---
+    ev_row = base_row("ev_ebit", None)
+    multiple = ev_ebit(market_cap, latest.get("total_debt"), latest.get("cash_and_equiv"), latest.get("operating_income"))
+    if multiple is None:
+        ev_row["key_assumptions"] = json.dumps(
+            {"status": "unavailable", "reason": "operating_income non-positive or missing for the latest fiscal year"}
+        )
+    else:
+        ev_row["key_assumptions"] = json.dumps({"ev_ebit_multiple": multiple, "market_cap": market_cap})
+    rows.append(ev_row)
+
+    # --- Supporting method: P/E vs. own historical range ---
+    pe_row = base_row("pe_historical", None)
+    historical_pe = [
+        annual_pe(_price_on_or_before(r.get("period_end_date"), prices), r.get("eps_diluted"))
+        for r in fundamentals_rows
+    ]
+    current_eps = latest.get("eps_diluted")
+    current_pe = annual_pe(current_price, current_eps)
+    pe_range = pe_historical_range(historical_pe, current_pe)
+    if pe_range["low"] is not None and current_eps is not None and current_eps > 0:
+        implied_low = pe_range["low"] * current_eps
+        implied_high = pe_range["high"] * current_eps
+        pe_row["intrinsic_value_low"] = implied_low
+        pe_row["intrinsic_value_high"] = implied_high
+        pe_row["margin_of_safety_pct"] = margin_of_safety(implied_low, current_price)
+    pe_row["key_assumptions"] = json.dumps(
+        {
+            **pe_range,
+            "status": "ok" if pe_range["low"] is not None else "unavailable",
+            "reason": None if pe_range["low"] is not None else "no fiscal year had both a usable price match and positive EPS",
+        }
+    )
+    rows.append(pe_row)
+
+    try:
+        _replace_valuations(conn, run_id, ticker, rows)
+    except Exception as exc:
+        conn.rollback()
+        return 0, str(exc)
+
+    conn.commit()
+    return len(rows), None

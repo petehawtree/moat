@@ -9,8 +9,9 @@ Sprint 1: 'universe' and 'ingest' are real (US-only, docs/PRD_ADDENDUM.md
 §A1). Sprint 2: 'screen' and 'quality' are real (sector-relative screen,
 §A2/§A9); Sprint 2.1 adds ingest provenance + share-basis detection
 (§A10/§A11). Sprint 3: 'ai_analysis' is real (citation-enforced qualitative
-analysis, §A15). 'valuation' onward still raise NotImplementedError until
-Sprint 4+.
+analysis, §A15). Sprint 4: 'valuation' is real (Owner Earnings DCF +
+supporting methods, §A16). 'committee' and 'monitor' still raise
+NotImplementedError until Sprint 5+.
 """
 from __future__ import annotations
 
@@ -167,6 +168,56 @@ def run_quality_stage(conn, run_id: str) -> None:
         f"  quality: {passed}/{total} companies passed the screen "
         f"(composite_score >= {config.QUALITY_SCORE_PASS_THRESHOLD})"
     )
+
+
+def run_valuation_stage(conn, run_id: str, exclude_tickers: set[str] | None = None) -> None:
+    """Owner Earnings DCF + supporting methods (PRD §6, Sprint 4 V5) for
+    every company in the *latest* quality_scores run's passed_screen set —
+    same "read whichever quality run is current, not this run_id" pattern
+    ai_analysis already uses (`_latest_quality_run_id`), applied from the
+    start here rather than found by a judge round (§A16's own framing of
+    this work item).
+
+    exclude_tickers: same operational-exclusion mechanism ai_analysis uses
+    (§A17) — total_debt and operating_income feed ev_ebit() exactly the
+    same way they feed the quant screen's debt metric, so a ticker with
+    the known debt-tag gap or invalid REIT metrics produces an equally
+    unreliable valuation, not just an unreliable screen result.
+    """
+    from moat.valuation.engine import run_valuation
+
+    quality_run = _latest_quality_run_id(conn)
+    if not quality_run:
+        raise RuntimeError(
+            "No quality_scores run with passed_screen tickers found. "
+            "Run the pipeline from 'screen' stage first, or provide "
+            "a --from-stage that includes 'quality'."
+        )
+    tickers = [
+        row["ticker"] for row in conn.execute(
+            "SELECT ticker FROM quality_scores WHERE run_id = ? AND passed_screen = 1 ORDER BY ticker",
+            (quality_run,),
+        )
+    ]
+    if exclude_tickers:
+        excluded_here = [t for t in tickers if t in exclude_tickers]
+        tickers = [t for t in tickers if t not in exclude_tickers]
+        if excluded_here:
+            print(f"  valuation: excluding {len(excluded_here)} tickers (--exclude): {excluded_here}")
+    print(f"  valuation: {len(tickers)} tickers from quality run {quality_run}")
+
+    ok, failed = [], []
+    for ticker in tickers:
+        rows_written, err = run_valuation(ticker, run_id, conn)
+        if err:
+            failed.append((ticker, err))
+        else:
+            ok.append((ticker, rows_written))
+
+    total_rows = sum(n for _, n in ok)
+    print(f"  valuation: {len(ok)}/{len(tickers)} companies valued, {total_rows} valuations rows written")
+    if failed:
+        print(f"  valuation failures (first 15): {failed[:15]}")
 
 
 def _latest_quality_run_id(conn) -> str | None:
@@ -542,9 +593,9 @@ def main() -> None:
                         help="explicit run_id (defaults to a fresh one) — required to match a prior "
                              "--batch submission's run_id when using --retrieve-batch-id")
     parser.add_argument("--exclude", nargs="+", default=None, metavar="TICKER",
-                        help="ai_analysis: skip these tickers even though they passed_screen=1 "
-                             "(operational exclusion for a known-bad screen result; "
-                             "see PRD_ADDENDUM.md §A17)")
+                        help="ai_analysis/valuation: skip these tickers even though they "
+                             "passed_screen=1 (operational exclusion for a known-bad screen "
+                             "result; see PRD_ADDENDUM.md §A17)")
     args = parser.parse_args()
 
     if args.init_db:
@@ -593,6 +644,9 @@ def main() -> None:
                     batch_poll_timeout=args.batch_poll_timeout,
                     exclude_tickers=set(args.exclude) if args.exclude else None,
                 )
+            elif stage == "valuation":
+                print("-> stage 'valuation'")
+                run_valuation_stage(conn, run_id, exclude_tickers=set(args.exclude) if args.exclude else None)
             else:
                 print(f"-> stage '{stage}': not yet implemented (see docs/PRD_ADDENDUM.md sprint plan)")
                 raise NotImplementedError(f"Stage '{stage}' lands in a later sprint")

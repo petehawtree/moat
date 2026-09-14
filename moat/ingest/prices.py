@@ -10,13 +10,22 @@ from datetime import datetime, timezone
 import yfinance as yf
 
 
-def fetch_price_history(ticker: str, start: str | None = None, period: str = "2y") -> list[dict]:
+def fetch_price_history(ticker: str, start: str | None = None, period: str = "10y") -> list[dict]:
     """Fetch daily close prices for one ticker via yfinance.
 
     Pass `start` (YYYY-MM-DD) for an incremental fetch; otherwise falls
-    back to `period` (default 2y — enough for current-price and near-term
-    monitoring; PRD §6/§10 valuation work reads from fundamentals, not a
-    long price history, so a deep multi-decade backfill isn't needed here).
+    back to `period` (default 10y, extended from Sprint 1-3's 2y — PRD §6's
+    P/E-vs-own-historical-range method needs 5-10 years of price history,
+    which a 2y default can't support; see docs/PRD_ADDENDUM.md §A16.4. A
+    one-parameter change with no effect on the existing 2y consumers
+    (current-price, near-term monitoring), which just get more history than
+    they need.
+
+    This only extends *new* fetches — a ticker with price_history rows
+    already stored still refreshes incrementally via run_for_ticker's
+    `start=`, so it does not retroactively backfill years it never fetched.
+    Whether/how to backfill the existing universe is open — see
+    docs/sprints/sprint-4-plan.md's "Open for discussion".
     """
     t = yf.Ticker(ticker)
     hist = t.history(start=start) if start else t.history(period=period)

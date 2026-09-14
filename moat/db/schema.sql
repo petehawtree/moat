@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS fundamentals_annual (
     free_cash_flow      REAL,                 -- OCF minus capex; NULL when capex unavailable (A13) — never substituted with OCF
     operating_cash_flow REAL,                 -- kept separately so a missing-capex company still has its cash-flow figure
     capex               REAL,
+    depreciation_amortization REAL,           -- Owner Earnings input (A16.2); merge-across-candidates, same tiers as revenue
+    working_capital_change    REAL,           -- Owner Earnings input (A16.2); summary tag only, NULL + quality_flags otherwise — never summed from fragments
     total_debt          REAL,
     cash_and_equiv      REAL,
     shares_diluted      REAL,

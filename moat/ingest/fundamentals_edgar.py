@@ -218,6 +218,30 @@ TAG_CANDIDATES: dict[str, tuple[list[str], str, str]] = {
     "long_term_debt_current": (["LongTermDebtCurrent", "DebtCurrent"], "USD", "instant"),
 }
 
+# Owner Earnings input (§A16.2): D&A tag tiers, merged the same way as
+# TAG_CANDIDATES above (whichever tag covers a given period wins, in
+# priority order) — the combined cash-flow-statement line most filers use,
+# falling back to the accretion variant. A third tier (sum of the split
+# Depreciation + AmortizationOfIntangibleAssets tags) is handled separately
+# in _depreciation_amortization, because it's a combination rule, not a
+# priority merge — summed rather than substituted.
+_DA_COMBINED_TAGS = ["DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet"]
+_DA_SPLIT_TAG = "Depreciation"
+_DA_SPLIT_AMORTIZATION_TAG = "AmortizationOfIntangibleAssets"
+_DA_SPLIT_SUM_LABEL = "Depreciation+AmortizationOfIntangibleAssets"
+
+# Owner Earnings input (§A16.2): working-capital change. Unlike D&A, most
+# filers don't report one canonical ΔNWC line — they report several
+# fragments (AR/inventory/AP deltas individually) whose correct subset
+# varies by filer. Only this summary tag is trusted; everything else is
+# left NULL and flagged rather than summed (the "flag, don't guess" rule
+# §A4/§A10 already established). Stored as the tag reports it: a positive
+# value is an increase in operating capital, i.e. a use of cash — V2's DCF
+# work must confirm that sign convention holds with a hand-computed example
+# before subtracting it directly, same as V2's own acceptance criteria ask.
+_NWC_TAG = "IncreaseDecreaseInOperatingCapital"
+FLAG_NWC_UNAVAILABLE = "nwc_unavailable_treated_as_zero"
+
 
 def _merged_annual_entries(gaap: dict, names: list[str], unit_key: str, kind: str) -> dict[str, dict]:
     """Union period-end entries across every candidate tag for a metric.
@@ -238,6 +262,33 @@ def _merged_annual_entries(gaap: dict, names: list[str], unit_key: str, kind: st
             # one (see the ASC 606 + ASC 842 revenue combination in
             # extract_annual_fundamentals).
             merged.setdefault(end, {**row, "_tag": name})
+    return merged
+
+
+def _depreciation_amortization(gaap: dict) -> dict[str, dict]:
+    """Merge D&A across the combined-tag tiers, then fill any period neither
+    combined tag covers by summing the split Depreciation +
+    AmortizationOfIntangibleAssets tags (§A16.2's third tier).
+
+    A period missing one of the two split tags still gets a value — a filer
+    with no amortizable intangibles legitimately reports no
+    AmortizationOfIntangibleAssets tag at all, and treating "not present" as
+    "zero" here is correct (unlike NWC's fragments, there's no risk of
+    silently missing a *different* real component: depreciation + intangible
+    amortization is, by definition, the whole of D&A).
+    """
+    merged = dict(_merged_annual_entries(gaap, _DA_COMBINED_TAGS, "USD", "duration"))
+
+    depreciation = _annual_entries(gaap.get(_DA_SPLIT_TAG), "USD", "duration")
+    amortization = _annual_entries(gaap.get(_DA_SPLIT_AMORTIZATION_TAG), "USD", "duration")
+    for end in set(depreciation) | set(amortization):
+        if end in merged:
+            continue  # a combined tag already covers this period; don't override it
+        d = depreciation.get(end, {}).get("val")
+        a = amortization.get(end, {}).get("val")
+        if d is None and a is None:
+            continue
+        merged[end] = {"val": (d or 0) + (a or 0), "_tag": _DA_SPLIT_SUM_LABEL}
     return merged
 
 
@@ -604,6 +655,8 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
         metric: _merged_annual_entries(gaap, names, unit_key, kind)
         for metric, (names, unit_key, kind) in TAG_CANDIDATES.items()
     }
+    da_series = _depreciation_amortization(gaap)
+    nwc_series = _annual_entries(gaap.get(_NWC_TAG), "USD", "duration")
 
     period_ends = set(series["revenue"]) | set(series["net_income"])
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -664,6 +717,10 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
         # this fiscal year in the first place (see period_ends above).
         anchor = series["revenue"].get(end) or series["net_income"].get(end) or {}
 
+        depreciation_amortization = da_series.get(end, {}).get("val")
+        nwc_entry = nwc_series.get(end)
+        working_capital_change = nwc_entry.get("val") if nwc_entry is not None else None
+
         row = {
             "fiscal_year": date.fromisoformat(end).year,
             "period_end_date": end,
@@ -678,6 +735,8 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
             "free_cash_flow": free_cash_flow,
             "operating_cash_flow": operating_cash_flow,
             "capex": val["capex"],
+            "depreciation_amortization": depreciation_amortization,
+            "working_capital_change": working_capital_change,
             "total_debt": total_debt,
             "cash_and_equiv": val["cash_and_equiv"],
             "shares_diluted": val["shares_diluted"],
@@ -687,7 +746,10 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
             "filed": anchor.get("filed"),
             "retrieved_at": now_iso,
         }
-        row["quality_flags"] = ",".join(check_row_quality(row) + check_ratio_plausibility(row)) or None
+        flags = check_row_quality(row) + check_ratio_plausibility(row)
+        if working_capital_change is None:
+            flags.append(FLAG_NWC_UNAVAILABLE)
+        row["quality_flags"] = ",".join(flags) or None
         rows.append(row)
 
     return rows
@@ -699,12 +761,14 @@ def persist_annual_fundamentals(ticker: str, rows: list[dict], conn) -> None:
         INSERT INTO fundamentals_annual (
             ticker, fiscal_year, period_end_date, revenue, eps_diluted, net_income,
             operating_income, operating_margin, gross_margin, roic, roe, free_cash_flow,
-            operating_cash_flow, capex, total_debt, cash_and_equiv, shares_diluted, source, confidence,
+            operating_cash_flow, capex, depreciation_amortization, working_capital_change,
+            total_debt, cash_and_equiv, shares_diluted, source, confidence,
             accession_number, filed, quality_flags, retrieved_at
         ) VALUES (
             :ticker, :fiscal_year, :period_end_date, :revenue, :eps_diluted, :net_income,
             :operating_income, :operating_margin, :gross_margin, :roic, :roe, :free_cash_flow,
-            :operating_cash_flow, :capex, :total_debt, :cash_and_equiv, :shares_diluted, :source, :confidence,
+            :operating_cash_flow, :capex, :depreciation_amortization, :working_capital_change,
+            :total_debt, :cash_and_equiv, :shares_diluted, :source, :confidence,
             :accession_number, :filed, :quality_flags, :retrieved_at
         )
         ON CONFLICT(ticker, fiscal_year) DO UPDATE SET
@@ -713,7 +777,9 @@ def persist_annual_fundamentals(ticker: str, rows: list[dict], conn) -> None:
             operating_income=excluded.operating_income, operating_margin=excluded.operating_margin,
             gross_margin=excluded.gross_margin, roic=excluded.roic, roe=excluded.roe,
             free_cash_flow=excluded.free_cash_flow, operating_cash_flow=excluded.operating_cash_flow,
-            capex=excluded.capex, total_debt=excluded.total_debt,
+            capex=excluded.capex, depreciation_amortization=excluded.depreciation_amortization,
+            working_capital_change=excluded.working_capital_change,
+            total_debt=excluded.total_debt,
             cash_and_equiv=excluded.cash_and_equiv, shares_diluted=excluded.shares_diluted,
             source=excluded.source, confidence=excluded.confidence,
             accession_number=excluded.accession_number, filed=excluded.filed,

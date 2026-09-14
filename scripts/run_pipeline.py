@@ -123,6 +123,28 @@ def run_ingest_stage(conn, tickers: list[str], limit: int | None) -> None:
     print(f"  Share-basis changes: {_basis_summary(basis)}")
     print(f"  Rows failing ingest validation (flagged, not dropped): {flagged}")
 
+    # Sprint 4 (§A16.2): Owner Earnings inputs, latest fiscal year per just-ingested ticker.
+    if fundamentals_ok:
+        ok_tickers = [t for t, _ in fundamentals_ok]
+        placeholders = ",".join("?" for _ in ok_tickers)
+        latest_rows = conn.execute(
+            f"""
+            SELECT f.depreciation_amortization, f.working_capital_change
+            FROM fundamentals_annual f
+            JOIN (
+                SELECT ticker, MAX(fiscal_year) AS fy FROM fundamentals_annual
+                WHERE ticker IN ({placeholders}) GROUP BY ticker
+            ) latest ON f.ticker = latest.ticker AND f.fiscal_year = latest.fy
+            """,
+            ok_tickers,
+        ).fetchall()
+        da_n = sum(1 for r in latest_rows if r["depreciation_amortization"] is not None)
+        nwc_n = sum(1 for r in latest_rows if r["working_capital_change"] is not None)
+        print(
+            f"  Owner Earnings inputs (latest FY): D&A {da_n}/{len(latest_rows)}, "
+            f"NWC {nwc_n}/{len(latest_rows)} (rest flagged '{fundamentals_edgar.FLAG_NWC_UNAVAILABLE}', not guessed)"
+        )
+
 
 def _basis_summary(rows) -> str:
     return ", ".join(f"{r['n']} {r['change_type']}" for r in rows) or "none"

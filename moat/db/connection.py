@@ -51,6 +51,8 @@ _ADDED_COLUMNS = {
         "filed": "TEXT",              # A11 provenance
         "quality_flags": "TEXT",      # A10 ingest validation
         "operating_cash_flow": "REAL",  # A13: FCF is no longer substituted with OCF
+        "depreciation_amortization": "REAL",  # A16.2 Owner Earnings input
+        "working_capital_change": "REAL",     # A16.2 Owner Earnings input; NULL means unavailable, not zero
     },
     "filings": {
         # W1 (Sprint 3): document_url is the EDGAR index page (already present);

@@ -1527,3 +1527,44 @@ correctly reporting its own thin coverage rather than hiding it (this
 work item's own acceptance bar), but it isn't yet a *useful* 5-10yr range
 for almost anyone. Backfilling the existing universe's price history
 remains the open question sprint-4-plan.md already named.
+
+### A20.1 Judge review of V5/V6 found one real bug in this sprint's own code, plus a gap already accepted elsewhere applied inconsistently
+
+The push that shipped V5/V6 was judge-reviewed per §A19.7. Verdict FAIL —
+but worth separating what actually needed fixing from what didn't, same
+discipline §A17 itself modeled.
+
+**Fixed: `ev_ebit()` defaulted a missing `total_debt` to zero.** The
+original reasoning ("a missing debt figure legitimately means none to
+add") is a real convention in general, but doesn't hold *here* — this
+pipeline already knows (§A17, above) that `total_debt IS NULL` is a
+confirmed extraction gap for 18 of 91 companies, not a reliable "no debt"
+signal. AMT is the sharp case: stored `total_debt` $3.39bn against SEC's
+real ~$37.2bn including current maturities; defaulting a *fully missing*
+figure to zero would have been worse, not better. This is the same
+silent-wrong-number class `owner_earnings()` already refuses for missing
+capex/D&A — `ev_ebit()` just didn't apply that same discipline to debt
+consistently. Fixed: `total_debt is None` now returns `None` (unavailable),
+matching capex/D&A's treatment. `cash_and_equiv` still defaults to 0 when
+missing — a near-universal single XBRL tag with no documented equivalent
+gap, unlike debt.
+
+**Applied, not newly decided: the same 20-ticker operational exclusion
+ai_analysis already uses.** §A17's own decision (confirmed 2026-09-09)
+excludes the 18 null-debt tickers plus AMT/SBAC from ai_analysis via
+`--exclude`, explicitly reasoning that these are real Sprint 2/2.1
+defects "not fixed here" and an operational exclusion "not a change to
+the persisted screen data itself." V5/V6's first push didn't apply that
+same exclusion to the *valuation* stage — a gap, since `total_debt`,
+`operating_income`, and REIT-specific FCF/debt metrics feed `ev_ebit()`/
+`fcf_yield()` exactly the way they feed the quant screen. Not a new
+decision: the same 20 tickers (+ BKNG, §A20's own finding above) are now
+excluded from valuation too, landing at the same 70-company set
+`ai_analysis` already uses. The underlying root causes (debt-tag
+hierarchy, REIT methodology) remain out of scope here, same as §A17.
+
+**Everything else the judge flagged was already known, not new:**
+DCF/margin-of-safety/FCF-yield arithmetic re-verified independently
+(KO owner earnings, a hand DCF, EV/EBIT's own formula) and matched;
+P/E's low-confidence coverage gap is §A20's own already-documented
+finding above, not a new one.

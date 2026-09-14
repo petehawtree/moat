@@ -248,12 +248,23 @@ def test_ev_ebit_normal_case():
     assert result == pytest.approx(9.0)
 
 
-def test_ev_ebit_missing_debt_and_cash_default_to_zero():
-    """No debt/cash reported means neither contributes to EV — the ordinary
-    convention, not a guess (unlike owner_earnings' D&A/capex, which must
-    never default). EV = 800 + 0 - 0 = 800; 800 / 100 = 8.0."""
-    result = ev_ebit(market_cap=800.0, total_debt=None, cash_and_equiv=None, operating_income=100.0)
-    assert result == pytest.approx(8.0)
+def test_ev_ebit_missing_cash_defaults_to_zero():
+    """No cash reported means it contributes nothing to EV — a near-
+    universal single XBRL tag with no documented extraction gap, unlike
+    total_debt below. EV = 800 + 200 - 0 = 1000; 1000 / 100 = 10.0."""
+    result = ev_ebit(market_cap=800.0, total_debt=200.0, cash_and_equiv=None, operating_income=100.0)
+    assert result == pytest.approx(10.0)
+
+
+def test_ev_ebit_missing_debt_is_none_not_defaulted_to_zero():
+    """Found by a judge review of this exact function: total_debt IS NULL
+    is a known, confirmed extraction gap for 18/91 real companies (§A17),
+    not a reliable signal of zero debt — treating it as zero would be the
+    same silent-wrong-number substitution owner_earnings() already refuses
+    for missing capex/D&A. AMT is the real, confirmed case: stored
+    total_debt $3.39bn vs. SEC's real ~$37.2bn — defaulting to 0 for a
+    *fully* missing figure would have been even more wrong, not less."""
+    assert ev_ebit(market_cap=800.0, total_debt=None, cash_and_equiv=100.0, operating_income=100.0) is None
 
 
 def test_ev_ebit_negative_operating_income_is_none_not_a_misleading_multiple():

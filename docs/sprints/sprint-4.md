@@ -12,11 +12,11 @@ findings from execution: [`docs/PRD_ADDENDUM.md`](../PRD_ADDENDUM.md) §A16
 | V2 | `owner_earnings()` + `dcf_scenario()` — the real formula, two-stage DCF | 13 hand-computed tests incl. a real Coca-Cola FY2025 regression fixture that hand-verifies the NWC sign convention |
 | V3 | `margin_of_safety()` sign-flip guard | Returns `None` (not a sign-flipped percentage) for non-positive `intrinsic_value_low`; verified against zero real false positives across all 91 companies' bear scenarios |
 | V4 | Supporting methods: `fcf_yield`, `ev_ebit`, `annual_pe`/`pe_historical_range` | Same sign-flip-guard discipline as V3 applied to EV/EBIT and P/E; 20 new tests |
-| V5 | `run_valuation()` wired into `run_pipeline.py`'s `valuation` stage, reading the latest `quality_scores` run (§A16.1's W7 pattern, applied from the start) | 90/90 companies (91 minus BKNG, excluded — see below) produce 6 valuation rows each; idempotent per `run_id`; one transaction per company |
+| V5 | `run_valuation()` wired into `run_pipeline.py`'s `valuation` stage, reading the latest `quality_scores` run (§A16.1's W7 pattern, applied from the start) | 70/70 companies (91 minus the same 21-ticker operational exclusion `ai_analysis` already uses, §A20/§A20.1) produce 6 valuation rows each; idempotent per `run_id`; one transaction per company |
 | V6 | Dashboard: DCF bear/base/bull, margin of safety, FCF yield, EV/EBIT, P/E, per-company assumption drill-down | Verified end-to-end against the real database via `streamlit.testing.v1.AppTest` (no browser available in this environment) — zero exceptions, bear-case sign guard confirmed rendering distinctly (ABNB) vs. a normal case (AAPL) |
 
-Full test suite: **218 passed, 1 skipped** (pre-existing, live-API opt-in),
-up from 170 at the start of the sprint (48 new tests, all in
+Full test suite: **219 passed, 1 skipped** (pre-existing, live-API opt-in),
+up from 170 at the start of the sprint (49 new tests, all in
 `tests/test_valuation_engine.py`).
 
 ## Growth-rate derivation — a decision the addendum didn't make
@@ -70,6 +70,19 @@ things — full detail in §A20:
    each other. Excluded via the same `--exclude` mechanism as §A17's
    debt/REIT list, pending a real fix (a plausibility guard on implied
    P/E or market-cap/revenue).
+4. **A real bug in `ev_ebit()`, found by the judge review below and
+   fixed before this retro was closed out.** `total_debt is None`
+   defaulted to 0 ("no debt reported means none to add") — a real
+   convention in general, but not here, where this exact pipeline already
+   knows `total_debt IS NULL` is a confirmed extraction gap for 18/91
+   companies (§A17), not a reliable zero. AMT was the sharp case: stored
+   $3.39bn against SEC's real ~$37.2bn — defaulting a *fully missing*
+   figure to zero would have been worse, not better. Fixed to return
+   `None` (matching `owner_earnings()`'s existing capex/D&A discipline);
+   `cash_and_equiv` still defaults to 0 (no documented equivalent gap for
+   that tag). Full detail: §A20.1. The same 21-ticker exclusion above
+   also covers this — AMT/SBAC and the 18 null-debt tickers are the exact
+   companies this bug would have affected most.
 
 **Also confirmed, not new:** all 91 companies' P/E-range method reports
 `low_confidence = True` (83 with only 2 years of matched price history).
@@ -90,7 +103,7 @@ bar), but it isn't yet a *useful* 5-10yr range for almost anyone.
   intrinsic value — checked directly against all 91 companies' real
   output (9 real negative-bear-case companies, 0 guard failures), not
   just the unit tests.
-- [x] `valuations` is populated (540 rows, 90 companies) and the dashboard
+- [x] `valuations` is populated (420 rows, 70 companies) and the dashboard
   renders it per PRD §9/§10, verified end-to-end (no browser in this
   environment — verified via `streamlit.testing.v1.AppTest` running the
   real script against the real database instead).
@@ -126,4 +139,31 @@ bar), but it isn't yet a *useful* 5-10yr range for almost anyone.
 
 ## Judge review
 
-[Pending — run after this retro is committed.]
+Two automatic pre-push judge runs (§A19.7), both `FAIL` at the gate's own
+default posture — advisory, so neither blocked its push — for the two
+different reasons below. **Both reports archived:**
+[V1-V4](../judge-reports/judge-report-sprint-4-20260914-154430.md),
+[V5/V6](../judge-reports/judge-report-sprint-4-20260914-213702.md).
+
+**Round 1 (after V1-V4).** All findings were pre-existing Sprint 2/2.1/3
+defects already tracked (§A17's debt-tag/REIT gaps, a Sprint 3
+batch-amendment-fallback edge case, a Sprint 3 uncited-prose parser gap)
+— confirmed by inspection, none touching this sprint's own code. Test
+suite independently re-run and confirmed: 203 passed.
+
+**Round 2 (after V5/V6).** One real, valid finding in this sprint's own
+code (the `ev_ebit()` debt-defaulting bug, §A20.1) — fixed the same
+session, not carried forward. One legitimate architectural gap (§A17's
+already-accepted exclusion pattern hadn't yet been applied to the new
+valuation stage) — closed by applying the same 21-ticker exclusion
+`ai_analysis` already uses, not a new decision. The judge's other
+findings (P/E low-confidence coverage, thin-history DCF transparency)
+restate what §A20 already found and documented via V5's own §A19.1
+dry-run, before the judge ran at all. Test suite independently re-run
+and confirmed: 218 passed at review time (219 after the `ev_ebit` fix's
+test).
+
+Not run a third time after the `ev_ebit` fix — the fix is narrow, fully
+covered by new/updated unit tests, and re-verified end-to-end against the
+real database (EV/EBIT distribution re-checked, dashboard re-verified via
+`AppTest`) directly rather than only by inference from clean code.

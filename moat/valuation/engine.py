@@ -204,12 +204,24 @@ def ev_ebit(
 ) -> float | None:
     """Enterprise value / EBIT: (market_cap + total_debt - cash_and_equiv) / operating_income.
 
-    `total_debt`/`cash_and_equiv` default to 0 when `None` — an unlevered
-    company or one with no separately reported cash contributes nothing to
-    EV, which is the ordinary convention, not a guess. This differs from
-    Owner Earnings' capex/D&A, where a `None` is a genuine extraction gap
-    that must not be papered over (see `owner_earnings`) — here a missing
-    debt or cash figure legitimately means "none to add".
+    Returns `None` when `total_debt` is `None` — found by the judge review
+    that flagged this V5/V6 push, and confirmed against real data before
+    accepting it: this pipeline already knows `total_debt IS NULL` is not
+    reliably "no debt" for 18 of the 91 `passed_screen` companies (the
+    pre-existing §A17 debt-tag-extraction gap — `LongTermDebt` and
+    `LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities`
+    aren't in the candidate list). AMT is the sharpest case: stored
+    `total_debt` $3.39bn against SEC's real ~$37.2bn including current
+    maturities. Treating that gap as "genuinely zero debt" here would be
+    exactly the silent-wrong-number substitution `owner_earnings()`
+    already refuses to make for a missing capex/D&A (see its docstring) —
+    this function originally treated debt differently on the theory that
+    a missing figure "legitimately means none to add", which doesn't hold
+    for this specific, already-confirmed extraction gap. `cash_and_equiv`
+    is different and still defaults to 0 when `None`: it's carried by a
+    near-universal single XBRL tag with no equivalent documented gap, so a
+    missing value there is far more likely to be a genuine "none reported"
+    than an extraction failure.
 
     Returns `None` when `operating_income` is non-positive — the same
     sign-flip hazard `margin_of_safety` guards against, one level removed:
@@ -224,7 +236,9 @@ def ev_ebit(
         return None
     if market_cap is None or market_cap <= 0:
         return None
-    debt = total_debt or 0.0
+    if total_debt is None:
+        return None
+    debt = total_debt
     cash = cash_and_equiv or 0.0
     enterprise_value = market_cap + debt - cash
     return enterprise_value / operating_income
@@ -566,7 +580,11 @@ def run_valuation(ticker: str, run_id: str, conn) -> tuple[int, str | None]:
     multiple = ev_ebit(market_cap, latest.get("total_debt"), latest.get("cash_and_equiv"), latest.get("operating_income"))
     if multiple is None:
         ev_row["key_assumptions"] = json.dumps(
-            {"status": "unavailable", "reason": "operating_income non-positive or missing for the latest fiscal year"}
+            {
+                "status": "unavailable",
+                "reason": "operating_income non-positive/missing, or total_debt unavailable "
+                "(extraction gap, not assumed zero — §A17) for the latest fiscal year",
+            }
         )
     else:
         ev_row["key_assumptions"] = json.dumps({"ev_ebit_multiple": multiple, "market_cap": market_cap})

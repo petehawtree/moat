@@ -180,5 +180,25 @@ new, valid catch:** this retro's own numbers (90/540, from before the
 `ev_ebit` fix's exclusion-list change) had drifted out of sync with
 README's copy of them. Fixed directly in README; this file's numbers were
 already current. Test suite independently re-run and confirmed: 219
-passed. Not re-run a fourth time — round 3 raised nothing new and
-actionable beyond that one documentation fix.
+passed.
+
+**Round 4 (after the README fix).** One more real, valid, low-severity
+bug in this sprint's own code, found by the judge's own ad-hoc
+adversarial check (not this sprint's dry-run, which never hit it — all
+91 real companies have positive revenue): `historical_revenue_cagr()`
+filtered revenue with a truthy check, not a positivity check, so a
+negative *ending* revenue could reach a fractional power of a negative
+number unguarded — a complex number in Python — and crash
+`scenario_growth_rates()` with a `TypeError` rather than falling back to
+0% growth. Fixed: both CAGR endpoints are now filtered to strictly
+positive revenue. Everything else in round 4 was the same already-
+accepted `--exclude` architecture (§A20.1) and the same already-documented
+P/E-coverage point, plus a reasonable observation about D&A/NWC sharing
+the row's revenue/net-income provenance rather than their own (true, and
+consistent with how every other field on the row already works — not
+treated as a new defect). 2 new regression tests. 221 passed, 1 skipped.
+
+Not run a fifth time — round 4's one actionable, in-scope finding is
+fixed and tested; the remaining findings are the same pre-existing,
+already-documented, or consciously-accepted items rounds 1-3 already
+covered.

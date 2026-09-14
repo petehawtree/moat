@@ -327,13 +327,26 @@ def historical_revenue_cagr(fundamentals_rows: list[dict]) -> float | None:
     endpoint; a real limitation, not hidden here as if this were a more
     careful regression.
 
-    `None` with fewer than two usable (positive-revenue) years, or when
-    the years don't actually span any time (fiscal_year collision) — a
-    rate of change needs two distinct points, and a non-positive starting
-    revenue makes the ratio undefined.
+    `None` with fewer than two usable (strictly positive revenue) years,
+    or when the years don't actually span any time (fiscal_year
+    collision) — a rate of change needs two distinct points, and a
+    non-positive revenue at either endpoint makes the ratio undefined
+    (fractional-power-of-a-negative-number territory, not just "small").
+
+    Filters to *strictly positive* revenue, not merely present/non-zero —
+    found by a judge review: a `revenue` that's falsy-but-present (0) or
+    genuinely negative (a real, if rare, EDGAR restatement/contra-entry
+    possibility) used to pass the old `if r.get("revenue")` truthy check,
+    then reach the endpoint math unguarded whenever it landed on the
+    *last* point specifically (`first_revenue <= 0` was already checked,
+    `last_revenue` never was) — `(negative / positive) ** fractional`
+    produces a complex number in Python, which then raises `TypeError`
+    the moment `scenario_growth_rates()` tries to compare it against
+    `GROWTH_RATE_FLOOR`. Filtering both endpoints to strictly positive
+    up front closes this rather than special-casing the comparison.
     """
     points = sorted(
-        ((r["fiscal_year"], r["revenue"]) for r in fundamentals_rows if r.get("revenue")),
+        ((r["fiscal_year"], r["revenue"]) for r in fundamentals_rows if r.get("revenue") and r["revenue"] > 0),
         key=lambda p: p[0],
     )
     if len(points) < 2:
@@ -341,7 +354,7 @@ def historical_revenue_cagr(fundamentals_rows: list[dict]) -> float | None:
     first_year, first_revenue = points[0]
     last_year, last_revenue = points[-1]
     years = last_year - first_year
-    if years <= 0 or first_revenue <= 0:
+    if years <= 0:
         return None
     return (last_revenue / first_revenue) ** (1 / years) - 1
 

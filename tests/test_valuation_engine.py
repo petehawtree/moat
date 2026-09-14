@@ -372,6 +372,32 @@ def test_historical_revenue_cagr_ignores_missing_revenue_rows():
     assert historical_revenue_cagr(rows) == pytest.approx(0.10)
 
 
+def test_historical_revenue_cagr_negative_ending_revenue_does_not_crash():
+    """Regression for a judge-found bug: a negative revenue at the *last*
+    point used to pass the old truthy filter and reach
+    (negative / positive) ** fractional unguarded — a complex number in
+    Python, which then raised TypeError the moment scenario_growth_rates()
+    compared it against GROWTH_RATE_FLOOR. Both endpoints are now filtered
+    to strictly positive revenue up front; a negative/zero ending point is
+    excluded like a missing one, not fed to the math.
+    """
+    rows = [
+        {"fiscal_year": 2020, "revenue": 100.0},
+        {"fiscal_year": 2023, "revenue": -10.0},
+    ]
+    assert historical_revenue_cagr(rows) is None  # fewer than 2 usable points left
+    assert scenario_growth_rates(rows) == {"bear": pytest.approx(-0.04), "base": pytest.approx(0.0), "bull": pytest.approx(0.04)}
+
+
+def test_historical_revenue_cagr_zero_revenue_point_excluded():
+    rows = [
+        {"fiscal_year": 2020, "revenue": 100.0},
+        {"fiscal_year": 2021, "revenue": 0.0},
+        {"fiscal_year": 2022, "revenue": 121.0},
+    ]
+    assert historical_revenue_cagr(rows) == pytest.approx(0.10)  # same as the missing-row case
+
+
 def test_scenario_growth_rates_hand_computed():
     """cagr=0.10 (from 100 -> 121 over 2 years): bear = 0.10 - 0.04 = 0.06,
     base = 0.10, bull = 0.10 + 0.04 = 0.14."""

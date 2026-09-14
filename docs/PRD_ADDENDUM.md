@@ -1568,3 +1568,20 @@ DCF/margin-of-safety/FCF-yield arithmetic re-verified independently
 (KO owner earnings, a hand DCF, EV/EBIT's own formula) and matched;
 P/E's low-confidence coverage gap is §A20's own already-documented
 finding above, not a new one.
+
+**Round 3/4 fixed one more real bug in this sprint's own code:
+`historical_revenue_cagr()` could crash on a negative ending revenue.**
+The function's own docstring already claimed it required "two usable
+(positive-revenue) years," but the actual filter (`if r.get("revenue")`)
+was a truthy check, not a positivity check — a negative revenue value
+(a real, if rare, EDGAR restatement/contra-entry possibility) passed it
+whenever it landed on the *last* fiscal year specifically (only
+`first_revenue <= 0` was ever guarded). `(negative / positive) **
+fractional` produces a complex number in Python, and `scenario_growth_
+rates()` then raised `TypeError` comparing it against `GROWTH_RATE_FLOOR`
+— a crash, not a wrong number, but still a real defect in code this
+sprint shipped. Fixed: both endpoints are now filtered to strictly
+positive revenue before the CAGR math runs at all, so a negative/zero
+endpoint is excluded the same way a missing one already was. No live
+company hit this (all 91 have positive revenue) — found by the judge's
+own ad-hoc adversarial check, not by this sprint's dry-run.

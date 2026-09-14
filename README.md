@@ -33,9 +33,10 @@ sprint replaces.
   EV/EBIT, P/E vs. own historical range — all sharing one sign-flip-guard
   discipline (§A16.4/V3): a negative or zero denominator/intrinsic value
   reports an explicit non-numeric verdict, never a misleading number.
-- 90/91 `passed_screen` companies valued (540 rows); BKNG excluded — a
-  real price/shares data inconsistency found while dry-running the full
-  set, not a code defect (§A20).
+- 70/91 `passed_screen` companies valued (420 rows) — the same 21-ticker
+  operational exclusion `ai_analysis` already uses (§A17's debt-tag/REIT
+  gaps), plus BKNG: a real price/shares data inconsistency found while
+  dry-running the full set, not a code defect (§A20/§A20.1).
 - A stale-data bug found the same way (NVDA's DCF silently anchored on
   15-year-old capex data) was fixed before shipping: the owner-earnings
   series is now restricted to each company's own trailing 10 fiscal

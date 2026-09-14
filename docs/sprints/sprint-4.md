@@ -163,7 +163,22 @@ dry-run, before the judge ran at all. Test suite independently re-run
 and confirmed: 218 passed at review time (219 after the `ev_ebit` fix's
 test).
 
-Not run a third time after the `ev_ebit` fix — the fix is narrow, fully
-covered by new/updated unit tests, and re-verified end-to-end against the
-real database (EV/EBIT distribution re-checked, dashboard re-verified via
-`AppTest`) directly rather than only by inference from clean code.
+**Round 3 (after the `ev_ebit` fix).** Re-run anyway, since pushing to
+`main` triggers the hook automatically regardless of whether a third
+round felt necessary in advance.
+[Report](../judge-reports/judge-report-sprint-4-20260914-214730.md).
+Findings: the same two pre-existing, already-tracked §A17 root causes
+(debt-tag extraction, REIT scoring — GitHub issues #1/#2, genuinely out
+of scope here) re-confirmed rather than newly discovered; the same
+already-accepted architectural pattern (`--exclude` is opt-in, not a
+persisted/enforced default — true for `ai_analysis` since Sprint 3.1 and
+now equally true for `valuation`, a conscious tradeoff explained in
+§A20.1, not a new gap); the same two pre-existing Sprint 3 findings from
+round 1 (uncited-prose parser gap, batch-amendment-fallback edge case);
+and the same P/E-coverage finding §A20 already documented. **One real,
+new, valid catch:** this retro's own numbers (90/540, from before the
+`ev_ebit` fix's exclusion-list change) had drifted out of sync with
+README's copy of them. Fixed directly in README; this file's numbers were
+already current. Test suite independently re-run and confirmed: 219
+passed. Not re-run a fourth time — round 3 raised nothing new and
+actionable beyond that one documentation fix.

@@ -81,6 +81,11 @@ _ADDED_COLUMNS = {
         "investment_thesis":     "TEXT",
         "key_things_to_monitor": "TEXT",
         "ai_conclusion":         "TEXT",
+        # A5 caching, added after the first real pilot run found the stage
+        # had none — every eligible ticker re-paid for all 3 persona calls
+        # on every invocation, including a re-run against unchanged inputs.
+        "cache_key":             "TEXT",
+        "reused_from_run_id":    "TEXT",
     },
 }
 

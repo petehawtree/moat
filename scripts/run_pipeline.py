@@ -338,6 +338,7 @@ def run_committee_stage(
         result = run_committee(
             ticker, run_id, valuation_run, quality_run, conn, client,
             model_id=model_id, dry_run=dry_run,
+            cost_cap_remaining=(None if dry_run else cost_cap_usd - accumulated_cost),
         )
         outcome = result.get("outcome", "api_error")
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
@@ -346,7 +347,10 @@ def run_committee_stage(
         if dry_run:
             print(f"    {ticker}: {outcome}")
         else:
-            extra = f" -> {result.get('status')} ({result.get('overall_score', 0):.1f})" if outcome == "persisted" else f"  [{result.get('reason', '')}]"
+            if outcome in ("persisted", "cache_hit"):
+                extra = f" -> {result.get('status')} ({result.get('overall_score', 0):.1f})"
+            else:
+                extra = f"  [{result.get('reason', '')}]"
             print(f"    {ticker}: {outcome} (${accumulated_cost:.3f} cumulative){extra}")
 
     print("\n  committee summary:")

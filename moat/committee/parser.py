@@ -40,8 +40,18 @@ _SCORES_RE = re.compile(r"##\s*SCORES\s*\n(.*?)(?=\n##\s*STATEMENTS|\Z)", re.S |
 _STATEMENTS_RE = re.compile(r"##\s*STATEMENTS\s*\n(.*)\Z", re.S | re.I)
 _SCORE_LINE_RE = re.compile(r"^([A-Z_]+)\s*:\s*(\d+(?:\.\d+)?)\s*$", re.M)
 _SEVERITY_LINE_RE = re.compile(r"^SEVERITY\s*:\s*(low|medium|high)\s*$", re.M | re.I)
+# The bracket content is captured permissively (`.*?`, not `[\d,\s]+`) —
+# found running the first real pilot against live data: a persona emitted
+# non-numeric refs like `[refs: roic]` and `[refs: DCF bear]` (referencing a
+# quantitative concept by name instead of a claim id, ignoring the system
+# prompt's own rule). A digits-only character class simply fails to match
+# those brackets at all, so `(.+?)` swallows the literal "[refs: roic]" text
+# into the STATEMENT itself — invisible to validation, the opposite of
+# "reject a hallucinated ref" this parser exists to do. Capturing broadly
+# and validating each comma-separated token below (parse_persona_response)
+# is what actually catches it.
 _STATEMENT_LINE_RE = re.compile(
-    r"^STATEMENT:\s*(.+?)(?:\s*\[refs:\s*([\d,\s]+)\])?\s*$", re.M
+    r"^STATEMENT:\s*(.+?)(?:\s*\[refs:\s*(.*?)\s*\])?\s*$", re.M
 )
 
 
@@ -64,7 +74,13 @@ def extract_statements(raw_text: str) -> list[ParsedStatement]:
     for m in _STATEMENT_LINE_RE.finditer(block):
         text = m.group(1).strip()
         refs_raw = m.group(2)
-        refs = [int(r.strip()) for r in refs_raw.split(",")] if refs_raw else []
+        # Best-effort: silently drop a blank or non-numeric token (e.g. a
+        # stray "[refs: roic]") rather than erroring — this function has no
+        # validation contract, unlike parse_persona_response below.
+        refs = (
+            [int(r.strip()) for r in refs_raw.split(",") if r.strip().isdigit()]
+            if refs_raw else []
+        )
         out.append(ParsedStatement(text=text, refs=refs))
     return out
 
@@ -111,7 +127,26 @@ def parse_persona_response(persona: str, raw_text: str, known_claim_ids: set[int
     for m in _STATEMENT_LINE_RE.finditer(statements_block):
         text = m.group(1).strip()
         refs_raw = m.group(2)
-        refs = [int(r.strip()) for r in refs_raw.split(",")] if refs_raw else []
+        refs: list[int] = []
+        if refs_raw:
+            for token in refs_raw.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                if not token.isdigit():
+                    # Found running the first real pilot against live data:
+                    # a persona emitted non-numeric refs like
+                    # "[refs: roic]"/"[refs: DCF bear]" — referencing a
+                    # quantitative concept by name instead of a claim id,
+                    # against the system prompt's own rule. A malformed ref
+                    # is exactly as untrustworthy as a hallucinated one and
+                    # must fail validation, not be silently dropped or
+                    # (the original bug) invisibly folded into the
+                    # STATEMENT's own text by a regex that simply couldn't
+                    # match it.
+                    errors.append(f"STATEMENT has a non-numeric ref {token!r}: {text[:60]!r}")
+                    continue
+                refs.append(int(token))
         for r in refs:
             if r not in known_claim_ids:
                 errors.append(f"STATEMENT references unknown claim id {r}: {text[:60]!r}")

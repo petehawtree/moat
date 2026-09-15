@@ -311,6 +311,106 @@ def test_run_committee_works_through_a_cache_hit_chain(committee_db):
     assert result["outcome"] == "persisted"
 
 
+def test_run_committee_cache_hit_makes_no_api_calls(committee_db):
+    """§A5: 'AI analysis / valuation / committee: only re-run when A5's
+    cache key changes.' A second committee run against unchanged
+    ai_analysis/valuations inputs must copy the prior verdict forward, not
+    re-pay for all three persona calls — found missing entirely on the
+    first real pilot run (three retries after unrelated bugs each re-billed
+    the same company from scratch)."""
+    conn, claim_ids = committee_db
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_1', ?, 'complete')", (NOW,))
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_2', ?, 'complete')", (NOW,))
+    conn.commit()
+    client = MagicMock()
+    texts = _canned_responses(claim_ids)
+    client.messages.stream.side_effect = [_stream_cm(_fake_message(t)) for t in texts]
+
+    first = run_committee("TEST", "committee_run_1", "valuation_run", "quality_run", conn, client)
+    assert first["outcome"] == "persisted"
+    assert client.messages.stream.call_count == 3
+
+    client.messages.stream.reset_mock()
+    second = run_committee("TEST", "committee_run_2", "valuation_run", "quality_run", conn, client)
+    assert second["outcome"] == "cache_hit"
+    assert second["cost_estimate"] == 0.0
+    assert second["reused_from_run_id"] == "committee_run_1"
+    client.messages.stream.assert_not_called()
+
+    row = conn.execute(
+        "SELECT * FROM committee_verdicts WHERE run_id = 'committee_run_2' AND ticker = 'TEST'"
+    ).fetchone()
+    assert row["overall_score"] == first["overall_score"]
+    assert row["reused_from_run_id"] == "committee_run_1"
+
+
+def test_run_committee_cache_miss_when_valuation_changes(committee_db):
+    """A real content change (not just a new run_id) must invalidate the
+    cache — bundle key hashes the actual valuation figures, not the
+    valuation_run_id string."""
+    conn, claim_ids = committee_db
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_1', ?, 'complete')", (NOW,))
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_2', ?, 'complete')", (NOW,))
+    conn.commit()
+    client = MagicMock()
+    texts = _canned_responses(claim_ids)
+    client.messages.stream.side_effect = [_stream_cm(_fake_message(t)) for t in texts] * 2
+
+    first = run_committee("TEST", "committee_run_1", "valuation_run", "quality_run", conn, client)
+    assert first["outcome"] == "persisted"
+
+    conn.execute(
+        "UPDATE valuations SET intrinsic_value_low = 999.0 "
+        "WHERE ticker = 'TEST' AND method = 'owner_earnings_dcf' AND scenario = 'bear'"
+    )
+    conn.commit()
+
+    second = run_committee("TEST", "committee_run_2", "valuation_run", "quality_run", conn, client)
+    assert second["outcome"] == "persisted"
+    assert client.messages.stream.call_count == 6  # 3 + 3, no cache hit
+
+
+def test_run_committee_makes_no_calls_when_no_budget_remains(committee_db):
+    """cost_cap_remaining=0.0 means the stage's overall cap is already
+    exhausted before this company starts — zero persona calls, not a
+    partial company."""
+    conn, claim_ids = committee_db
+    client = MagicMock()
+
+    result = run_committee(
+        "TEST", "committee_run", "valuation_run", "quality_run", conn, client,
+        cost_cap_remaining=0.0,
+    )
+    assert result["outcome"] == "cost_capped"
+    assert client.messages.stream.call_count == 0
+    row = conn.execute(
+        "SELECT * FROM committee_verdicts WHERE run_id = 'committee_run' AND ticker = 'TEST'"
+    ).fetchone()
+    assert row is None
+
+
+def test_run_committee_stops_mid_company_after_first_persona_exceeds_remaining_budget(committee_db):
+    """cost_cap_remaining is checked before *each* persona call, not just
+    once per company — a company whose first call alone exceeds what's
+    left is halted before the second, bounding overspend to one persona
+    call rather than up to three (judge review of the first pilot run)."""
+    conn, claim_ids = committee_db
+    client = MagicMock()
+    texts = _canned_responses(claim_ids)
+    client.messages.stream.side_effect = [_stream_cm(_fake_message(t)) for t in texts]
+
+    result = run_committee(
+        "TEST", "committee_run", "valuation_run", "quality_run", conn, client,
+        cost_cap_remaining=0.00001,  # smaller than any single call's real cost
+    )
+    assert result["outcome"] == "cost_capped"
+    assert client.messages.stream.call_count == 1
+    row = conn.execute(
+        "SELECT * FROM committee_verdicts WHERE run_id = 'committee_run' AND ticker = 'TEST'"
+    ).fetchone()
+    assert row is None
+
+
 def test_run_committee_is_idempotent_per_run_id(committee_db):
     """Re-running under the same run_id replaces the row, not duplicates it —
     INSERT OR REPLACE against a PK with no nullable column (unlike

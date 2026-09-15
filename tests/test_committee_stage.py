@@ -36,7 +36,7 @@ def _conn_with(ai_tickers, valuation_tickers, passed_screen_tickers):
 def _run(conn, **kwargs):
     calls = []
 
-    def fake_run_committee(ticker, run_id, valuation_run_id, quality_run_id, conn_, client, model_id=None, dry_run=False):
+    def fake_run_committee(ticker, run_id, valuation_run_id, quality_run_id, conn_, client, model_id=None, dry_run=False, cost_cap_remaining=None):
         calls.append(ticker)
         return {"ticker": ticker, "outcome": "persisted", "cost_estimate": 1.0, "overall_score": 80.0, "status": "Investigate"}
 

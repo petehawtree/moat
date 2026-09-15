@@ -317,6 +317,8 @@ CREATE TABLE IF NOT EXISTS committee_verdicts (
     bear_analyst_view           TEXT,
     valuation_analyst_view      TEXT,
     bear_case_severity          TEXT,   -- Sprint 5: 'low'|'medium'|'high' — assign_status() input, NOT a compute_overall_score component
+    cache_key                   TEXT,   -- Sprint 5 (A5): hash of the ai_analysis.cache_keys + valuation figures + model this verdict was computed from
+    reused_from_run_id          TEXT,   -- non-NULL means no persona API calls were made — copied forward from that run_id's row
     business_quality_score      REAL,   -- weight 25%
     competitive_moat_score      REAL,   -- weight 20%
     financial_strength_score    REAL,   -- weight 15%

@@ -137,6 +137,17 @@ def _format_quant_block(quant_rows: list[dict], quality_row: dict | None) -> str
         if r["status"] in ("unavailable", "not_applicable"):
             lines.append(f"{r['metric']}: {r['status']}")
             continue
+        if r["value"] is None:
+            # A metric can reach a verdict without a comparable number —
+            # e.g. debt outstanding with no positive FCF to service it
+            # fails the debt metric outright even though debt/FCF itself
+            # is left None rather than divided by a non-positive
+            # denominator (moat/screen/quant_screen.py's
+            # _absolute_floor_pass docstring). Found running this pilot
+            # against real data (§A19.1): 141/8-metric rows in the current
+            # quality run are exactly this shape, mostly 'debt: fail'.
+            lines.append(f"{r['metric']}: {r['status']} (no comparable ratio computed)")
+            continue
         pct = f", {r['sector_percentile']:.0f}th percentile in {r['sector_peer_group']}" if r["sector_percentile"] is not None else ""
         lines.append(f"{r['metric']}: {r['value']:.4f} ({r['status']}{pct})")
     if quality_row is not None:
@@ -201,7 +212,11 @@ STATEMENT: <another>
 ## Rules
 
 1. Make 4-8 STATEMENT lines total, each citing the bracketed claim id(s) from the \
-CONTEXT block that support it — e.g. [refs: 42] or [refs: 42, 57].
+CONTEXT block that support it — e.g. [refs: 42] or [refs: 42, 57]. [refs: ...] takes \
+ONLY the bracketed integer id(s) shown before a claim in the CONTEXT block — never a \
+metric name, ticker, or any other word. The QUANTITATIVE SCREEN and VALUATION \
+sections have no claim ids; reference a figure from either by name directly in the \
+STATEMENT text, with no [refs: ...] tag at all.
 2. A statement with no clear support in the CONTEXT block does not become a \
 STATEMENT — say so in the VERDICT instead ("insufficient evidence on X").
 3. Never invent facts not present in the CONTEXT block.
@@ -233,7 +248,10 @@ STATEMENT: <another>
 ## Rules
 
 1. Make 4-8 STATEMENT lines total, each citing the bracketed claim id(s) from the \
-CONTEXT block that support it.
+CONTEXT block that support it. [refs: ...] takes ONLY the bracketed integer id(s) \
+shown before a claim — never a metric name, ticker, or any other word. The \
+QUANTITATIVE SCREEN and VALUATION sections have no claim ids; reference a figure \
+from either by name directly in the STATEMENT text, with no [refs: ...] tag at all.
 2. A concern with no clear support in the CONTEXT block does not become a \
 STATEMENT — say so in the VERDICT instead.
 3. Never invent facts not present in the CONTEXT block.

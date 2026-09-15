@@ -15,13 +15,14 @@ rather than this stage re-proving entailment itself.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 
 from moat.analysis.pricing import DEFAULT_MODEL
 from moat.committee.caller import call_persona
 from moat.committee.parser import parse_persona_response
-from moat.committee.prompt import PERSONAS, build_context_block
+from moat.committee.prompt import PERSONAS, PROTOCOL_VERSION, build_context_block
 
 WEIGHTS = {
     "business_quality": 0.25,
@@ -156,12 +157,17 @@ def _resolve_claims_run_id(ticker: str, analysis_type: str, run_id: str, conn) -
     return run_id
 
 
-def _fetch_claims_by_type(ticker: str, conn) -> dict[str, list[dict]]:
-    claims_by_type: dict[str, list[dict]] = {}
-    current_rows = conn.execute(
-        "SELECT run_id, analysis_type FROM ai_analysis WHERE ticker = ? AND is_current = 1",
+def _fetch_current_ai_analysis_rows(ticker: str, conn) -> list:
+    return conn.execute(
+        "SELECT run_id, analysis_type, cache_key FROM ai_analysis WHERE ticker = ? AND is_current = 1",
         (ticker,),
     ).fetchall()
+
+
+def _fetch_claims_by_type(ticker: str, conn, current_rows=None) -> dict[str, list[dict]]:
+    claims_by_type: dict[str, list[dict]] = {}
+    if current_rows is None:
+        current_rows = _fetch_current_ai_analysis_rows(ticker, conn)
     for row in current_rows:
         claims_run_id = _resolve_claims_run_id(ticker, row["analysis_type"], row["run_id"], conn)
         claim_rows = conn.execute(
@@ -199,6 +205,82 @@ def _fetch_quality_row(ticker: str, quality_run_id: str, conn) -> dict | None:
         (quality_run_id, ticker),
     ).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------
+# Caching (§A5): "AI analysis / valuation / committee: only re-run when
+# A5's cache key changes." Added after the first real pilot run against
+# live data found this stage had no caching at all — every ticker paid for
+# all 3 persona calls on every single invocation, including a re-run
+# against completely unchanged inputs (confirmed the hard way: three
+# retries in a row after unrelated bugs each re-billed AAPL from scratch).
+#
+# Keyed on content, not on the current ai_analysis/valuations run_ids
+# directly — those run_ids change on every pipeline re-run even when the
+# underlying content doesn't (a cache-hit copy-forward in ai_analysis gets
+# a brand new run_id every time, see _resolve_claims_run_id's docstring
+# above). ai_analysis.cache_key is already the content-stable bundle key
+# Sprint 3 computes for exactly this reason (§A15.7); valuation has no
+# such key (Sprint 4's stage is $0 deterministic arithmetic, so nothing
+# needed one), so the actual DCF/cross-check numbers are hashed directly.
+# ---------------------------------------------------------------------
+
+def compute_committee_bundle_key(
+    ai_cache_keys: dict[str, str], valuation_rows: list[dict], model_id: str
+) -> str:
+    valuation_summary = sorted(
+        (r["method"], r["scenario"], r["intrinsic_value_low"], r["intrinsic_value_high"], r["current_price"])
+        for r in valuation_rows
+    )
+    payload = json.dumps(
+        {
+            "ai_cache_keys": {k: ai_cache_keys[k] for k in sorted(ai_cache_keys)},
+            "valuation": valuation_summary,
+            "model_id": model_id,
+            "protocol_version": PROTOCOL_VERSION,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def find_cached_committee_verdict(ticker: str, bundle_key: str, conn) -> dict | None:
+    """Most recent committee_verdicts row for this ticker with a matching
+    cache_key — a prior verdict computed from exactly this same content,
+    regardless of which run_id it was written under.
+    """
+    row = conn.execute(
+        "SELECT * FROM committee_verdicts WHERE ticker = ? AND cache_key = ? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (ticker, bundle_key),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _persist_cache_hit(run_id: str, ticker: str, cached: dict, conn) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO committee_verdicts (
+            run_id, ticker, quality_analyst_view, bear_analyst_view, valuation_analyst_view,
+            bear_case_severity, business_quality_score, competitive_moat_score,
+            financial_strength_score, management_score, valuation_score, risk_score,
+            overall_score, status, data_confidence, investment_thesis,
+            key_things_to_monitor, ai_conclusion, cache_key, reused_from_run_id, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            run_id, ticker,
+            cached["quality_analyst_view"], cached["bear_analyst_view"], cached["valuation_analyst_view"],
+            cached["bear_case_severity"], cached["business_quality_score"], cached["competitive_moat_score"],
+            cached["financial_strength_score"], cached["management_score"], cached["valuation_score"],
+            cached["risk_score"], cached["overall_score"], cached["status"], cached["data_confidence"],
+            cached["investment_thesis"], cached["key_things_to_monitor"], cached["ai_conclusion"],
+            cached["cache_key"], cached["run_id"], now,
+        ),
+    )
+    conn.commit()
 
 
 # ---------------------------------------------------------------------
@@ -244,6 +326,7 @@ def run_committee(
     client,
     model_id: str = DEFAULT_MODEL,
     dry_run: bool = False,
+    cost_cap_remaining: float | None = None,
 ) -> dict:
     """Three persona calls -> one committee_verdicts row. Returns a status
     dict, same convention as moat.analysis.persist.run_analysis(), so the
@@ -253,6 +336,13 @@ def run_committee(
     nothing is persisted for this ticker — but cost already spent on the
     personas that *did* run is still returned, since it's real spend the
     cap must still account for.
+
+    cost_cap_remaining: checked before *each* persona call, not just once
+    per company (run_pipeline.py's own per-company check bounds the
+    overshoot to at most one company's worth of calls; this bounds it to
+    at most one persona call's worth — found worth tightening after the
+    judge's review of the first real pilot run flagged the coarser
+    per-company check as a real, if modest, overspend risk).
     """
     company_row = conn.execute(
         "SELECT name, sector FROM companies WHERE ticker = ?", (ticker,)
@@ -261,13 +351,26 @@ def run_committee(
         return {"ticker": ticker, "outcome": "api_error", "reason": "no company row", "cost_estimate": 0.0}
     company_row = dict(company_row)
 
-    claims_by_type = _fetch_claims_by_type(ticker, conn)
+    current_ai_rows = _fetch_current_ai_analysis_rows(ticker, conn)
+    claims_by_type = _fetch_claims_by_type(ticker, conn, current_rows=current_ai_rows)
     if not any(claims_by_type.values()):
         return {"ticker": ticker, "outcome": "api_error", "reason": "no current ai_analysis claims", "cost_estimate": 0.0}
 
     valuation_rows = _fetch_valuation_rows(ticker, valuation_run_id, conn)
     if not valuation_rows:
         return {"ticker": ticker, "outcome": "api_error", "reason": "no valuations row in the latest run", "cost_estimate": 0.0}
+
+    ai_cache_keys = {r["analysis_type"]: r["cache_key"] for r in current_ai_rows}
+    bundle_key = compute_committee_bundle_key(ai_cache_keys, valuation_rows, model_id)
+    if not dry_run:
+        cached = find_cached_committee_verdict(ticker, bundle_key, conn)
+        if cached is not None:
+            _persist_cache_hit(run_id, ticker, cached, conn)
+            return {
+                "ticker": ticker, "outcome": "cache_hit", "cost_estimate": 0.0,
+                "reused_from_run_id": cached["run_id"],
+                "overall_score": cached["overall_score"], "status": cached["status"],
+            }
 
     quant_rows = _fetch_quant_rows(ticker, quality_run_id, conn)
     quality_row = _fetch_quality_row(ticker, quality_run_id, conn)
@@ -287,6 +390,11 @@ def run_committee(
     total_cost = 0.0
     responses: dict[str, object] = {}
     for persona in PERSONAS:
+        if not dry_run and cost_cap_remaining is not None and total_cost >= cost_cap_remaining:
+            return {
+                "ticker": ticker, "outcome": "cost_capped", "cost_estimate": total_cost,
+                "reason": f"cap reached before {persona} persona call",
+            }
         result = call_persona(client, ticker, persona, context_block, model_id=model_id, dry_run=dry_run)
         total_cost += result.cost_estimate
 
@@ -326,8 +434,8 @@ def run_committee(
             bear_case_severity, business_quality_score, competitive_moat_score,
             financial_strength_score, management_score, valuation_score, risk_score,
             overall_score, status, data_confidence, investment_thesis,
-            key_things_to_monitor, ai_conclusion, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            key_things_to_monitor, ai_conclusion, cache_key, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             run_id, ticker,
@@ -337,7 +445,7 @@ def run_committee(
             component_scores["financial_strength_score"], component_scores["management_score"],
             component_scores["valuation_score"], component_scores["risk_score"],
             overall, status, data_confidence, investment_thesis,
-            key_things_to_monitor, ai_conclusion, now,
+            key_things_to_monitor, ai_conclusion, bundle_key, now,
         ),
     )
     conn.commit()

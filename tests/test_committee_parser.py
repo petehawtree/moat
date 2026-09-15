@@ -118,6 +118,62 @@ def test_parse_no_statements_is_invalid():
     assert any("no STATEMENT" in e for e in parsed.validation_errors)
 
 
+def test_parse_statement_with_empty_refs_bracket_does_not_crash():
+    """Found running the first real pilot: a persona emitted
+    'STATEMENT: text [refs: ]' (whitespace only inside the brackets) —
+    must parse as zero refs, not crash on int('')."""
+    text = (
+        "## VERDICT\nFine.\n\n"
+        "## SCORES\nBUSINESS_QUALITY: 50\nCOMPETITIVE_MOAT: 50\nMANAGEMENT: 50\n\n"
+        "## STATEMENTS\nSTATEMENT: Something true but uncited. [refs: ]\n"
+    )
+    parsed = parse_persona_response("quality", text, known_claim_ids=set())
+    assert parsed.statements[0].refs == []
+
+
+def test_parse_statement_with_trailing_comma_in_refs_does_not_crash():
+    text = (
+        "## VERDICT\nFine.\n\n"
+        "## SCORES\nBUSINESS_QUALITY: 50\nCOMPETITIVE_MOAT: 50\nMANAGEMENT: 50\n\n"
+        "## STATEMENTS\nSTATEMENT: Something. [refs: 12,]\n"
+    )
+    parsed = parse_persona_response("quality", text, known_claim_ids={12})
+    assert parsed.statements[0].refs == [12]
+
+
+def test_parse_non_numeric_ref_is_invalid_not_silently_swallowed():
+    """Found running the first real pilot against live data: a persona
+    emitted '[refs: roic]'/'[refs: DCF bear]' — a quant concept referenced
+    by name instead of a claim id. The old digits-only regex simply failed
+    to match the bracket at all, silently folding the literal
+    '[refs: roic]' text into the STATEMENT itself — invisible to
+    validation. Must now be flagged, not swallowed."""
+    text = (
+        "## VERDICT\nFine.\n\n"
+        "## SCORES\nBUSINESS_QUALITY: 50\nCOMPETITIVE_MOAT: 50\nMANAGEMENT: 50\n\n"
+        "## STATEMENTS\nSTATEMENT: ROIC is strong. [refs: roic]\n"
+    )
+    parsed = parse_persona_response("quality", text, known_claim_ids=set())
+    assert not parsed.is_valid
+    assert any("non-numeric ref" in e and "roic" in e for e in parsed.validation_errors)
+    # The statement text itself is clean — the bracket doesn't leak into it.
+    assert parsed.statements[0].text == "ROIC is strong."
+    assert parsed.statements[0].refs == []
+
+
+def test_extract_statements_silently_drops_non_numeric_refs():
+    """extract_statements() (the dashboard's best-effort path, no validation
+    contract) drops a non-numeric ref rather than raising — the strict
+    parse_persona_response() above is where that gets flagged as an error."""
+    from moat.committee.parser import extract_statements
+
+    text = "## STATEMENTS\nSTATEMENT: ROIC is strong. [refs: roic]\nSTATEMENT: Real one. [refs: 5]\n"
+    statements = extract_statements(text)
+    assert statements[0].text == "ROIC is strong."
+    assert statements[0].refs == []
+    assert statements[1].refs == [5]
+
+
 def test_parse_score_out_of_range_is_invalid_but_clamped():
     text = QUALITY_RESPONSE.replace("BUSINESS_QUALITY: 85", "BUSINESS_QUALITY: 140")
     parsed = parse_persona_response("quality", text, known_claim_ids={1, 2, 3})

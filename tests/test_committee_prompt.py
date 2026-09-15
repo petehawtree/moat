@@ -128,6 +128,21 @@ def test_build_context_block_unavailable_methods_state_the_reason():
     assert "EV/EBIT: unavailable — total_debt unavailable" in block
 
 
+def test_format_quant_block_handles_a_fail_status_with_no_computable_value():
+    """Found running the first real pilot against live data: debt outstanding
+    with no positive FCF to service it fails the debt metric outright while
+    debt/FCF itself stays None (moat/screen/quant_screen.py's
+    _absolute_floor_pass docstring) — 141 rows in one real quality run alone.
+    Must not crash trying to format None as a float."""
+    rows = [
+        {"metric": "debt", "value": None, "status": "fail", "sector_percentile": None, "sector_peer_group": "Technology"},
+    ]
+    block = build_context_block(
+        "TEST", COMPANY_ROW, CLAIMS_BY_TYPE, _valuation_rows(), rows, QUALITY_ROW, "high",
+    )
+    assert "debt: fail (no comparable ratio computed)" in block
+
+
 def test_build_context_block_flags_low_confidence_pe_range():
     block = build_context_block(
         "TEST", COMPANY_ROW, CLAIMS_BY_TYPE, _valuation_rows(), QUANT_ROWS, QUALITY_ROW, "high",

@@ -174,6 +174,26 @@ def test_extract_statements_silently_drops_non_numeric_refs():
     assert statements[1].refs == [5]
 
 
+def test_parse_valuation_non_numeric_ref_is_silently_stripped_not_an_error():
+    """Found running the real pilot: the Valuation Analyst — whose
+    statements are grounded in quant/DCF figures already visible in the
+    CONTEXT block, never in a claim_id — still sometimes tags a figure with
+    a descriptive bracket like '[refs: DCF bear]'. Unlike Quality/Bear
+    (where a non-numeric ref means a broken citation trail), that's a
+    formatting slip on already-grounded content and must not fail
+    validation — 3/16 real companies were discarded and re-billed for
+    exactly this before the carve-out."""
+    text = (
+        "## VERDICT\nFine.\n\n"
+        "## SCORES\nVALUATION: 60\nFINANCIAL_STRENGTH: 60\n\n"
+        "## STATEMENTS\nSTATEMENT: The bear-case DCF is $107.74. [refs: DCF bear]\n"
+    )
+    parsed = parse_persona_response("valuation", text, known_claim_ids=set())
+    assert parsed.is_valid, parsed.validation_errors
+    assert parsed.statements[0].text == "The bear-case DCF is $107.74."
+    assert parsed.statements[0].refs == []
+
+
 def test_parse_score_out_of_range_is_invalid_but_clamped():
     text = QUALITY_RESPONSE.replace("BUSINESS_QUALITY: 85", "BUSINESS_QUALITY: 140")
     parsed = parse_persona_response("quality", text, known_claim_ids={1, 2, 3})

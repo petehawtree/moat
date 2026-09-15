@@ -134,14 +134,29 @@ def parse_persona_response(persona: str, raw_text: str, known_claim_ids: set[int
                 if not token:
                     continue
                 if not token.isdigit():
-                    # Found running the first real pilot against live data:
-                    # a persona emitted non-numeric refs like
-                    # "[refs: roic]"/"[refs: DCF bear]" — referencing a
-                    # quantitative concept by name instead of a claim id,
-                    # against the system prompt's own rule. A malformed ref
-                    # is exactly as untrustworthy as a hallucinated one and
-                    # must fail validation, not be silently dropped or
-                    # (the original bug) invisibly folded into the
+                    if persona == "valuation":
+                        # Found running the first real pilot against live
+                        # data: the Valuation Analyst — whose statements are
+                        # grounded in the CONTEXT block's own quant/DCF
+                        # figures, never in a claim_id (prompt.py's own rule
+                        # 1 tells it so explicitly) — still sometimes tags a
+                        # figure with a descriptive, non-numeric bracket like
+                        # "[refs: DCF bear]". That's a stray label on an
+                        # already-grounded number, not a hallucinated
+                        # citation the way it would be for Quality/Bear
+                        # (whose claim_id mechanism is the actual evidence
+                        # trail) — 3/16 real companies hit this and were
+                        # discarded (and re-billed) before this carve-out.
+                        # Drop the tag silently rather than fail the whole
+                        # response over a formatting slip on content that
+                        # was never claim-grounded to begin with.
+                        continue
+                    # For quality/bear, a non-numeric ref IS exactly as
+                    # untrustworthy as a hallucinated claim id — those
+                    # personas' statements are supposed to trace to a real
+                    # cited filing quote, and a malformed ref means they
+                    # don't. Must fail validation, not be silently dropped
+                    # or (the original bug) invisibly folded into the
                     # STATEMENT's own text by a regex that simply couldn't
                     # match it.
                     errors.append(f"STATEMENT has a non-numeric ref {token!r}: {text[:60]!r}")

@@ -35,11 +35,20 @@ def _resolve_claim_citation(claim_id: int, conn) -> dict | None:
     return dict(row) if row else None
 
 
-def _render_persona_response(raw_text: str, conn, key_prefix: str) -> None:
+def _render_persona_response(raw_text: str, conn, key_prefix: str, persona: str) -> None:
     """Verdict + STATEMENTs, each STATEMENT's [refs: N] resolved back to
     its original cited quote in an expander — the dashboard-side half of
     the entailment decision (moat/committee/committee.py's module
     docstring; parser.py's extract_verdict/extract_statements).
+
+    An unreferenced STATEMENT is flagged explicitly for Quality/Bear (whose
+    claims are supposed to trace to a real filing quote — an unreferenced
+    one is analyst synthesis, not a grounded claim, and the reader should
+    see that distinction rather than a bullet indistinguishable from a
+    cited one). Not flagged for Valuation, where a figure is grounded by
+    appearing in the CONTEXT block's own quant/DCF numbers, never a claim
+    id, by design (prompt.py's rule 1) — found missing entirely on the
+    judge's review of the first real pilot run.
     """
     verdict = extract_verdict(raw_text)
     if verdict:
@@ -55,6 +64,103 @@ def _render_persona_response(raw_text: str, conn, key_prefix: str) -> None:
                         st.markdown(f"> {cite['quote']}")
                     else:
                         st.caption(f"[{claim_id}] — no stored citation found")
+        elif persona != "valuation":
+            st.caption("⚠️ no citation for this statement — analyst synthesis, not a filing-grounded claim")
+
+
+def _render_moat_evidence(ticker: str, conn) -> None:
+    """PRD §10's 'moat evidence' section — the current ai_analysis 'moat'
+    claims and their citations directly, distinct from the free-text bull
+    case prose above (which synthesizes moat alongside everything else).
+    Added after judge review of the first real pilot run found this PRD
+    §10 field had no dedicated section at all.
+    """
+    row = conn.execute(
+        "SELECT run_id FROM ai_analysis WHERE ticker = ? AND analysis_type = 'moat' AND is_current = 1",
+        (ticker,),
+    ).fetchone()
+    if row is None:
+        st.markdown("_not available_")
+        return
+    claims = conn.execute(
+        "SELECT claim_id, claim_text, assertion_status FROM analysis_claims "
+        "WHERE run_id = ? AND ticker = ? AND analysis_type = 'moat' ORDER BY claim_order",
+        (row["run_id"], ticker),
+    ).fetchall()
+    if not claims:
+        st.markdown("_not available_")
+        return
+    for c in claims:
+        if c["assertion_status"] == "insufficient_evidence":
+            st.markdown(f"- _insufficient evidence:_ {c['claim_text']}")
+            continue
+        st.markdown(f"- {c['claim_text']}")
+        cite = _resolve_claim_citation(c["claim_id"], conn)
+        if cite:
+            with st.expander(f"↳ [{c['claim_id']}] source quote", expanded=False):
+                st.caption(f"{cite['accession_number']} · {cite['section_id']}")
+                st.markdown(f"> {cite['quote']}")
+
+
+def _render_financial_quality(ticker: str, conn) -> None:
+    """PRD §10's 'financial quality' section — the latest quant screen
+    metrics for this company directly (moat/screen/quant_screen.py),
+    same data as the Sprint 2 section's drill-down, pulled into the brief
+    itself rather than requiring a second lookup."""
+    run = conn.execute(
+        "SELECT run_id FROM pipeline_runs WHERE run_id IN (SELECT DISTINCT run_id FROM quant_scores) "
+        "AND status != 'failed' ORDER BY started_at DESC LIMIT 1"
+    ).fetchone()
+    if run is None:
+        st.markdown("_not available_")
+        return
+    df = pd.read_sql_query(
+        "SELECT metric, ROUND(value, 4) AS value, status, ROUND(sector_percentile, 1) AS sector_percentile "
+        "FROM quant_scores WHERE run_id = ? AND ticker = ? ORDER BY metric",
+        conn, params=(run["run_id"], ticker),
+    )
+    if df.empty:
+        st.markdown("_not available_")
+        return
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def _render_valuation_range(ticker: str, conn) -> None:
+    """PRD §10's 'valuation range' and 'margin of safety' sections — the
+    DCF bear/base/bull range and current price directly from `valuations`
+    (moat/valuation/engine.py), same sign-guard rendering as the Sprint 4
+    section, pulled into the brief itself."""
+    run = conn.execute(
+        "SELECT run_id FROM pipeline_runs WHERE run_id IN (SELECT DISTINCT run_id FROM valuations) "
+        "AND status != 'failed' ORDER BY started_at DESC LIMIT 1"
+    ).fetchone()
+    if run is None:
+        st.markdown("_not available_")
+        return
+    rows = conn.execute(
+        "SELECT method, scenario, intrinsic_value_low, current_price, margin_of_safety_pct "
+        "FROM valuations WHERE run_id = ? AND ticker = ? AND method = 'owner_earnings_dcf'",
+        (run["run_id"], ticker),
+    ).fetchall()
+    by_scenario = {r["scenario"]: r for r in rows}
+    if "bear" not in by_scenario:
+        st.markdown("_not available_")
+        return
+    current_price = by_scenario["bear"]["current_price"]
+    st.markdown(f"Current price: **${current_price:,.2f}**" if current_price is not None else "Current price: _not available_")
+    for scenario in ("bear", "base", "bull"):
+        r = by_scenario.get(scenario)
+        if r is None or r["intrinsic_value_low"] is None:
+            st.markdown(f"- DCF {scenario}: _not available_")
+        elif r["intrinsic_value_low"] <= 0:
+            st.markdown(f"- DCF {scenario}: ${r['intrinsic_value_low']:,.2f} — **bear case negative, not investable on this basis**")
+        else:
+            st.markdown(f"- DCF {scenario}: ${r['intrinsic_value_low']:,.2f}")
+    bear = by_scenario["bear"]
+    if bear["intrinsic_value_low"] is not None and bear["intrinsic_value_low"] > 0:
+        st.markdown(f"Margin of safety (bear case): **{bear['margin_of_safety_pct']:+.1%}**")
+    else:
+        st.markdown("Margin of safety: _bear case unavailable/negative — no numeric margin of safety_")
 
 
 conn = get_connection()
@@ -367,16 +473,29 @@ else:
                 f"data confidence: {verdict_row['data_confidence']} · "
                 f"status: **{verdict_row['status']}** ({verdict_row['overall_score']:.1f}/100)"
             )
+            st.caption(
+                f"Company overview: {company_row['universe']} universe"
+                + (f" · CIK {company_row['cik']}" if company_row["cik"] else "")
+            )
+
+            st.markdown("#### Moat evidence")
+            _render_moat_evidence(pick_brief, conn)
+
+            st.markdown("#### Financial quality")
+            _render_financial_quality(pick_brief, conn)
+
+            st.markdown("#### Valuation range & margin of safety")
+            _render_valuation_range(pick_brief, conn)
 
             st.markdown("#### Investment thesis")
             st.markdown(verdict_row["investment_thesis"] or "_not available_")
 
             st.markdown("#### Bull case (Quality + Valuation Analyst)")
-            _render_persona_response(verdict_row["quality_analyst_view"] or "", conn, f"{pick_brief}_quality")
-            _render_persona_response(verdict_row["valuation_analyst_view"] or "", conn, f"{pick_brief}_valuation")
+            _render_persona_response(verdict_row["quality_analyst_view"] or "", conn, f"{pick_brief}_quality", "quality")
+            _render_persona_response(verdict_row["valuation_analyst_view"] or "", conn, f"{pick_brief}_valuation", "valuation")
 
             st.markdown("#### Bear case")
-            _render_persona_response(verdict_row["bear_analyst_view"] or "", conn, f"{pick_brief}_bear")
+            _render_persona_response(verdict_row["bear_analyst_view"] or "", conn, f"{pick_brief}_bear", "bear")
 
             st.markdown("#### Key things to monitor")
             try:

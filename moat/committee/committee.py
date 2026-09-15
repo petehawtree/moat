@@ -52,11 +52,29 @@ def compute_overall_score(component_scores: dict[str, float]) -> float:
     (e.g. 'business_quality_score'), not WEIGHTS' own shorter keys —
     matches what the three personas actually produce (prompt.py's
     PERSONA_SCORE_COMPONENTS), so callers don't have to translate twice.
+
+    `risk_score` is inverted before weighting. Found by judge review of the
+    first real pilot run — a genuine bug, not a naming quibble: the Bear
+    Analyst prompt defines RISK as "100 = highest risk" (prompt.py), and
+    `risk_score` is stored/displayed on the dashboard in that same
+    intuitive sense (a reader expects "risk_score: 78" to mean high risk).
+    But summing it in unmodified alongside five higher-is-better components
+    made a riskier company score HIGHER overall — a company with risk=100
+    got 5 more points than an identical one with risk=0, the opposite of
+    PRD §8's intent. Every other component is genuinely "higher is
+    better"; only this one needed inverting, not its storage/display
+    convention, at the one point it's actually weighted.
     """
     missing = set(_COLUMN_TO_WEIGHT_KEY) - set(component_scores)
     if missing:
         raise ValueError(f"Missing score components: {missing}")
-    return sum(component_scores[col] * WEIGHTS[key] for col, key in _COLUMN_TO_WEIGHT_KEY.items())
+    total = 0.0
+    for col, key in _COLUMN_TO_WEIGHT_KEY.items():
+        value = component_scores[col]
+        if col == "risk_score":
+            value = 100.0 - value
+        total += value * WEIGHTS[key]
+    return total
 
 
 # Starting-point thresholds (0-100 scale) — a judgment call, same posture as

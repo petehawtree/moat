@@ -23,8 +23,11 @@ from moat.committee.committee import (
 # ---------------------------------------------------------------------
 
 def test_compute_overall_score_hand_computed_weighted_sum():
-    """0.25*80 + 0.20*70 + 0.15*60 + 0.10*50 + 0.25*90 + 0.05*40
-    = 20 + 14 + 9 + 5 + 22.5 + 2 = 72.5
+    """risk_score is inverted before weighting (100 = highest risk, per the
+    Bear Analyst prompt's own definition, must SUBTRACT from the overall
+    score, not add) — found by judge review of the first real pilot run.
+    0.25*80 + 0.20*70 + 0.15*60 + 0.10*50 + 0.25*90 + 0.05*(100-40)
+    = 20 + 14 + 9 + 5 + 22.5 + 3 = 73.5
     """
     scores = {
         "business_quality_score": 80,
@@ -34,15 +37,40 @@ def test_compute_overall_score_hand_computed_weighted_sum():
         "valuation_score": 90,
         "risk_score": 40,
     }
-    assert compute_overall_score(scores) == pytest.approx(72.5)
+    assert compute_overall_score(scores) == pytest.approx(73.5)
 
 
-def test_compute_overall_score_all_100_is_100():
-    scores = {k: 100 for k in (
-        "business_quality_score", "competitive_moat_score", "financial_strength_score",
-        "management_score", "valuation_score", "risk_score",
-    )}
+def test_compute_overall_score_best_possible_profile_is_100():
+    """The genuinely best-possible input maxes every higher-is-better
+    component at 100 AND minimizes risk_score to 0 (lowest risk) — NOT
+    risk_score=100, which would mean maximum risk."""
+    scores = {
+        "business_quality_score": 100, "competitive_moat_score": 100,
+        "financial_strength_score": 100, "management_score": 100,
+        "valuation_score": 100, "risk_score": 0,
+    }
     assert compute_overall_score(scores) == pytest.approx(100.0)
+
+
+def test_compute_overall_score_maximum_risk_costs_its_full_weight():
+    """A company identical in every other respect but at maximum risk
+    (risk_score=100) must score lower than one at zero risk — the
+    regression case for the polarity bug itself (§A20-style: pin the
+    exact defect, not just a plausible-looking formula). A naive
+    unmodified sum would score these two profiles identically (or worse,
+    reward the riskier one); the fix must score risk=100 a full 5 points
+    (the risk weight) below risk=0, all else equal.
+    """
+    base = {
+        "business_quality_score": 80, "competitive_moat_score": 80,
+        "financial_strength_score": 80, "management_score": 80,
+        "valuation_score": 80,
+    }
+    low_risk = compute_overall_score({**base, "risk_score": 0})
+    high_risk = compute_overall_score({**base, "risk_score": 100})
+    assert low_risk == pytest.approx(81.0)   # 80*0.95 + 0.05*(100-0)
+    assert high_risk == pytest.approx(76.0)  # 80*0.95 + 0.05*(100-100)
+    assert low_risk - high_risk == pytest.approx(5.0)
 
 
 def test_compute_overall_score_missing_component_raises():

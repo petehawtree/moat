@@ -167,9 +167,10 @@ def test_run_committee_persists_one_row_with_weighted_score_and_status(committee
     assert row["valuation_score"] == 80.0
     assert row["financial_strength_score"] == 72.0
     assert row["risk_score"] == 45.0
-    # 0.25*85 + 0.20*78 + 0.15*72 + 0.10*70 + 0.25*80 + 0.05*45
-    # = 21.25 + 15.6 + 10.8 + 7.0 + 20.0 + 2.25 = 76.9
-    assert row["overall_score"] == pytest.approx(76.9)
+    # risk_score is inverted before weighting (100 = highest risk):
+    # 0.25*85 + 0.20*78 + 0.15*72 + 0.10*70 + 0.25*80 + 0.05*(100-45)
+    # = 21.25 + 15.6 + 10.8 + 7.0 + 20.0 + 2.75 = 77.4
+    assert row["overall_score"] == pytest.approx(77.4)
     assert row["bear_case_severity"] == "medium"
     assert row["status"] == "Investigate"  # >=70 and severity != high
     assert row["data_confidence"] == "high"

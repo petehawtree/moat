@@ -237,6 +237,127 @@ def _latest_quality_run_id(conn) -> str | None:
     return row["run_id"] if row else None
 
 
+def _latest_valuation_run_id(conn) -> str | None:
+    """Most recent non-failed pipeline_runs id that has valuations rows."""
+    row = conn.execute(
+        """
+        SELECT run_id FROM pipeline_runs
+        WHERE run_id IN (SELECT DISTINCT run_id FROM valuations)
+          AND status != 'failed'
+        ORDER BY started_at DESC LIMIT 1
+        """
+    ).fetchone()
+    return row["run_id"] if row else None
+
+
+def run_committee_stage(
+    conn,
+    run_id: str,
+    model_id: str | None = None,
+    dry_run: bool = False,
+    cost_cap_usd: float | None = None,
+    exclude_tickers: set[str] | None = None,
+    include_excluded: bool = False,
+) -> None:
+    """Sprint 5: three persona calls -> committee_verdicts, PRD §7/§8.
+
+    Universe (sprint-5-plan.md C1/decision 2): the intersection of tickers
+    with BOTH a current ai_analysis row AND a valuations row in the latest
+    run — not the full passed_screen set, which is a superset (a company
+    can pass the quant screen without yet having an AI analysis or a
+    valuation, or be excluded from one of those stages for a reason that
+    doesn't apply to the screen itself, e.g. BKNG/GOOGL). Read fresh from
+    the live DB every run, not a hardcoded list — the same "no hardcoded
+    company list" posture as ai_analysis/valuation.
+
+    include_excluded=False (default, C8): applies
+    config.COMMITTEE_KNOWN_EXCLUDED_TICKERS on top of --exclude, since this
+    stage's output is the actual ranked investment recommendation — the
+    highest-stakes place for one of the already-known-bad tickers to reach
+    unflagged. Pass include_excluded=True to see their verdicts anyway.
+    """
+    import anthropic as _anthropic
+    from moat import config
+    from moat.analysis.pricing import DEFAULT_MODEL, PILOT_CAP_USD
+    from moat.committee.committee import run_committee
+
+    if model_id is None:
+        model_id = DEFAULT_MODEL
+    if cost_cap_usd is None:
+        cost_cap_usd = PILOT_CAP_USD
+
+    quality_run = _latest_quality_run_id(conn)
+    valuation_run = _latest_valuation_run_id(conn)
+    if not quality_run or not valuation_run:
+        raise RuntimeError(
+            "committee needs both a quality_scores run (passed_screen) and a "
+            "valuations run — run the pipeline from 'screen' or 'valuation' first."
+        )
+
+    ai_tickers = {
+        row["ticker"] for row in conn.execute(
+            "SELECT DISTINCT ticker FROM ai_analysis WHERE is_current = 1"
+        )
+    }
+    valuation_tickers = {
+        row["ticker"] for row in conn.execute(
+            "SELECT DISTINCT ticker FROM valuations WHERE run_id = ?", (valuation_run,)
+        )
+    }
+    tickers = sorted(ai_tickers & valuation_tickers)
+
+    effective_exclude = set(exclude_tickers or set())
+    if not include_excluded:
+        effective_exclude |= config.COMMITTEE_KNOWN_EXCLUDED_TICKERS
+    if effective_exclude:
+        excluded_here = [t for t in tickers if t in effective_exclude]
+        tickers = [t for t in tickers if t not in effective_exclude]
+        if excluded_here:
+            print(f"  committee: excluding {len(excluded_here)} tickers: {excluded_here}")
+
+    print(
+        f"  committee: {len(tickers)} tickers (ai_analysis ∩ valuations run {valuation_run}), "
+        f"model={model_id}, cap=${cost_cap_usd:.2f}" + ("  [dry-run]" if dry_run else "")
+    )
+
+    from moat.config import ANTHROPIC_API_KEY
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY not set — cannot run committee stage")
+    client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    outcomes: dict[str, int] = {}
+    accumulated_cost = 0.0
+    for ticker in tickers:
+        if not dry_run and accumulated_cost >= cost_cap_usd:
+            print(
+                f"    cost cap ${cost_cap_usd:.2f} reached after {sum(outcomes.values())} tickers "
+                f"— halting. Re-run from committee to continue."
+            )
+            break
+
+        result = run_committee(
+            ticker, run_id, valuation_run, quality_run, conn, client,
+            model_id=model_id, dry_run=dry_run,
+        )
+        outcome = result.get("outcome", "api_error")
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        accumulated_cost += result.get("cost_estimate") or 0.0
+
+        if dry_run:
+            print(f"    {ticker}: {outcome}")
+        else:
+            extra = f" -> {result.get('status')} ({result.get('overall_score', 0):.1f})" if outcome == "persisted" else f"  [{result.get('reason', '')}]"
+            print(f"    {ticker}: {outcome} (${accumulated_cost:.3f} cumulative){extra}")
+
+    print("\n  committee summary:")
+    for k in sorted(outcomes):
+        if outcomes[k]:
+            print(f"    {k}: {outcomes[k]}")
+    if not dry_run:
+        print(f"    total cost estimate: ${accumulated_cost:.3f}")
+        print(f"    cap: ${cost_cap_usd:.2f}")
+
+
 def _run_batch_submission_and_retrieval(
     client,
     tickers: list[str],
@@ -593,9 +714,17 @@ def main() -> None:
                         help="explicit run_id (defaults to a fresh one) — required to match a prior "
                              "--batch submission's run_id when using --retrieve-batch-id")
     parser.add_argument("--exclude", nargs="+", default=None, metavar="TICKER",
-                        help="ai_analysis/valuation: skip these tickers even though they "
-                             "passed_screen=1 (operational exclusion for a known-bad screen "
+                        help="ai_analysis/valuation/committee: skip these tickers even though "
+                             "they passed_screen=1 (operational exclusion for a known-bad screen "
                              "result; see PRD_ADDENDUM.md §A17)")
+    # committee stage flags
+    parser.add_argument("--committee-cost-cap", type=float, default=None, metavar="USD",
+                        help="committee: halt when accumulated cost exceeds this "
+                             "(default: $15.00 pilot cap) — independent of --cost-cap")
+    parser.add_argument("--include-excluded", action="store_true",
+                        help="committee: don't apply the default "
+                             "config.COMMITTEE_KNOWN_EXCLUDED_TICKERS exclusion (§A17/§A18/§A20, "
+                             "sprint-5-plan.md C8) — see verdicts for those tickers anyway")
     args = parser.parse_args()
 
     if args.init_db:
@@ -647,6 +776,16 @@ def main() -> None:
             elif stage == "valuation":
                 print("-> stage 'valuation'")
                 run_valuation_stage(conn, run_id, exclude_tickers=set(args.exclude) if args.exclude else None)
+            elif stage == "committee":
+                print("-> stage 'committee'")
+                run_committee_stage(
+                    conn, run_id,
+                    model_id=args.model,
+                    dry_run=args.dry_run,
+                    cost_cap_usd=args.committee_cost_cap,
+                    exclude_tickers=set(args.exclude) if args.exclude else None,
+                    include_excluded=args.include_excluded,
+                )
             else:
                 print(f"-> stage '{stage}': not yet implemented (see docs/PRD_ADDENDUM.md sprint plan)")
                 raise NotImplementedError(f"Stage '{stage}' lands in a later sprint")

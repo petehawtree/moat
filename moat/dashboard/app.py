@@ -15,12 +15,47 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pandas as pd
 import streamlit as st
 
+from moat.committee.parser import extract_statements, extract_verdict
 from moat.config import QUALITY_SCORE_PASS_THRESHOLD
 from moat.db.connection import get_connection
 
 st.set_page_config(page_title="Project Moat", layout="wide")
 st.title("Project Moat")
 st.caption("Personal research tool. Not investment advice.")
+
+def _resolve_claim_citation(claim_id: int, conn) -> dict | None:
+    """One claim_id -> its original filing quote (§A19.6 decision: surface
+    the raw quote inline next to every persona inference, no second-pass
+    entailment check — the reader eyeballs support/non-support directly).
+    """
+    row = conn.execute(
+        "SELECT quote, accession_number, section_id FROM citations WHERE claim_id = ? LIMIT 1",
+        (claim_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _render_persona_response(raw_text: str, conn, key_prefix: str) -> None:
+    """Verdict + STATEMENTs, each STATEMENT's [refs: N] resolved back to
+    its original cited quote in an expander — the dashboard-side half of
+    the entailment decision (moat/committee/committee.py's module
+    docstring; parser.py's extract_verdict/extract_statements).
+    """
+    verdict = extract_verdict(raw_text)
+    if verdict:
+        st.markdown(verdict)
+    for i, stmt in enumerate(extract_statements(raw_text)):
+        st.markdown(f"- {stmt.text}")
+        if stmt.refs:
+            with st.expander(f"↳ {key_prefix} statement {i + 1}: {len(stmt.refs)} supporting citation(s)", expanded=False):
+                for claim_id in stmt.refs:
+                    cite = _resolve_claim_citation(claim_id, conn)
+                    if cite:
+                        st.caption(f"[{claim_id}] {cite['accession_number']} · {cite['section_id']}")
+                        st.markdown(f"> {cite['quote']}")
+                    else:
+                        st.caption(f"[{claim_id}] — no stored citation found")
+
 
 conn = get_connection()
 company_count = conn.execute("SELECT COUNT(*) AS n FROM companies WHERE is_active = 1").fetchone()["n"]
@@ -257,5 +292,114 @@ else:
                 label = r["method"] if r["scenario"] is None else f"{r['method']} ({r['scenario']})"
                 st.markdown(f"`{label}`")
                 st.json(json.loads(r["key_assumptions"]))
+
+    st.divider()
+    st.subheader("Sprint 5 — investment committee")
+    st.caption(
+        "Three persona perspectives (Quality / Bear / Valuation Analyst, PRD §7) "
+        "consolidated into the PRD §8 weighted score. **bear_case_severity is not "
+        "one of the six weighted components** — a 'high' severity caps an "
+        "otherwise-Investigate score to Watch (never an independent Reject, never "
+        "rescues a low score; see `assign_status()`). Every persona statement's "
+        "`[refs: N]` resolves back to its original filing quote below — no "
+        "second-pass entailment check; the reader eyeballs support directly "
+        "(§A19.6)."
+    )
+
+    latest_committee_run = conn.execute(
+        """
+        SELECT run_id FROM pipeline_runs
+        WHERE run_id IN (SELECT DISTINCT run_id FROM committee_verdicts)
+          AND status != 'failed'
+        ORDER BY started_at DESC LIMIT 1
+        """
+    ).fetchone()
+
+    if latest_committee_run is None:
+        st.info(
+            "No committee results yet. Run "
+            "`python scripts/run_pipeline.py --from-stage committee` after valuation."
+        )
+    else:
+        c_run_id = latest_committee_run["run_id"]
+        committee = pd.read_sql_query(
+            """
+            SELECT cv.ticker, c.name, c.sector,
+                   ROUND(cv.overall_score, 1) AS overall_score, cv.status,
+                   ROUND(cv.business_quality_score, 1) AS business_quality,
+                   ROUND(cv.competitive_moat_score, 1) AS competitive_moat,
+                   ROUND(cv.financial_strength_score, 1) AS financial_strength,
+                   ROUND(cv.management_score, 1) AS management,
+                   ROUND(cv.valuation_score, 1) AS valuation,
+                   ROUND(cv.risk_score, 1) AS risk,
+                   cv.bear_case_severity, cv.data_confidence
+            FROM committee_verdicts cv JOIN companies c ON c.ticker = cv.ticker
+            WHERE cv.run_id = ?
+            ORDER BY cv.overall_score DESC
+            """,
+            conn,
+            params=(c_run_id,),
+        )
+        committee = _filter_by_sector(committee)
+        status_counts = committee["status"].value_counts()
+        st.caption(
+            f"Run `{c_run_id}` — {len(committee)} companies. "
+            f"Investigate: {status_counts.get('Investigate', 0)}, "
+            f"Watch: {status_counts.get('Watch', 0)}, "
+            f"Reject: {status_counts.get('Reject', 0)}."
+        )
+        st.dataframe(committee, use_container_width=True, height=500)
+
+        st.markdown("**Investment Brief** — one-page view per company (PRD §10).")
+        pick_brief = st.selectbox("Ticker  ", committee["ticker"].tolist()) if not committee.empty else None
+        if pick_brief:
+            verdict_row = conn.execute(
+                "SELECT * FROM committee_verdicts WHERE run_id = ? AND ticker = ?",
+                (c_run_id, pick_brief),
+            ).fetchone()
+            company_row = conn.execute(
+                "SELECT * FROM companies WHERE ticker = ?", (pick_brief,)
+            ).fetchone()
+
+            st.markdown(f"### {pick_brief} — {company_row['name']}")
+            st.caption(
+                f"{company_row['sector'] or 'no GICS sector'} · "
+                f"data confidence: {verdict_row['data_confidence']} · "
+                f"status: **{verdict_row['status']}** ({verdict_row['overall_score']:.1f}/100)"
+            )
+
+            st.markdown("#### Investment thesis")
+            st.markdown(verdict_row["investment_thesis"] or "_not available_")
+
+            st.markdown("#### Bull case (Quality + Valuation Analyst)")
+            _render_persona_response(verdict_row["quality_analyst_view"] or "", conn, f"{pick_brief}_quality")
+            _render_persona_response(verdict_row["valuation_analyst_view"] or "", conn, f"{pick_brief}_valuation")
+
+            st.markdown("#### Bear case")
+            _render_persona_response(verdict_row["bear_analyst_view"] or "", conn, f"{pick_brief}_bear")
+
+            st.markdown("#### Key things to monitor")
+            try:
+                monitor_items = json.loads(verdict_row["key_things_to_monitor"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                monitor_items = []
+            for item in monitor_items:
+                st.markdown(f"- {item}")
+            if not monitor_items:
+                st.markdown("_not available_")
+
+            st.markdown("#### AI conclusion")
+            st.markdown(verdict_row["ai_conclusion"] or "_not available_")
+
+            with st.expander("Component scores"):
+                st.json({
+                    "business_quality_score": verdict_row["business_quality_score"],
+                    "competitive_moat_score": verdict_row["competitive_moat_score"],
+                    "financial_strength_score": verdict_row["financial_strength_score"],
+                    "management_score": verdict_row["management_score"],
+                    "valuation_score": verdict_row["valuation_score"],
+                    "risk_score": verdict_row["risk_score"],
+                    "bear_case_severity": verdict_row["bear_case_severity"],
+                })
 
 conn.close()

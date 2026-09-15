@@ -26,6 +26,35 @@ sprint replaces.
 
 ## Status
 
+**Sprint 5 — Investment Committee + Investment Brief. In progress.**
+- Plan: [sprint-5-plan.md](docs/sprints/sprint-5-plan.md). Not yet
+  retro'd — no real (paid) pilot has run, so this isn't Done yet.
+- Built and tested: three persona prompts (Quality/Bear/Valuation
+  Analyst, PRD §7) reading already-cited `ai_analysis` claims +
+  `valuations`, no new citation-extraction layer (§A19.6 decision: raw
+  quote surfaced inline instead); PRD §8's weighted score wired to
+  `assign_status()` (70/50 starting-point thresholds — pilot-then-lock,
+  same posture as Sprint 4's discount rate, not yet validated against
+  real output); PRD §10 brief content template-stitched from the three
+  persona views (decision 3, no 4th LLM call); `committee_verdicts`
+  persistence with no partial writes; the `committee` pipeline stage,
+  defaulting to exclude the known-bad tickers (§A17/§A18/§A20) rather
+  than relying on `--exclude` being remembered every run.
+- Verified against the real database (no live API calls made): the
+  committee-eligible universe is exactly the 69 companies
+  sprint-5-plan.md's dry run found; a cache-hit bug in claim lookup
+  (found the same way) is fixed — `analysis_claims` for a cache-hit-
+  refreshed `ai_analysis` row (AAPL/LIN/PEG) live under the superseded
+  run that originally parsed them, not the current run_id; and the
+  dashboard's brief page, seeded with real AAPL citations, resolves a
+  persona statement's `[refs: N]` back to its real 10-K quote with zero
+  exceptions (`streamlit.testing.v1.AppTest`). 54 new tests (276 total,
+  up from 222 at the end of Sprint 4).
+- **Not done yet:** no real persona LLM call has been made — that needs
+  an explicit spend cap (sprint-5-plan.md "Open for discussion") and,
+  per the plan's own Definition of Done, a human-read pilot before
+  `assign_status()`'s thresholds are treated as final.
+
 **Sprint 4 — Owner Earnings DCF + scenario valuation. Done.**
 - Retro: [sprint-4.md](docs/sprints/sprint-4.md). Plan:
   [sprint-4-plan.md](docs/sprints/sprint-4-plan.md). Decisions/findings:
@@ -182,7 +211,7 @@ sprint table below.
 | 3 | AI business/moat/management/risk analysis (citation-enforced) — **done** | [sprint-3.md](docs/sprints/sprint-3.md) |
 | 3.1 | Citation/batch backlog + the 70-company AI run — **done** | [sprint-3-1.md](docs/sprints/sprint-3-1.md) |
 | 4 | Owner Earnings DCF + supporting valuation methods — **done** | [sprint-4.md](docs/sprints/sprint-4.md) |
-| 5 | Investment Committee + one-page Investment Brief — **planning** | [sprint-5-plan.md](docs/sprints/sprint-5-plan.md) |
+| 5 | Investment Committee + one-page Investment Brief — **in progress** | [sprint-5-plan.md](docs/sprints/sprint-5-plan.md) |
 | 6 | Watchlist monitoring | |
 
 ## Setup
@@ -203,9 +232,9 @@ moat/
   ingest/       # universe, price, fundamentals fetchers
   screen/       # deterministic quant screen (sector-relative)
   quality/      # pre-AI deterministic quality score
-  ai/           # Claude-based qualitative analysis (citation-enforced)
+  analysis/     # Claude-based qualitative analysis (citation-enforced)
   valuation/    # Owner Earnings DCF + supporting methods
-  committee/    # 3-persona consolidation + final weighted score
+  committee/    # 3-persona consolidation + final weighted score (Sprint 5)
   monitor/      # watchlist diffing and triggers
   db/           # SQLite schema + connection helper
   dashboard/    # Streamlit app

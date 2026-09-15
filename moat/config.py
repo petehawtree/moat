@@ -76,3 +76,60 @@ FUNDAMENTALS_CACHE_MAX_AGE_DAYS = 90
 CONFIDENCE_HIGH = "high"     # SEC EDGAR structured XBRL
 CONFIDENCE_MEDIUM = "medium" # derived from EDGAR with assumptions
 CONFIDENCE_LOW = "low"       # yfinance-only / unverified
+
+# ---------------------------------------------------------------------
+# Known-bad-ticker operational exclusions (Sprint 5 C8).
+#
+# Every one of these was found, filed and deliberately deferred rather than
+# fixed at the source — see the linked addendum section for why. Before this,
+# each stage's own `--exclude` CLI flag was the only place this list existed,
+# opt-in and retyped from memory every run; the judge's review after Sprint 4
+# flagged that as its top finding (a stage silently including a known-bad
+# ticker the moment someone forgets the flag). This is the single source of
+# truth instead — a stage composes the subset it actually needs, and can
+# still be overridden via --exclude/--include-excluded for a specific run.
+# ---------------------------------------------------------------------
+
+# §A17 (GitHub issue #1): confirmed `total_debt IS NULL` extraction gap —
+# not a reliable "no debt" signal for these 18 tickers. Feeds the quant
+# screen's debt metric, ev_ebit()'s enterprise-value debt add-back, and
+# (Sprint 5) financial_strength/valuation persona input alike.
+DEBT_TAG_GAP_TICKERS = frozenset({
+    "A", "ADSK", "ALAB", "ALNY", "DDOG", "DECK", "DXCM", "GRMN", "LULU",
+    "MNST", "NOW", "PLTR", "PM", "RMD", "ROL", "SHOP", "VRTX", "WSM",
+})
+
+# §A17 (GitHub issue #2): REITs scored on gross_margin/free_cash_flow/debt —
+# metrics the addendum already documented as invalid for this business
+# model (FFO/AFFO not yet implemented).
+REIT_INVALID_METRICS_TICKERS = frozenset({"AMT", "SBAC"})
+
+# §A18 (GitHub issue #3): GOOG/GOOGL share one CIK; GOOGL's own
+# `filings.ticker` lookups return nothing even though the filing is cached
+# under GOOG. Affects filing/citation-dependent stages only — valuation
+# doesn't read filing text, so GOOGL's valuation is unaffected.
+DUAL_CLASS_FILING_GAP_TICKERS = frozenset({"GOOGL"})
+
+# §A20: BKNG's ingested price_history (2-year window, $135-215) is
+# inconsistent with its real ~32.6M-share, multi-thousand-dollar-per-share
+# structure — a data anomaly, not a code defect. Valuation only.
+PRICE_SHARE_ANOMALY_TICKERS = frozenset({"BKNG"})
+
+# Per-stage composition. ai_analysis/valuation's own defaults are
+# deliberately unchanged by this (Sprint 5's "Open for discussion" #1:
+# continue deferring §A17/§A18/§A20 fixes, `--exclude` stays opt-in there) —
+# these constants exist so a caller who *does* want the known-current list
+# doesn't have to retype it, not to silently change prior sprints' behavior.
+AI_ANALYSIS_KNOWN_EXCLUDED_TICKERS = (
+    DEBT_TAG_GAP_TICKERS | REIT_INVALID_METRICS_TICKERS | DUAL_CLASS_FILING_GAP_TICKERS
+)
+VALUATION_KNOWN_EXCLUDED_TICKERS = (
+    DEBT_TAG_GAP_TICKERS | REIT_INVALID_METRICS_TICKERS | PRICE_SHARE_ANOMALY_TICKERS
+)
+# Sprint 5 C8: the committee stage defaults to excluding this union, since a
+# committee verdict needs *both* upstream stages clean — the highest-stakes
+# place for a known-invalid input to leak into a ranked recommendation
+# unflagged, per the sprint-5 plan's own reasoning.
+COMMITTEE_KNOWN_EXCLUDED_TICKERS = (
+    AI_ANALYSIS_KNOWN_EXCLUDED_TICKERS | VALUATION_KNOWN_EXCLUDED_TICKERS
+)

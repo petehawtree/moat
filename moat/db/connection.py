@@ -71,6 +71,17 @@ _ADDED_COLUMNS = {
         # resolves at 'fuzzy' or 'unresolved'.
         "stale_analysis":       "INTEGER NOT NULL DEFAULT 0",
     },
+    "committee_verdicts": {
+        # Sprint 5: bear_case_severity is an assign_status() input, separate
+        # from the six PRD §8 weighted-score columns (already in schema.sql
+        # since Sprint 0). investment_thesis/key_things_to_monitor/
+        # ai_conclusion are template-stitched from the three persona views,
+        # not new LLM output — see sprint-5-plan.md decision 3.
+        "bear_case_severity":    "TEXT",
+        "investment_thesis":     "TEXT",
+        "key_things_to_monitor": "TEXT",
+        "ai_conclusion":         "TEXT",
+    },
 }
 
 

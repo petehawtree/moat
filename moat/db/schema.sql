@@ -313,9 +313,10 @@ CREATE TABLE IF NOT EXISTS valuations (
 CREATE TABLE IF NOT EXISTS committee_verdicts (
     run_id                      TEXT NOT NULL REFERENCES pipeline_runs(run_id),
     ticker                      TEXT NOT NULL REFERENCES companies(ticker),
-    quality_analyst_view        TEXT,
+    quality_analyst_view        TEXT,   -- Sprint 5: raw persona response text, incl. inline [refs: N] claim tags
     bear_analyst_view           TEXT,
     valuation_analyst_view      TEXT,
+    bear_case_severity          TEXT,   -- Sprint 5: 'low'|'medium'|'high' — assign_status() input, NOT a compute_overall_score component
     business_quality_score      REAL,   -- weight 25%
     competitive_moat_score      REAL,   -- weight 20%
     financial_strength_score    REAL,   -- weight 15%
@@ -325,6 +326,12 @@ CREATE TABLE IF NOT EXISTS committee_verdicts (
     overall_score               REAL,
     status                      TEXT,   -- 'Investigate'|'Watch'|'Reject'
     data_confidence             TEXT,   -- rolled up from A4, surfaced on the brief
+    -- Sprint 5 PRD §10 fields with no persona-view column to live in —
+    -- template-stitched from the three persona views + overall_score/status,
+    -- not a 4th LLM call (sprint-5-plan.md decision 3).
+    investment_thesis           TEXT,
+    key_things_to_monitor       TEXT,   -- JSON array of strings
+    ai_conclusion                TEXT,
     created_at                  TEXT NOT NULL,
     PRIMARY KEY (run_id, ticker)
 );

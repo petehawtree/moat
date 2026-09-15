@@ -182,7 +182,7 @@ sprint table below.
 | 3 | AI business/moat/management/risk analysis (citation-enforced) — **done** | [sprint-3.md](docs/sprints/sprint-3.md) |
 | 3.1 | Citation/batch backlog + the 70-company AI run — **done** | [sprint-3-1.md](docs/sprints/sprint-3-1.md) |
 | 4 | Owner Earnings DCF + supporting valuation methods — **done** | [sprint-4.md](docs/sprints/sprint-4.md) |
-| 5 | Investment Committee + one-page Investment Brief | |
+| 5 | Investment Committee + one-page Investment Brief — **planning** | [sprint-5-plan.md](docs/sprints/sprint-5-plan.md) |
 | 6 | Watchlist monitoring | |
 
 ## Setup

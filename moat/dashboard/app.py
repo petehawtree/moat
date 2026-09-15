@@ -74,7 +74,17 @@ def _render_moat_evidence(ticker: str, conn) -> None:
     case prose above (which synthesizes moat alongside everything else).
     Added after judge review of the first real pilot run found this PRD
     §10 field had no dedicated section at all.
+
+    Follows the same cache-hit run_id chain committee.py's
+    _resolve_claims_run_id already resolves for the committee's own
+    context-gathering — found missing here specifically by a later judge
+    round: a cache-hit ai_analysis row's own run_id has zero claims (they
+    stay under the run that originally parsed them), so querying by it
+    directly showed real, current moat evidence as "not available" for
+    every cache-hit-refreshed ticker (AAPL included).
     """
+    from moat.committee.committee import _resolve_claims_run_id
+
     row = conn.execute(
         "SELECT run_id FROM ai_analysis WHERE ticker = ? AND analysis_type = 'moat' AND is_current = 1",
         (ticker,),
@@ -82,10 +92,11 @@ def _render_moat_evidence(ticker: str, conn) -> None:
     if row is None:
         st.markdown("_not available_")
         return
+    claims_run_id = _resolve_claims_run_id(ticker, "moat", row["run_id"], conn)
     claims = conn.execute(
         "SELECT claim_id, claim_text, assertion_status FROM analysis_claims "
         "WHERE run_id = ? AND ticker = ? AND analysis_type = 'moat' ORDER BY claim_order",
-        (row["run_id"], ticker),
+        (claims_run_id, ticker),
     ).fetchall()
     if not claims:
         st.markdown("_not available_")

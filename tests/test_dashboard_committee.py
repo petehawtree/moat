@@ -210,6 +210,44 @@ def test_dashboard_brief_renders_moat_financial_and_valuation_sections(dashboard
     assert any("roic" in str(df.value.get("metric", [])) for df in dataframes if hasattr(df, "value"))
 
 
+def test_dashboard_moat_evidence_follows_cache_hit_chain(dashboard_db):
+    """Judge review found this specifically: a cache-hit ai_analysis row's
+    own run_id has zero analysis_claims (they stay under the run that
+    originally parsed them, per committee.py's _resolve_claims_run_id
+    docstring) — real AAPL moat evidence was rendering as 'not available'
+    because _render_moat_evidence queried the current run_id directly
+    instead of following the same chain committee.py already resolves."""
+    _seed_committee_verdict(
+        dashboard_db,
+        quality_view="## VERDICT\nGood.\n\n## STATEMENTS\nSTATEMENT: Fine. [refs: 1]\n",
+        bear_view="## VERDICT\nOk.\n\n## STATEMENTS\nSTATEMENT: Fine too. [refs: 1]\n",
+        valuation_view="## VERDICT\nFair.\n\n## STATEMENTS\nSTATEMENT: FCF yield is 8%.\n",
+    )
+    conn = get_connection(db_path=dashboard_db)
+    # Original run that actually parsed the moat claim...
+    conn.execute(
+        "INSERT INTO ai_analysis (run_id, ticker, analysis_type, content, model, prompt_version, cache_key, is_current, created_at) "
+        "VALUES ('orig_run', 'TEST', 'moat', 'c', 'm', 'v1', 'k2', 0, ?)", (NOW,),
+    )
+    conn.execute(
+        "INSERT INTO analysis_claims (run_id, ticker, analysis_type, claim_order, claim_text, assertion_status) "
+        "VALUES ('orig_run', 'TEST', 'moat', 1, 'Deep, durable switching costs.', 'asserted')"
+    )
+    # ...and a newer cache-hit copy-forward row that is_current now, with
+    # reused_from_run_id pointing back, but NO analysis_claims of its own.
+    conn.execute(
+        "INSERT INTO ai_analysis (run_id, ticker, analysis_type, content, model, prompt_version, cache_key, is_current, reused_from_run_id, created_at) "
+        "VALUES ('newer_run', 'TEST', 'moat', 'c', 'm', 'v1', 'k2', 1, 'orig_run', ?)", (NOW,),
+    )
+    conn.commit()
+    conn.close()
+
+    at = _run_app_against(dashboard_db)
+    assert not at.exception
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "Deep, durable switching costs." in md_text
+
+
 def test_dashboard_flags_uncited_quality_bear_statements_but_not_valuation(dashboard_db):
     """The judge's finding: an unreferenced Quality/Bear STATEMENT rendered
     identically to a cited one, with no visible signal it lacks a filing

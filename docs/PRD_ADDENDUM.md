@@ -1585,3 +1585,28 @@ positive revenue before the CAGR math runs at all, so a negative/zero
 endpoint is excluded the same way a missing one already was. No live
 company hit this (all 91 have positive revenue) — found by the judge's
 own ad-hoc adversarial check, not by this sprint's dry-run.
+
+### A21 Carried into Sprint 5 planning: the P/E-range price-history backfill (§A20)
+
+Not fixed in Sprint 4, and deliberately not a blocker — §A20 confirmed
+this is cosmetic (the method correctly reports its own thin coverage via
+`low_confidence`, doesn't fake a range) and orthogonal to the primary
+Owner Earnings DCF, which doesn't depend on multi-year price depth. Noted
+here, same discipline as §A19.6, so it's a conscious call at Sprint 5
+planning time rather than a silent carry-forward:
+
+- **The open question itself**, unchanged since sprint-4-plan.md: should
+  `fetch_price_history`'s 10y window be backfilled for tickers that already
+  had ~2 years stored (91/91 `passed_screen` companies currently report
+  `pe_historical_range.low_confidence = True`, 83 of them on only 2 years
+  of matched price), and if so, for the full 505-company universe or just
+  the pass set — the same scope question V1 left open, still open.
+- **Why Sprint 5 is the right time to decide it, not before:** if the
+  Investment Committee's `valuation_score` (PRD §7/§8, `committee_verdicts`)
+  ends up folding the P/E cross-check in alongside the DCF, a 91/91
+  low-confidence signal is weak input either to weight as-is or discount
+  explicitly — that's a Sprint 5 design decision, not a Sprint 4 one.
+  Backfilling is cheap (free yfinance data, no spend cap to manage) if
+  Sprint 5 planning decides it's worth doing before that scoring logic is
+  built, rather than building the scoring logic first and discovering the
+  same gap the way §A20 did.

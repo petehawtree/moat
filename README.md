@@ -12,6 +12,8 @@ What actually happened each sprint — results, bugs found, scope calls — is
 in [`docs/sprints/`](docs/sprints/). Longer-form lessons are in
 [`docs/writeups/`](docs/writeups/): [Sprint 0-1 data bugs](docs/writeups/three-bugs-in-structured-financial-data.md)
 and [what two code reviews found](docs/writeups/what-two-code-reviews-found.md).
+Every value shown on the dashboard (and the inputs behind it) is defined in
+[`docs/dashboard-glossary.md`](docs/dashboard-glossary.md).
 
 ## Architecture
 

@@ -71,10 +71,20 @@ kind of gap:
   collision, §A18, GitHub issue #3, confirmed still open, excluded from
   the citation-dependent stages only.
 
-**Decision needed:** does Sprint 5 build/pilot against the 69-company
-intersection as-is (matching Sprint 3's own "pilot on a small, real,
-deliberately-varied set" posture), or does it first close one or more of
-these four gaps? Recommendation below in "Open for discussion."
+**Decided (2026-09-15, below):** pilot against the 69-company intersection
+as-is; closing JPM/KO/GOOGL is separable, non-blocking work.
+
+## Decisions confirmed 2026-09-15
+
+| # | Decision | Resolution |
+|---|---|---|
+| 1 | Entailment/thin-labelling posture (§A19.6) | Surface the raw cited quote inline next to every inference in the brief UI; no second-pass entailment LLM/heuristic check. Cheapest option, ships fastest, matches PRD §14's "the human remains the investment committee" — the reader entailment-checks by eye while reading, same posture as every other "state it, don't hide it" decision in this codebase (§A4, §A13). |
+| 2 | Committee input universe (C1) | Pilot/build against today's 69-company intersection as-is. JPM/KO (stale pilot leftovers, don't currently pass the screen) and GOOGL (§A18's dual-class bug, GitHub #3) are real but separable gaps — closing them doesn't gate this sprint's start, same reasoning Sprint 4 used to *not* let §A17's pre-existing gaps block its own work. |
+| 3 | Brief synthesis content (C5) | Template-stitch "investment thesis"/"AI conclusion" from the three existing persona texts + `overall_score`/`status` — no 4th consolidation LLM call. No new LLM cost, no new citation-grounding/caching surface. Consequence: "bull case"/"bear case" in the brief UI are the existing `quality_analyst_view`+`valuation_analyst_view` / `bear_analyst_view` columns under PRD §10's section headers, not separately-generated content — see the Schema changes section below, now resolved rather than draft. |
+
+These three are confirmed; C1's exact ticker list (re-derived from the live
+DB, not copied from this plan), C4's status thresholds, and the spend cap
+remain open — see "Open for discussion" below.
 
 ## Scope
 
@@ -124,32 +134,31 @@ these four gaps? Recommendation below in "Open for discussion."
   deleting as dead code in this sprint's cleanup, not treating as a second
   thing to implement.
 
-## Schema changes (draft — pending the consolidation-content decision below)
+## Schema changes
 
 Additive only, same convention as Sprints 3 and 4. `committee_verdicts`
 already covers PRD §7/§8 (three persona views, six weighted scores, overall
-score, status, data_confidence). PRD §10's remaining fields need somewhere
-to live:
+score, status, data_confidence). Per decision 3 above, `bull_case`/
+`bear_case` need no new columns — the brief UI relabels the existing
+`quality_analyst_view`+`valuation_analyst_view` / `bear_analyst_view`
+columns under PRD §10's section headers. The remaining fields (genuinely
+new content, not a relabelling) still need somewhere to live:
 
 ```sql
 ALTER TABLE committee_verdicts ADD COLUMN investment_thesis TEXT;
 ALTER TABLE committee_verdicts ADD COLUMN key_things_to_monitor TEXT;  -- JSON array
 ALTER TABLE committee_verdicts ADD COLUMN ai_conclusion TEXT;
--- bull_case / bear_case: only needed as separate columns if C5 below
--- decides they're distinct content from quality_analyst_view/
--- valuation_analyst_view/bear_analyst_view rather than the brief UI
--- relabelling those same three fields under PRD §10's section headers.
 ```
 
 ## Work breakdown
 
 | # | Work | Acceptance |
 |---|---|---|
-| C1 | **Confirm the committee-eligible universe** — resolve the four join-set mismatches above (accept as-is for a pilot, or close one/more first). | A documented, current list of tickers Sprint 5 will actually run against, re-derived from the live DB at build time (not copied from this plan, which will be stale by then — same lesson as sprint-4-plan's "93 as of the last screen run" going stale before V1 started). |
-| C2 | **Decide + implement the entailment/thin-labelling posture (§A19.6)** — a cheap second-pass entailment check as part of definition of done, *or* surface the raw quote next to every inference in the brief UI for inline human-checking. | Explicit, documented choice before C3 starts, not discovered mid-build; whichever is chosen is demonstrably applied to every claim the brief surfaces, not just a sample. |
+| C1 | **Confirm the committee-eligible universe.** Decided: pilot the 69-company intersection as-is. | A documented, current list of tickers Sprint 5 actually runs against, re-derived from the live DB at build time (not copied from this plan, which will be stale by then — same lesson as sprint-4-plan's "93 as of the last screen run" going stale before V1 started). |
+| C2 | **Implement the entailment/thin-labelling posture (§A19.6).** Decided: raw cited quote surfaced inline next to every inference in the brief UI, no second-pass check. | Every claim the brief surfaces shows its literal cited quote alongside it, verified against a sample brief, not just designed to. |
 | C3 | **Three persona prompts** — Quality/Bear/Valuation Analyst, each reading the target company's `ai_analysis` (+ citations) and `valuations` rows, citation-enforced and cached the same way Sprint 3's stages already are. | Citation-grounding tests in the same style as `tests/test_analysis_parser.py`/`test_cite_reanchor.py`; cache hit on a re-run against unchanged upstream data (no API spend), cache miss when the source `ai_analysis`/`valuations` run_id changes. |
 | C4 | **Consolidation** — wire `compute_overall_score()` into `run_committee()`; implement `assign_status()`. Thresholds are a judgment call (the function's own TODO already says so) — pilot against a handful of real companies before locking numbers, same posture as Sprint 4's discount rate. | `run_committee()` persists one `committee_verdicts` row per company with no `NotImplementedError`; a documented pilot read (5-10 companies spanning clear-pass/borderline/clear-reject) before thresholds are called final. |
-| C5 | **Investment Brief content assembly** — company overview (`companies`), investment thesis + AI conclusion (decide: a 4th consolidation LLM call, or template-stitched from the three persona texts + overall_score/status), moat evidence (`ai_analysis` 'moat' + its `citations`), financial quality (`ai_analysis` 'business_quality' + `quant_scores`), valuation range + margin of safety (`valuations`, already correct from Sprint 4 — no recomputation here), bull/bear case (decide the persona→section mapping named above), key things to monitor. | Every PRD §10 field has a defined source (existing column, join, or new LLM output) written down before C5 is built, not improvised per-field during it. |
+| C5 | **Investment Brief content assembly** — company overview (`companies`), investment thesis + AI conclusion (template-stitched from the three persona texts + `overall_score`/`status`, decided above — no 4th LLM call), moat evidence (`ai_analysis` 'moat' + its `citations`), financial quality (`ai_analysis` 'business_quality' + `quant_scores`), valuation range + margin of safety (`valuations`, already correct from Sprint 4 — no recomputation here), bull/bear case (`quality_analyst_view`+`valuation_analyst_view` / `bear_analyst_view`, relabelled per decision 3), key things to monitor (new, authored — see Out: not live monitoring logic). | Every PRD §10 field has a defined source (existing column, join, or template rule) written down before C5 is built, not improvised per-field during it. |
 | C6 | **Persist + wire the stage** — `committee` stage in `run_pipeline.py`, reading the latest successful `quality_scores`/`valuations`/`ai_analysis`, same "read whichever run is current" pattern as Sprint 3's W7 and Sprint 4's V5 (applied from the start, not found by a judge round a third time). | Idempotent per `run_id` (delete-then-reinsert, same reasoning as `valuations`' `_replace_valuations` — `committee_verdicts`' primary key has no nullable column so this one could actually use `ON CONFLICT`, but confirm before assuming); one transaction per company. |
 | C7 | **Dashboard** — one consolidated PRD §9 ranked view; click-through one-page Investment Brief (PRD §10). | Ranked table matches PRD §9's exact column list; brief page renders every §10 field or an explicit "not available" per field, never a blank; a thin/low-confidence company (data_confidence ≠ high, or an entailment-flagged claim per C2) visibly reads as such, not identically to a high-confidence one. |
 | C8 | **Default-exclude known-bad tickers for this stage.** The judge's own top action item: the 20+1-ticker exclusion (§A17/§A18/§A20) is `--exclude`, opt-in, on every stage that has it today — including a stage whose output is a ranked investment recommendation is the wrong place for that to stay optional. | Committee stage applies the exclusion list by default; `--include-excluded` (or similar) opts back in explicitly for someone who wants to see the excluded companies' verdicts anyway, rather than the current "forget the flag, get an unvetted number" default. |
@@ -161,40 +170,23 @@ ALTER TABLE committee_verdicts ADD COLUMN ai_conclusion TEXT;
 | **Upstream data-confidence doesn't automatically roll up into the committee's verdict.** A company with `medium`/`low` confidence fundamentals (§A4), or one of the 18 debt-tag-gap / REIT-excluded companies that slipped past C8's default exclusion some other way, could rank identically to a fully-clean company. | `committee_verdicts.data_confidence` already exists in the schema for exactly this — C4/C6 must actually populate and roll it up (min across contributing sources), not leave it NULL as a formality. |
 | **Entailment gap (§A19.6).** Sprint 3's citation-grounding proves a quote exists, not that it supports the claim; some moat claims already extend past their literal cited excerpt (12-company eval finding, §A19.6). Un-decided, this becomes a committee-facing correctness gap, not an internal caveat. | C2 is a named, blocking work item specifically because §A19.6 already ruled it must be decided before implementation. |
 | **`assign_status()` thresholds are unvalidated.** A wrong bar produces a confidently wrong Investigate/Watch/Reject label, the single most consequential number this sprint produces. | C4's pilot-then-lock approach, same discipline as Sprint 4's discount rate and the screen's 50.0/66.7th-percentile bars — a documented starting point, revisited against real output before being treated as final. |
-| **Cost** — three (or four, if C5 needs a consolidation call) LLM calls per company, at up to ~91 companies, is a larger surface than Sprint 3's 3-company pilot / 70-company batch. | Reuse Sprint 3's batch submission + spend-cap machinery (`moat/analysis/`) rather than a new path; pilot on C1's small, deliberately-varied set first (same as Sprint 3's AAPL/KO/JPM pilot) before a full run; set an explicit cap up front (see Cost below). |
+| **Cost** — three LLM calls per company, at up to 69 companies, is a larger surface than Sprint 3's 3-company pilot. | Reuse Sprint 3's batch submission + spend-cap machinery (`moat/analysis/`) rather than a new path; pilot on a small, deliberately-varied subset of C1's 69 first (same as Sprint 3's AAPL/KO/JPM pilot) before a full run; set an explicit cap up front (see Cost below). |
 | **Join-set churn** — the 69-company intersection will move every time `ai_analysis`, `valuations` or `quality_scores` refreshes, independently of each other. | C6 reads whichever runs are current at committee time, same "no hardcoded company list" posture as Sprint 3/4; C1's dry-run check is worth re-running immediately before any real (paid) batch, not just once at plan time. |
 
 ## Cost
 
 Not $0 like Sprint 4 (deterministic arithmetic) — this sprint makes real LLM
 calls, closer to Sprint 3/3.1's cost shape. Rough order of magnitude: 3
-persona calls × ~69-91 companies (plus a possible 4th consolidation call,
-pending C5) is 2-4x Sprint 3.1's 70-company/one-call-per-company batch run
-($9.32 batch spend, §A17/sprint-3-1.md) — call it a **$15-40 range**
-depending on C1's final universe and C5's design, to be tightened once C1
-and C5 are actually decided rather than guessed here. Recommend an explicit
-spend cap (same mechanism as Sprint 3's `$15`/Sprint 3.1's `$35`) confirmed
-before any paid run, not assumed from this estimate.
+persona calls × 69 companies (C1's confirmed universe, no 4th call per
+decision 3) is roughly 3x Sprint 3.1's 70-company/one-call-per-company batch
+run ($9.32 batch spend, §A17/sprint-3-1.md) — call it a **$20-30 range**, to
+be tightened once C1's exact ticker list is re-derived at build time.
+Recommend an explicit spend cap (same mechanism as Sprint 3's `$15`/Sprint
+3.1's `$35`) confirmed before any paid run, not assumed from this estimate.
 
 ## Open for discussion (not yet decided)
 
-1. **Committee input universe (C1)** — pilot against today's 69-company
-   intersection as-is, or close one or more of the four named gaps first?
-   *Recommendation:* pilot on the 69 (or a deliberately-varied subset of
-   them, matching Sprint 3's own pilot posture) — closing JPM/KO (re-run
-   screen/analysis against current data) or GOOGL (§A18's real fix) is
-   separable, non-blocking work that shouldn't gate starting this sprint.
-2. **Entailment/thin-labelling posture (C2)** — cheap second-pass
-   entailment check vs. raw-quote-next-to-inference in the UI. §A19.6
-   requires *a* decision, not a specific one; no recommendation forced
-   here, but it has to be made before C3 starts.
-3. **Consolidation content (C5)** — is "investment thesis"/"AI conclusion"
-   a 4th LLM call, or programmatically stitched from the three existing
-   persona texts + overall_score/status? A 4th call is more cost and a new
-   citation-grounding surface; stitching is cheaper but may read as
-   disjointed rather than a single conclusion. Same for the bull/bear-case
-   mapping onto Quality/Bear/Valuation Analyst.
-4. **Whether to fold in any of the judge's other standing findings** —
+1. **Whether to fold in any of the judge's other standing findings** —
    debt-tag extraction (§A17), REIT methodology (§A14), price-history
    backfill (§A21) — into this sprint rather than continuing to defer them.
    *Recommendation:* continue deferring all three except C8 (which this
@@ -202,8 +194,11 @@ before any paid run, not assumed from this estimate.
    sprint's own stage) — consistent with every prior sprint's decision on
    the same three items, and none of them block C1-C7 from producing a
    correct verdict on the companies that aren't affected.
-5. **Spend cap** for the persona LLM calls — needs a number before C3's
-   pilot, not just the rough range above.
+2. **Spend cap** for the persona LLM calls — needs a specific number before
+   C3's pilot, not just the rough range above.
+3. **`assign_status()`'s exact thresholds** — deliberately left for C4's
+   pilot-then-lock step rather than guessed here, same posture as Sprint
+   4's discount rate.
 
 ## Definition of done
 

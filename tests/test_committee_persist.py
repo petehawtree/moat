@@ -124,12 +124,16 @@ def _fake_message(text, stop_reason="end_turn"):
 
 
 def _canned_responses(claim_ids):
+    # 4 STATEMENT lines each — the minimum prompt.py's own "Make 4-8
+    # STATEMENT lines total" rule requires (MIN_STATEMENTS, parser.py).
     quality = (
         "## VERDICT\nA durable, well-run business.\n\n"
         "## SCORES\nBUSINESS_QUALITY: 85\nCOMPETITIVE_MOAT: 78\nMANAGEMENT: 70\n\n"
         "## STATEMENTS\n"
         f"STATEMENT: Revenue has grown every year for a decade. [refs: {claim_ids['business_quality']}]\n"
         f"STATEMENT: Switching costs are high. [refs: {claim_ids['moat']}]\n"
+        "STATEMENT: Margins have been stable across the cycle.\n"
+        "STATEMENT: Management has a long tenure and a disciplined track record.\n"
     )
     bear = (
         "## VERDICT\nCustomer concentration is a real risk.\n\n"
@@ -137,6 +141,8 @@ def _canned_responses(claim_ids):
         "## STATEMENTS\n"
         f"STATEMENT: The top customer is 30% of revenue. [refs: {claim_ids['risk']}]\n"
         "STATEMENT: A downturn in that customer's business would hit revenue hard.\n"
+        "STATEMENT: Regulatory scrutiny in this sector is increasing.\n"
+        "STATEMENT: A key patent expires within the projection window.\n"
     )
     valuation = (
         "## VERDICT\nTrading below the conservative bear-case estimate.\n\n"
@@ -144,6 +150,8 @@ def _canned_responses(claim_ids):
         "## STATEMENTS\n"
         "STATEMENT: The bear-case DCF shows a positive margin of safety.\n"
         "STATEMENT: FCF yield of 8% comfortably clears the model's discount rate.\n"
+        "STATEMENT: EV/EBIT is reasonable relative to sector peers.\n"
+        "STATEMENT: The balance sheet carries manageable leverage.\n"
     )
     return [quality, bear, valuation]
 
@@ -177,7 +185,7 @@ def test_run_committee_persists_one_row_with_weighted_score_and_status(committee
     assert "durable" in row["investment_thesis"]
     assert "Overall score" in row["ai_conclusion"]
     monitor_items = json.loads(row["key_things_to_monitor"])
-    assert len(monitor_items) == 2
+    assert len(monitor_items) == 4
 
 
 def test_run_committee_severe_bear_case_caps_status_to_watch(committee_db):

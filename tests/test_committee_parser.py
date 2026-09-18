@@ -20,6 +20,8 @@ MANAGEMENT: 60
 ## STATEMENTS
 STATEMENT: The company has grown revenue every year for a decade. [refs: 1, 2]
 STATEMENT: Management has a long track record of disciplined capital allocation. [refs: 3]
+STATEMENT: Gross margins have stayed stable across the cycle.
+STATEMENT: The brand commands real pricing power versus peers.
 """
 
 BEAR_RESPONSE = """\
@@ -33,6 +35,8 @@ SEVERITY: medium
 ## STATEMENTS
 STATEMENT: The top customer accounts for 30% of revenue. [refs: 5]
 STATEMENT: Regulatory scrutiny in this sector is increasing. [refs: 6]
+STATEMENT: A key patent expires within the projection window.
+STATEMENT: Working capital needs have grown faster than revenue.
 """
 
 VALUATION_RESPONSE = """\
@@ -46,6 +50,8 @@ FINANCIAL_STRENGTH: 65
 ## STATEMENTS
 STATEMENT: The bear-case DCF shows a positive margin of safety at the current price.
 STATEMENT: FCF yield comfortably clears the model's own discount rate.
+STATEMENT: EV/EBIT is reasonable relative to sector peers.
+STATEMENT: The balance sheet carries manageable leverage.
 """
 
 
@@ -59,7 +65,7 @@ def test_parse_quality_response_extracts_verdict_scores_and_statements():
         "management_score": 60.0,
     }
     assert parsed.severity is None
-    assert len(parsed.statements) == 2
+    assert len(parsed.statements) == 4
     assert parsed.statements[0].refs == [1, 2]
     assert parsed.statements[1].refs == [3]
 
@@ -108,14 +114,46 @@ def test_parse_unknown_claim_ref_is_flagged_but_statement_still_captured():
     parsed = parse_persona_response("quality", QUALITY_RESPONSE, known_claim_ids={1, 2})  # 3 missing
     assert not parsed.is_valid
     assert any("unknown claim id 3" in e for e in parsed.validation_errors)
-    assert len(parsed.statements) == 2
+    assert len(parsed.statements) == 4
 
 
 def test_parse_no_statements_is_invalid():
     text = "## VERDICT\nFine.\n\n## SCORES\nBUSINESS_QUALITY: 50\nCOMPETITIVE_MOAT: 50\nMANAGEMENT: 50\n\n## STATEMENTS\n"
     parsed = parse_persona_response("quality", text, known_claim_ids=set())
     assert not parsed.is_valid
-    assert any("no STATEMENT" in e for e in parsed.validation_errors)
+    assert any("expected at least" in e for e in parsed.validation_errors)
+
+
+def test_parse_too_few_statements_is_invalid():
+    """prompt.py's own rule: 4-8 STATEMENT lines per persona. Found by
+    judge review: only zero statements was ever rejected — a thin,
+    1-statement response passed and could persist as a complete-looking
+    verdict despite supplying a fraction of the requested analysis."""
+    text = (
+        "## VERDICT\nFine.\n\n## SCORES\nBUSINESS_QUALITY: 50\nCOMPETITIVE_MOAT: 50\nMANAGEMENT: 50\n\n"
+        "## STATEMENTS\nSTATEMENT: Just one thing.\nSTATEMENT: And another.\nSTATEMENT: A third.\n"
+    )
+    parsed = parse_persona_response("quality", text, known_claim_ids=set())
+    assert not parsed.is_valid
+    assert any("only 3 STATEMENT" in e and "at least 4" in e for e in parsed.validation_errors)
+
+
+def test_parse_too_many_statements_is_invalid():
+    text = (
+        "## VERDICT\nFine.\n\n## SCORES\nBUSINESS_QUALITY: 50\nCOMPETITIVE_MOAT: 50\nMANAGEMENT: 50\n\n"
+        "## STATEMENTS\n" + "".join(f"STATEMENT: Point number {i}.\n" for i in range(9))
+    )
+    parsed = parse_persona_response("quality", text, known_claim_ids=set())
+    assert not parsed.is_valid
+    assert any("9 STATEMENT" in e and "at most 8" in e for e in parsed.validation_errors)
+
+
+def test_parse_exactly_min_and_max_statements_are_both_valid():
+    base = "## VERDICT\nFine.\n\n## SCORES\nBUSINESS_QUALITY: 50\nCOMPETITIVE_MOAT: 50\nMANAGEMENT: 50\n\n## STATEMENTS\n"
+    four = base + "".join(f"STATEMENT: Point {i}.\n" for i in range(4))
+    eight = base + "".join(f"STATEMENT: Point {i}.\n" for i in range(8))
+    assert parse_persona_response("quality", four, known_claim_ids=set()).is_valid
+    assert parse_persona_response("quality", eight, known_claim_ids=set()).is_valid
 
 
 def test_parse_statement_with_empty_refs_bracket_does_not_crash():
@@ -186,7 +224,11 @@ def test_parse_valuation_non_numeric_ref_is_silently_stripped_not_an_error():
     text = (
         "## VERDICT\nFine.\n\n"
         "## SCORES\nVALUATION: 60\nFINANCIAL_STRENGTH: 60\n\n"
-        "## STATEMENTS\nSTATEMENT: The bear-case DCF is $107.74. [refs: DCF bear]\n"
+        "## STATEMENTS\n"
+        "STATEMENT: The bear-case DCF is $107.74. [refs: DCF bear]\n"
+        "STATEMENT: FCF yield is 8%.\n"
+        "STATEMENT: EV/EBIT is 12x.\n"
+        "STATEMENT: The balance sheet is conservative.\n"
     )
     parsed = parse_persona_response("valuation", text, known_claim_ids=set())
     assert parsed.is_valid, parsed.validation_errors

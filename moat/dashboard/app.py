@@ -499,6 +499,11 @@ else:
             _render_valuation_range(pick_brief, conn)
 
             st.markdown("#### Investment thesis")
+            st.caption(
+                "⚠️ Synthesized summary (Quality + Valuation Analyst verdict prose), not "
+                "individually cited — see Bull case / Bear case below for the underlying "
+                "STATEMENTs and their resolvable citations."
+            )
             st.markdown(verdict_row["investment_thesis"] or "_not available_")
 
             st.markdown("#### Bull case (Quality + Valuation Analyst)")
@@ -519,6 +524,10 @@ else:
                 st.markdown("_not available_")
 
             st.markdown("#### AI conclusion")
+            st.caption(
+                "⚠️ Synthesized summary (all three persona verdicts), not individually "
+                "cited — same caveat as Investment thesis above."
+            )
             st.markdown(verdict_row["ai_conclusion"] or "_not available_")
 
             with st.expander("Component scores"):

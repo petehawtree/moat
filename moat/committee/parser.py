@@ -35,6 +35,11 @@ class ParsedPersonaResponse:
     validation_errors: list[str]
 
 
+# Matches prompt.py's own "Make 4-8 STATEMENT lines total" rule, shared
+# identically across all three persona system prompts.
+MIN_STATEMENTS = 4
+MAX_STATEMENTS = 8
+
 _VERDICT_RE = re.compile(r"##\s*VERDICT\s*\n(.*?)(?=\n##\s*SCORES|\Z)", re.S | re.I)
 _SCORES_RE = re.compile(r"##\s*SCORES\s*\n(.*?)(?=\n##\s*STATEMENTS|\Z)", re.S | re.I)
 _STATEMENTS_RE = re.compile(r"##\s*STATEMENTS\s*\n(.*)\Z", re.S | re.I)
@@ -167,8 +172,16 @@ def parse_persona_response(persona: str, raw_text: str, known_claim_ids: set[int
                 errors.append(f"STATEMENT references unknown claim id {r}: {text[:60]!r}")
         statements.append(ParsedStatement(text=text, refs=refs))
 
-    if not statements:
-        errors.append("no STATEMENT lines found")
+    # Each persona prompt asks for 4-8 STATEMENT lines (prompt.py's own
+    # "Make 4-8 STATEMENT lines total" rule for every persona). Found by
+    # judge review: only "zero statements" was ever rejected — a thin,
+    # 1-statement response passed validation and could persist as a
+    # complete-looking verdict despite supplying a fraction of the
+    # requested supporting analysis.
+    if len(statements) < MIN_STATEMENTS:
+        errors.append(f"only {len(statements)} STATEMENT line(s) found, expected at least {MIN_STATEMENTS}")
+    elif len(statements) > MAX_STATEMENTS:
+        errors.append(f"{len(statements)} STATEMENT lines found, expected at most {MAX_STATEMENTS}")
 
     return ParsedPersonaResponse(
         persona=persona,

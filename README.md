@@ -26,34 +26,51 @@ sprint replaces.
 
 ## Status
 
-**Sprint 5 — Investment Committee + Investment Brief. In progress.**
+**Sprint 5 — Investment Committee + Investment Brief. In progress —
+real pilot run, not yet Done.**
 - Plan: [sprint-5-plan.md](docs/sprints/sprint-5-plan.md). Not yet
-  retro'd — no real (paid) pilot has run, so this isn't Done yet.
+  retro'd — the pilot is real but partial (21/69 companies), and
+  `assign_status()`'s thresholds aren't validated yet, so this isn't
+  Done.
 - Built and tested: three persona prompts (Quality/Bear/Valuation
   Analyst, PRD §7) reading already-cited `ai_analysis` claims +
   `valuations`, no new citation-extraction layer (§A19.6 decision: raw
-  quote surfaced inline instead); PRD §8's weighted score wired to
+  quote surfaced inline instead, with an explicit "no citation" flag
+  where one's genuinely absent); PRD §8's weighted score wired to
   `assign_status()` (70/50 starting-point thresholds — pilot-then-lock,
-  same posture as Sprint 4's discount rate, not yet validated against
-  real output); PRD §10 brief content template-stitched from the three
+  same posture as Sprint 4's discount rate); PRD §10 brief content —
+  including dedicated moat evidence/financial quality/valuation-range
+  sections, not just persona prose — template-stitched from the three
   persona views (decision 3, no 4th LLM call); `committee_verdicts`
-  persistence with no partial writes; the `committee` pipeline stage,
-  defaulting to exclude the known-bad tickers (§A17/§A18/§A20) rather
-  than relying on `--exclude` being remembered every run.
-- Verified against the real database (no live API calls made): the
-  committee-eligible universe is exactly the 69 companies
-  sprint-5-plan.md's dry run found; a cache-hit bug in claim lookup
-  (found the same way) is fixed — `analysis_claims` for a cache-hit-
-  refreshed `ai_analysis` row (AAPL/LIN/PEG) live under the superseded
-  run that originally parsed them, not the current run_id; and the
-  dashboard's brief page, seeded with real AAPL citations, resolves a
-  persona statement's `[refs: N]` back to its real 10-K quote with zero
-  exceptions (`streamlit.testing.v1.AppTest`). 54 new tests (276 total,
-  up from 222 at the end of Sprint 4).
-- **Not done yet:** no real persona LLM call has been made — that needs
-  an explicit spend cap (sprint-5-plan.md "Open for discussion") and,
-  per the plan's own Definition of Done, a human-read pilot before
-  `assign_status()`'s thresholds are treated as final.
+  persistence with no partial writes and §A5 caching (a re-run against
+  unchanged inputs costs $0); the `committee` pipeline stage, defaulting
+  to exclude the known-bad tickers (§A17/§A18/§A20) rather than relying
+  on `--exclude` being remembered every run.
+- **Real pilot run: 21/69 companies, ~$1.9 spent** (of a $3 cap). Caught
+  and fixed several real bugs along the way, most seriously a **risk-
+  score polarity inversion** in `compute_overall_score()` — a riskier
+  company was scoring *higher*, the opposite of PRD §8's intent; found
+  by judge review of the real output, confirmed independently, fixed,
+  and every already-persisted verdict recomputed in place (no re-spend
+  needed). Current pilot result: 1 Investigate (ADBE), 15 Watch, 5
+  Reject — worth a human read before locking thresholds, per the plan's
+  own Definition of Done.
+- **New, deferred:** reviewing the pilot output also found a real bug in
+  Sprint 4's own DCF code — a negative trailing owner-earnings base
+  inverts the bear/base/bull scenario ordering (bull reads as the worst
+  case, not the best) for any company with negative owner earnings; 5/5
+  such companies in the current run are affected (ABNB, CRWD, EIX, PEG,
+  UBER). `margin_of_safety()`'s sign guard still prevents a false-
+  positive verdict, so this is a misleading range label, not a
+  misleading recommendation. Filed as
+  [GitHub issue #5](https://github.com/petehawtree/moat/issues/5),
+  deferred rather than fixed — see
+  [PRD_ADDENDUM.md §A22](docs/PRD_ADDENDUM.md#a22-a-negative-owner-earnings-base-inverts-dcf-scenario-ordering--deferred-github-issue-5)
+  for why Sprint 4's own verification didn't catch it.
+- 71 new tests (293 total, up from 222 at the end of Sprint 4).
+- **Not done yet:** the remaining 48/69 companies, and a documented
+  human read of the pilot output before `assign_status()`'s thresholds
+  are treated as final.
 
 **Sprint 4 — Owner Earnings DCF + scenario valuation. Done.**
 - Retro: [sprint-4.md](docs/sprints/sprint-4.md). Plan:

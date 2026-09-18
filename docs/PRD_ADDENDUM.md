@@ -1610,3 +1610,53 @@ planning time rather than a silent carry-forward:
   Sprint 5 planning decides it's worth doing before that scoring logic is
   built, rather than building the scoring logic first and discovering the
   same gap the way §A20 did.
+
+### A22 A negative owner-earnings base inverts DCF scenario ordering — deferred, GitHub issue #5
+
+Found reviewing Sprint 5's first real committee pilot output (a judge
+review of the persisted briefs, not Sprint 4's own verification — see
+below for why). `dcf_scenario()` compounds the trailing owner-earnings
+average at each scenario's `growth_rate` before discounting — correct
+when the base is positive (higher growth → higher present value, so
+`bear < base < bull` holds), but inverted when the base is negative:
+multiplying a negative number by a larger `(1 + growth_rate)^n` makes it
+*more* negative, so bear (lowest growth rate) ends up the least negative
+of the three and bull (highest) the most negative. Confirmed against the
+real database: every company with a negative bear-case value has this
+inversion, 5/5 — ABNB, CRWD, EIX, PEG, UBER. ABNB's stored
+`key_assumptions`: `base_owner_earnings_avg: -919,547,750`, bear
+`growth_rate: 0.1286` vs. bull `0.20`.
+
+`margin_of_safety()`'s sign-flip guard (§A16.4/V3) still works correctly
+— it only checks whether *bear*'s own value is non-positive, so no
+company shows a false-positive margin of safety because of this. The
+risk is a misleading *range label* (the dashboard and Sprint 5's
+Valuation Analyst persona both read "bull" as the optimistic case when
+the number itself is the most pessimistic one), not a misleading
+verdict.
+
+**Why Sprint 4's own verification didn't catch it:** two checks each
+covered a different slice of the failure surface, neither of which
+included this exact combination. `test_dcf_scenario_bear_base_bull_ordering`
+and `test_run_valuation_dcf_scenarios_are_ordered_and_priced_per_share`
+both assert the ordering, but both fixtures are positive, growing series
+— the sign-dependent behavior was never exercised.
+`test_scenario_growth_rates_shrinking_company_bull_is_less_negative_than_bear`
+covers the mirror-image case, but for `scenario_growth_rates()`'s growth-rate
+derivation, not `dcf_scenario()`'s compounding of a negative base — same
+bug family, different function. And Sprint 4's real-data dry-run (§A19.1)
+checked a narrower thing than "is the ordering sensible": its DoD was
+"No company shows a positive-looking margin of safety on a negative
+intrinsic value — checked directly against all 91 companies' real output
+(9 real negative-bear-case companies, 0 guard failures)" (sprint-4.md) —
+a single-value sign-guard check, never a bear-vs-base-vs-bull comparison.
+It surfaced now only because Sprint 5's committee pilot is the first
+place all three scenarios get read side by side rather than one guarded
+value at a time.
+
+**Decision:** deferred, not fixed here — same posture as §A17/§A18.
+Filed as [GitHub issue #5](https://github.com/petehawtree/moat/issues/5),
+with the two candidate remediations (treat a non-positive base as
+DCF-unavailable, or a separately-specified turnaround methodology) and a
+regression-test gap (no existing test exercises a negative base) recorded
+there rather than duplicated here.

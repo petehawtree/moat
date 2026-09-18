@@ -67,7 +67,15 @@ real pilot run, not yet Done.**
   deferred rather than fixed — see
   [PRD_ADDENDUM.md §A22](docs/PRD_ADDENDUM.md#a22-a-negative-owner-earnings-base-inverts-dcf-scenario-ordering--deferred-github-issue-5)
   for why Sprint 4's own verification didn't catch it.
-- 71 new tests (293 total, up from 222 at the end of Sprint 4).
+- 78 new tests (300 total, up from 222 at the end of Sprint 4).
+- **Independent review:** built the known-issues allowlist
+  [PRD_ADDENDUM.md §A24](docs/PRD_ADDENDUM.md#a24-the-known-issues-allowlist-a197-anticipated-now-built)
+  anticipated, so the automatic judge review (§A19.7) stops re-flagging
+  already-filed/already-decided items as new failures. First result with
+  it in place: two more real bugs found and fixed, then a genuinely clean
+  [`PASS WITH CONCERNS`](docs/judge-reports/judge-report-sprint-5-first-clean-run-20260918-143831.md)
+  — the first non-`FAIL` verdict this project's review has ever returned
+  (see [`docs/judge-reports/README.md`](docs/judge-reports/README.md)).
 - **Not done yet:** the remaining 48/69 companies, and a documented
   human read of the pilot output before `assign_status()`'s thresholds
   are treated as final.

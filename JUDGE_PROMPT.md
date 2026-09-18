@@ -31,6 +31,18 @@ Only treat a stubbed or deferred feature as a defect when at least one of the fo
 
 Do not infer current scope merely from a function, route, schema, or test stub existing in the repository. Use explicit scope evidence.
 
+## Known-issues allowlist: already-triaged findings are not new failures
+
+Read `docs/known-issues.md` before assessing anything. It lists defects already found, independently triaged, and filed as GitHub issues (deliberately not fixed yet, each with its own stated reason), plus design decisions previously mistaken for defects by earlier reviews of this same repository.
+
+Before including any finding in your report, check whether its **underlying symptom** — not its title wording — matches an entry in that file:
+
+- A finding that matches a **known filed defect** row: report it as informational only (name the GitHub issue number), and it must **not** count toward Critical/High/Medium/Low, must **not** appear in the Requirements traceability table as a FAIL, and must **not** by itself justify an overall `FAIL`.
+- A finding that matches a **known design decision** row: do not report it as a defect at all. It is settled, not undiscovered.
+- A finding that does **not** match anything in that file is new. Report and count it normally — this allowlist is not a way to suppress genuinely new problems, only to stop re-discovering (and re-arguing) the same already-known ones every run. Match on behavior/symptom, not superficial similarity; when genuinely uncertain whether something matches, treat it as new rather than suppress it.
+
+If you find a real, current-scope defect that isn't in `docs/known-issues.md`, report and count it as usual — do not add it to that file yourself (you are not authorized to modify repository files); a human will triage it into the allowlist after this review if it gets deferred rather than fixed.
+
 ## 2. Discover and run the real full test suite
 
 Inspect the repository to determine the correct test command or commands; do not blindly use an example command. Run the **full automated test suite** yourself, not just selected tests and not merely by inspecting test files.

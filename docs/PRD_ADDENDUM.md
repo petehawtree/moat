@@ -1423,7 +1423,9 @@ who wants strict enforcement before that's fixed.
 **Revisit when:** `JUDGE_PROMPT.md`/`judge.sh` gain a mechanism to accept
 a known, filed, currently-out-of-scope defect (e.g., an allowlist file the
 gate checks findings against) — at that point the default should flip to
-blocking.
+blocking. **Done: see §A24** — `docs/known-issues.md` is that allowlist.
+Whether to actually flip the default is a separate decision from building
+the mechanism; not changed here.
 
 ### A20 Sprint 4 V5/V6 execution notes: growth-rate derivation, and three real findings from running against the live database
 
@@ -1713,3 +1715,51 @@ calling stages, not a committee-specific defect. Filing GitHub issues
 for standing disagreements with already-made, already-documented
 decisions would mix "found a bug" with "the judge would have decided
 differently," which the issue tracker isn't the right place to relitigate.
+
+### A24 The known-issues allowlist §A19.7 anticipated, now built
+
+Every judge report this repository has ever produced — going back to
+Sprint 2.2's manual audit, across 20+ automated runs since §A19.7's hook
+shipped — has returned `FAIL`. Checked directly: `grep` for `### Overall
+verdict` across every file in `.judge/` and `docs/judge-reports/` returns
+`FAIL` with zero exceptions. That's not "the codebase is broken 20 times
+in a row" — most of those FAILs are the same handful of already-known,
+already-filed, deliberately-deferred defects (§A17/§A18, now GitHub
+issues #1-#7) and already-documented design decisions (§A19.6 among
+others) being re-discovered and re-argued on every single run, because
+the judge had no way to tell "known and tracked" apart from "unknown
+breakage." A reviewer's first click into `docs/judge-reports/` sees a
+wall of FAIL with no clean report anywhere to compare it against, which
+overstates the actual state of things — the known issues are genuinely
+excluded from production use (operational `--exclude`, sector-
+inapplicable-metric marking, etc.), not silently wrong output reaching a
+real recommendation.
+
+**Decision:** built the allowlist mechanism §A19.7's own "Revisit when"
+already named. `docs/known-issues.md` lists every currently-open GitHub
+issue (by symptom, not just title, so a real finding can be matched
+against it without first fetching the issue) plus the design decisions
+most repeatedly mistaken for defects. `JUDGE_PROMPT.md` now instructs the
+judge to check every finding against it before counting: a match against
+a known filed defect is reported informationally and does not count
+toward Critical/High/Medium/Low or the overall verdict; a match against a
+known design decision isn't reported as a defect at all; anything that
+doesn't match is new and counted exactly as before. `judge.sh`'s own
+gate logic (read Critical/High counts off the report) is unchanged — the
+allowlist works by changing what the judge *counts*, not by changing how
+the count is read.
+
+**What this is not:** a way to suppress real findings. The prompt is
+explicit that a genuinely new problem must still be reported and counted
+even if it touches the same file as a known issue, and that ambiguous
+matches should default to "report as new" rather than "suppress." Closing
+a GitHub issue removes its allowlist row in the same commit — the list is
+meant to track *currently* open, deliberately-deferred items, not become
+a permanent blanket exemption for files that once had a bug.
+
+**Not done here:** flipping `JUDGE_ENFORCE`'s default to blocking. §A19.7
+named that as the natural next step once an allowlist existed, but
+building the mechanism and trusting it enough to block pushes on it are
+different decisions — the first real run against the allowlist (this
+session) is the first evidence of whether it actually produces a clean
+result in practice, not a track record.

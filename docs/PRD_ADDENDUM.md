@@ -1660,3 +1660,56 @@ with the two candidate remediations (treat a non-positive base as
 DCF-unavailable, or a separately-specified turnaround methodology) and a
 regression-test gap (no existing test exercises a negative base) recorded
 there rather than duplicated here.
+
+### A23 Two more real findings from continued judge review of the Sprint 5 pilot — both deferred, both filed
+
+Two further judge rounds against the growing real pilot output turned up
+two more genuine, independently-verified defects (distinct from the
+judge's other findings that round, which mostly re-litigated already-
+documented Sprint 5 decisions — §A19.6's entailment posture, the pilot
+being intentionally partial — rather than surfacing anything new).
+
+**`moat/screen/quant_screen.py`'s `_cagr()` shares §A20.1's already-fixed
+bug class, but was never itself fixed.** It guards a non-positive
+*first* value but not a non-positive *last* one — the exact defect
+`historical_revenue_cagr()` in `valuation/engine.py` fixed for revenue
+CAGR, never carried over to this sibling function, which feeds both
+`revenue_eps_growth` and `share_dilution`. Confirmed: `_cagr([(2022,
+100.0), (2024, -10.0)])` returns a complex number, and the first
+downstream threshold comparison (`_absolute_floor_pass`) then raises
+`TypeError` — aborting the entire screen run for every company, not
+just the one with the anomalous year. Not currently reachable (13 rows
+in `fundamentals_annual` have `revenue <= 0`, but none is any ticker's
+*most recent* fiscal year today, so the existing first-value guard
+already covers them) — a future restatement or newly-added company
+could still trigger it. Filed as
+[GitHub issue #6](https://github.com/petehawtree/moat/issues/6).
+
+**The committee's own cache key (§A22-adjacent, added this sprint) is
+incomplete.** It hashes `ai_analysis.cache_key` + the actual `valuations`
+figures + model — but not the `quant_scores`/`quality_scores` the same
+context block also feeds to all three personas. A quality/screen re-run
+that changes a company's metrics without touching `ai_analysis` or
+`valuations` produces the same cache key, serving a stale verdict.
+Independently reproduced: changing `roic` 0.34→0.01 and `composite_score`
+87.5→0.0 between two committee runs still yields a `cache_hit` with zero
+new API calls on the second. Unlike §A22, this is Sprint 5's own
+in-progress code, not a previously-shipped sprint's — filed anyway for
+tracking, per the same "log what's surfaced" discipline, rather than
+fixed immediately mid-session. Filed as
+[GitHub issue #7](https://github.com/petehawtree/moat/issues/7).
+
+**Not filed as issues, and why:** the judge's other repeated findings
+this round — "briefs accept and display uncited AI claims" (Quality/Bear
+statements with zero `[refs: ...]`) and "the committee cost cap is not a
+hard preflight ceiling" — are re-raised every round but aren't new
+defects. The first is §A19.6's own explicit decision (surface support
+inline, flag its absence visibly, don't build a rejection gate) working
+as designed, not a gap discovered after the fact. The second matches
+`ai_analysis`'s own established, already-shipped, never-filed pattern
+(§A19.7-adjacent: checked before spending, not reserved in advance) —
+if it's worth hardening, that's a cross-cutting change to both AI-
+calling stages, not a committee-specific defect. Filing GitHub issues
+for standing disagreements with already-made, already-documented
+decisions would mix "found a bug" with "the judge would have decided
+differently," which the issue tracker isn't the right place to relitigate.

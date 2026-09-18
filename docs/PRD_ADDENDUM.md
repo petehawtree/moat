@@ -1763,3 +1763,43 @@ building the mechanism and trusting it enough to block pushes on it are
 different decisions — the first real run against the allowlist (this
 session) is the first evidence of whether it actually produces a clean
 result in practice, not a track record.
+
+### A25 Historical P/E range uses dividend-adjusted prices, not split-adjusted-vs-EPS mismatch as first reported
+
+A judge run against the second clean pass flagged a P/E-range basis
+defect, framed as a stock-split mismatch (a hypothetical 4:1 split
+turning a real 4x P/E into an apparent 16x). Verified independently
+before filing, and the framing needed correcting: `yfinance`'s raw
+`Close` is *already* split-adjusted regardless of `auto_adjust`
+(confirmed against NVDA's real June 2024 10:1 split — `Close` is smooth
+across the split date at both `auto_adjust` settings, no discontinuity).
+The real, verified mechanism is **dividend** adjustment:
+`moat/ingest/prices.py::fetch_price_history()` never sets
+`auto_adjust`, so yfinance 1.2.0's default (`True`) stores
+dividend-deflated historical prices, not what actually traded.
+Confirmed against KO (a real ~3% yield, no recent split, chosen
+specifically to isolate the dividend effect): the stored 2-year-old
+close is 6.1% below the real traded close that day; the most recent
+close has near-zero lag (no future dividend yet to subtract). Dividing
+a deflated historical price by full, undeflated EPS understates a
+company's own historical P/E multiples — worst furthest back, worst for
+higher-yield names, and compounding every year a row isn't re-fetched
+(an "adjusted" price keeps drifting further from that day's real one as
+new dividends occur after it's stored).
+
+**Why this matters, scoped:** not a false-positive-verdict risk like
+§A22 — nothing here inverts a sign. It silently understates the *low*
+end of a company's own P/E range, making its current multiple read
+relatively more expensive against that own-history floor than it really
+was. `current_price`/DCF/margin-of-safety are unaffected (the latest
+close has essentially no adjustment lag). Bounded today by the P/E
+window still being ~2 years deep (§A21) — would compound meaningfully
+if that gets backfilled before this is fixed, since more years under
+the current setting means more dividends deflating more of the range.
+
+**Decision:** deferred, not fixed here — same posture as §A17/§A18/§A22.
+Filed as [GitHub issue #8](https://github.com/petehawtree/moat/issues/8),
+with the correction to the reported mechanism recorded there (not just
+here) so a future reader doesn't chase the wrong fix (disabling split
+adjustment, which doesn't exist as a separate setting) instead of the
+right one (`auto_adjust=False` + a full `price_history` re-ingest).

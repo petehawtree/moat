@@ -258,8 +258,54 @@ def test_run_committee_no_ai_analysis_is_an_explicit_error(committee_db):
     client = MagicMock()
     result = run_committee("TEST", "committee_run", "valuation_run", "quality_run", conn, client)
     assert result["outcome"] == "api_error"
-    assert "no current ai_analysis claims" in result["reason"]
+    assert "missing current ai_analysis type" in result["reason"]
     client.messages.stream.assert_not_called()
+
+
+def test_run_committee_rejects_a_ticker_missing_some_analysis_types(committee_db):
+    """Found by judge review: the prior check only required *some*
+    analysis type to have claims — a ticker missing 3 of 4 required types
+    (moat/management/risk entirely absent, only business_quality present)
+    still produced a complete-looking, persisted verdict. All four types
+    must exist (an ai_analysis row each), not all four have asserted
+    claims specifically."""
+    conn, claim_ids = committee_db
+    conn.execute("DELETE FROM analysis_claims WHERE ticker = 'TEST' AND analysis_type != 'business_quality'")
+    conn.execute("DELETE FROM ai_analysis WHERE ticker = 'TEST' AND analysis_type != 'business_quality'")
+    conn.commit()
+    client = MagicMock()
+
+    result = run_committee("TEST", "committee_run", "valuation_run", "quality_run", conn, client)
+    assert result["outcome"] == "api_error"
+    assert "missing current ai_analysis type(s)" in result["reason"]
+    assert "moat" in result["reason"] and "management" in result["reason"] and "risk" in result["reason"]
+    client.messages.stream.assert_not_called()
+    row = conn.execute(
+        "SELECT * FROM committee_verdicts WHERE run_id = 'committee_run' AND ticker = 'TEST'"
+    ).fetchone()
+    assert row is None
+
+
+def test_run_committee_proceeds_when_a_type_ran_but_found_only_insufficient_evidence(committee_db):
+    """A type that ran and asserted nothing (every claim
+    'insufficient_evidence') is a different, legitimate state from a type
+    that never ran at all — must not be rejected the same way as a
+    missing type."""
+    conn, claim_ids = committee_db
+    conn.execute(
+        "UPDATE analysis_claims SET assertion_status = 'insufficient_evidence' WHERE ticker = 'TEST' AND analysis_type = 'risk'"
+    )
+    conn.commit()
+    client = MagicMock()
+    texts = _canned_responses(claim_ids)
+    # The bear canned response cites claim_ids['risk'], which just became
+    # insufficient_evidence (no longer a valid ref target) — drop the tag,
+    # same as a real persona would if told there's nothing to assert.
+    texts[1] = texts[1].replace(f"[refs: {claim_ids['risk']}]", "")
+    client.messages.stream.side_effect = [_stream_cm(_fake_message(t)) for t in texts]
+
+    result = run_committee("TEST", "committee_run", "valuation_run", "quality_run", conn, client)
+    assert result["outcome"] == "persisted"
 
 
 def test_fetch_claims_follows_cache_hit_chain_to_the_run_that_has_them(committee_db):
@@ -369,6 +415,78 @@ def test_run_committee_cache_miss_when_valuation_changes(committee_db):
     second = run_committee("TEST", "committee_run_2", "valuation_run", "quality_run", conn, client)
     assert second["outcome"] == "persisted"
     assert client.messages.stream.call_count == 6  # 3 + 3, no cache hit
+
+
+def test_run_committee_cache_miss_when_fcf_yield_key_assumptions_change(committee_db):
+    """Found by judge review: the cache key hashed each valuation row's
+    method/scenario/intrinsic-value/current-price but not key_assumptions
+    — so a changed FCF yield or EV/EBIT (both shown to the Valuation
+    Analyst, prompt.py's _format_valuation_block) didn't invalidate the
+    cache. Independently reproduced before fixing: FCF yield 3%->12% and
+    EV/EBIT 12x->35x held the same bundle key with DCF/price unchanged."""
+    conn, claim_ids = committee_db
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_1', ?, 'complete')", (NOW,))
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_2', ?, 'complete')", (NOW,))
+    conn.commit()
+    client = MagicMock()
+    texts = _canned_responses(claim_ids)
+    client.messages.stream.side_effect = [_stream_cm(_fake_message(t)) for t in texts] * 2
+
+    first = run_committee("TEST", "committee_run_1", "valuation_run", "quality_run", conn, client)
+    assert first["outcome"] == "persisted"
+
+    conn.execute(
+        "UPDATE valuations SET key_assumptions = ? WHERE ticker = 'TEST' AND method = 'fcf_yield'",
+        (json.dumps({"fcf_yield": 0.30, "market_cap": 1000.0}),),
+    )
+    conn.commit()
+
+    second = run_committee("TEST", "committee_run_2", "valuation_run", "quality_run", conn, client)
+    assert second["outcome"] == "persisted"
+    assert client.messages.stream.call_count == 6
+
+
+def test_run_committee_cache_miss_when_quant_scores_change(committee_db):
+    """Closes GitHub #7: the cache key must cover quant_scores/
+    quality_scores, not just ai_analysis + valuations."""
+    conn, claim_ids = committee_db
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_1', ?, 'complete')", (NOW,))
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_2', ?, 'complete')", (NOW,))
+    conn.commit()
+    client = MagicMock()
+    texts = _canned_responses(claim_ids)
+    client.messages.stream.side_effect = [_stream_cm(_fake_message(t)) for t in texts] * 2
+
+    first = run_committee("TEST", "committee_run_1", "valuation_run", "quality_run", conn, client)
+    assert first["outcome"] == "persisted"
+
+    conn.execute("UPDATE quant_scores SET value = 0.01, status = 'fail' WHERE ticker = 'TEST' AND metric = 'roic'")
+    conn.execute("UPDATE quality_scores SET composite_score = 0.0 WHERE ticker = 'TEST' AND run_id = 'quality_run'")
+    conn.commit()
+
+    second = run_committee("TEST", "committee_run_2", "valuation_run", "quality_run", conn, client)
+    assert second["outcome"] == "persisted"
+    assert client.messages.stream.call_count == 6
+
+
+def test_run_committee_cache_miss_when_data_confidence_changes(committee_db):
+    conn, claim_ids = committee_db
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_1', ?, 'complete')", (NOW,))
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_2', ?, 'complete')", (NOW,))
+    conn.commit()
+    client = MagicMock()
+    texts = _canned_responses(claim_ids)
+    client.messages.stream.side_effect = [_stream_cm(_fake_message(t)) for t in texts] * 2
+
+    first = run_committee("TEST", "committee_run_1", "valuation_run", "quality_run", conn, client)
+    assert first["outcome"] == "persisted"
+
+    conn.execute("UPDATE fundamentals_annual SET confidence = 'low' WHERE ticker = 'TEST'")
+    conn.commit()
+
+    second = run_committee("TEST", "committee_run_2", "valuation_run", "quality_run", conn, client)
+    assert second["outcome"] == "persisted"
+    assert client.messages.stream.call_count == 6
 
 
 def test_run_committee_makes_no_calls_when_no_budget_remains(committee_db):

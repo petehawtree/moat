@@ -19,6 +19,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
+from moat.analysis.prompt import ANALYSIS_TYPES
 from moat.analysis.pricing import DEFAULT_MODEL
 from moat.committee.caller import call_persona
 from moat.committee.parser import parse_persona_response
@@ -244,16 +245,50 @@ def _fetch_quality_row(ticker: str, quality_run_id: str, conn) -> dict | None:
 # ---------------------------------------------------------------------
 
 def compute_committee_bundle_key(
-    ai_cache_keys: dict[str, str], valuation_rows: list[dict], model_id: str
+    ai_cache_keys: dict[str, str],
+    valuation_rows: list[dict],
+    quant_rows: list[dict],
+    quality_row: dict | None,
+    data_confidence: str,
+    model_id: str,
 ) -> str:
+    """Content-stable cache key covering every input the context block
+    (prompt.py's build_context_block) actually renders into all three
+    persona prompts.
+
+    Found by judge review, after this cache existed for exactly one prior
+    fix round: the first version only hashed each valuation row's method/
+    scenario/intrinsic-value/current-price — not `key_assumptions` (which
+    carries FCF yield, EV/EBIT multiple, and the P/E range/low-confidence
+    flag the Valuation Analyst is explicitly given) or `data_confidence`
+    (shown in the CONTEXT block header). An independent check changed FCF
+    yield 3%->12% and EV/EBIT 12x->35x while holding the DCF and price
+    constant and got the same bundle key — a real cache-hit-on-changed-
+    input bug, not just GitHub #7's narrower quant_scores gap. `quant_rows`/
+    `quality_row` close #7 itself in the same pass, since both gaps have
+    the same fix shape (hash everything the context block shows, not a
+    hand-picked subset of it).
+    """
     valuation_summary = sorted(
-        (r["method"], r["scenario"], r["intrinsic_value_low"], r["intrinsic_value_high"], r["current_price"])
+        (r["method"], r["scenario"], r["intrinsic_value_low"], r["intrinsic_value_high"],
+         r["current_price"], r["margin_of_safety_pct"], r["key_assumptions"])
         for r in valuation_rows
+    )
+    quant_summary = sorted(
+        (r["metric"], r["value"], r["status"], r["sector_percentile"])
+        for r in quant_rows
+    )
+    quality_summary = (
+        (quality_row["composite_score"], quality_row["metrics_assessed"], quality_row["metrics_passed"])
+        if quality_row else None
     )
     payload = json.dumps(
         {
             "ai_cache_keys": {k: ai_cache_keys[k] for k in sorted(ai_cache_keys)},
             "valuation": valuation_summary,
+            "quant": quant_summary,
+            "quality": quality_summary,
+            "data_confidence": data_confidence,
             "model_id": model_id,
             "protocol_version": PROTOCOL_VERSION,
         },
@@ -370,16 +405,38 @@ def run_committee(
     company_row = dict(company_row)
 
     current_ai_rows = _fetch_current_ai_analysis_rows(ticker, conn)
+    present_types = {r["analysis_type"] for r in current_ai_rows}
+    missing_types = set(ANALYSIS_TYPES) - present_types
+    if missing_types:
+        # Found by judge review: the prior check only required *some*
+        # analysis type to have claims, so a ticker missing 3 of the 4
+        # required types (moat/management/risk entirely absent, only
+        # business_quality present) still produced a complete-looking,
+        # persisted "Investigate" verdict — the missing sections just
+        # rendered as "no claims available" in the context block with
+        # nothing stopping the personas from scoring anyway. All four
+        # types are required to exist (an ai_analysis row for each), not
+        # all four to have *asserted* claims — a type that ran and found
+        # nothing to assert (all `insufficient_evidence`) is a legitimate,
+        # different state from a type that never ran at all.
+        return {
+            "ticker": ticker, "outcome": "api_error", "cost_estimate": 0.0,
+            "reason": f"missing current ai_analysis type(s): {sorted(missing_types)}",
+        }
     claims_by_type = _fetch_claims_by_type(ticker, conn, current_rows=current_ai_rows)
-    if not any(claims_by_type.values()):
-        return {"ticker": ticker, "outcome": "api_error", "reason": "no current ai_analysis claims", "cost_estimate": 0.0}
 
     valuation_rows = _fetch_valuation_rows(ticker, valuation_run_id, conn)
     if not valuation_rows:
         return {"ticker": ticker, "outcome": "api_error", "reason": "no valuations row in the latest run", "cost_estimate": 0.0}
 
+    quant_rows = _fetch_quant_rows(ticker, quality_run_id, conn)
+    quality_row = _fetch_quality_row(ticker, quality_run_id, conn)
+    data_confidence = roll_up_data_confidence(ticker, conn)
+
     ai_cache_keys = {r["analysis_type"]: r["cache_key"] for r in current_ai_rows}
-    bundle_key = compute_committee_bundle_key(ai_cache_keys, valuation_rows, model_id)
+    bundle_key = compute_committee_bundle_key(
+        ai_cache_keys, valuation_rows, quant_rows, quality_row, data_confidence, model_id,
+    )
     if not dry_run:
         cached = find_cached_committee_verdict(ticker, bundle_key, conn)
         if cached is not None:
@@ -389,10 +446,6 @@ def run_committee(
                 "reused_from_run_id": cached["run_id"],
                 "overall_score": cached["overall_score"], "status": cached["status"],
             }
-
-    quant_rows = _fetch_quant_rows(ticker, quality_run_id, conn)
-    quality_row = _fetch_quality_row(ticker, quality_run_id, conn)
-    data_confidence = roll_up_data_confidence(ticker, conn)
 
     known_claim_ids = {
         c["claim_id"]

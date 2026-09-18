@@ -1,5 +1,7 @@
 # Judge reports
 
+*The judge is adversarial by design — it's meant to find and re-report everything it can, not to stay quiet about what's already known; every open `FAIL` below maps to a filed, tracked GitHub issue, not silent breakage.*
+
 **Start here: [judge-report-sprint-5-first-clean-run-20260918-143831.md](judge-report-sprint-5-first-clean-run-20260918-143831.md)**
 — `PASS WITH CONCERNS`, 0 Critical, 0 High, 0 Medium, 2 Low. The first
 report this independent review has ever returned that wasn't `FAIL`.

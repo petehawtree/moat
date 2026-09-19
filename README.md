@@ -1,245 +1,184 @@
 # Project Moat
 
-AI-assisted equity research tool built on Buffett/Graham fundamental
-investing principles. Personal research tool — not investment advice, and
-not a substitute for the human "investment committee" (you).
+## Can AI build a trustworthy investment-research pipeline?
 
-Full spec: `docs/Project_Moat_PRD_MVP.pdf` (original PRD) +
-[`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) (scoping decisions made
-during Sprint 0 — read this first, it overrides the PRD where they differ).
+An experiment in building a complex, data-heavy AI product responsibly.
+Equity research is the domain — Buffett/Graham-style moat investing needs
+someone to read filings, reason about qualitative evidence, and never
+assert a number it can't source — but the product-management and
+AI-engineering lessons are the point: staged rollout under a cost cap,
+an independent adversarial review that runs on every push, and defects
+found in *real* pilot output getting fixed without silent data loss.
 
-What actually happened each sprint — results, bugs found, scope calls — is
-in [`docs/sprints/`](docs/sprints/). Longer-form lessons are in
-[`docs/writeups/`](docs/writeups/): [Sprint 0-1 data bugs](docs/writeups/three-bugs-in-structured-financial-data.md)
-and [what two code reviews found](docs/writeups/what-two-code-reviews-found.md).
-Every value shown on the dashboard (and the inputs behind it) is defined in
-[`docs/dashboard-glossary.md`](docs/dashboard-glossary.md).
+**Not investment advice**, and not a substitute for the human "investment
+committee" (you) — the dashboard says so on every screen.
 
-## Architecture
+**Stack:** Python, SQLite (one local file, no infra), Streamlit dashboard,
+Claude API for the qualitative/valuation/committee stages.
+
+**Headline numbers** (each sourced below — nothing here that can't be
+pointed at a file):
+
+| | | |
+|---|---|---|
+| 102 commits | 518-company universe, 505 with fundamentals | 91/505 pass the quant screen |
+| 70 companies fully AI-analyzed, 2,312 citations | ~$14.9 total AI spend across every pilot to date | 302 tests, 301 passing (1 opt-in live-API test) |
+| 8 GitHub issues filed, 7 open — tracked, not hidden | | |
+
+Sources: commit count is `git rev-list --count HEAD`. Universe/fundamentals
+coverage and the 91/505 screen result are [Sprint 1](docs/sprints/sprint-1.md)
+and [Sprint 3.1](docs/sprints/sprint-3-1.md) (91/505 supersedes an earlier
+93/505 figure — see that retro for why the count moved). The 70-company/
+2,312-citation figure is the batch run in
+[Sprint 3.1](docs/sprints/sprint-3-1.md#next-up). Spend is $1.905
+([Sprint 3](docs/sprints/sprint-3.md)) + $11.128
+([Sprint 3.1](docs/sprints/sprint-3-1.md)) + ~$1.9
+([Sprint 5 pilot](docs/sprints/sprint-5-plan.md), in progress). Test count
+is `pytest`'s own collection, run against `HEAD`. Issue count is
+[GitHub Issues](https://github.com/petehawtree/moat/issues).
+
+**Read next:** [PRD_ADDENDUM.md](docs/PRD_ADDENDUM.md) (scoping decisions,
+read before the original PRD) · [docs/sprints/](docs/sprints/) (what
+actually happened, sprint by sprint) · [docs/known-issues.md](docs/known-issues.md)
+(every open defect, why it's deferred) · [docs/dashboard-glossary.md](docs/dashboard-glossary.md)
+(every value on screen, defined)
+
+## The product in 60 seconds
+
+**Overview** — the screening funnel (518 → 505 screened → 91 passed → 21
+committee briefs → Investigate/Watch/Reject), with a caption explaining why
+the pilot is deliberately partial:
+
+<img src="docs/img/overview.jpg" alt="Overview tab: funnel metrics 518/505/91/21/1/15/5, a caption explaining the committee pilot is deliberately partial, and a screen-pass-rate-by-sector bar chart." width="100%">
+
+**Investment Committee** — a brief (Adobe) showing a resolved citation
+(the actual 10-K quote behind a claim) *and* a statement carrying the
+explicit "no citation" flag, side by side:
+
+<img src="docs/img/committee-brief.jpg" alt="Investment Committee brief for Adobe: an expanded citation showing the original 10-K quote and accession number, next to a statement flagged with a no-citation warning as analyst synthesis rather than a filing-grounded claim." width="100%">
+
+**Universe & Screening** — a per-metric PASS/FAIL/UNAVAILABLE breakdown
+(Palantir, showing all three):
+
+<img src="docs/img/universe-screening.jpg" alt="Per-metric quant screen breakdown for Palantir showing a mix of pass, fail, and unavailable statuses across the 8 screen metrics." width="100%">
+
+**Valuation** — DCF range + margin of safety, including Airbnb's non-numeric
+bear-case verdict where the sign-flip guard is doing its job (`bear case:
+negative`, never a misleading percentage):
+
+<img src="docs/img/valuation.jpg" alt="Valuation summary table showing DCF bear/base/bull, margin of safety, FCF yield, EV/EBIT and P/E for several companies, including Airbnb's negative bear case rendered as an explicit label instead of a number." width="100%">
+
+## The problem
+
+Individual investors doing Buffett/Graham-style fundamental research don't
+have institutional tooling: reading primary filings, screening a broad
+universe on sector-relative fundamentals, and building a defensible
+qualitative case for a "moat" all take hours per company and don't scale.
+Project Moat asks how much of that can be handed to AI — cheaply, and
+without asking a human to trust a number or a claim it can't trace back to
+a source.
+
+**Scope for now:** S&P 500 + NASDAQ 100 only, US (FTSE 350 deferred, §A1).
+Free/near-free data only — SEC EDGAR XBRL (structured, high confidence) +
+yfinance (prices, supplementary), with confidence tracked per record (§A4).
+
+## How it works
 
 <img src="docs/img/architecture.svg" alt="Project Moat pipeline: three free data sources feed an ingestion stage that writes into one shared SQLite store; five stages read and write that same store in sequence, with a citation-enforcement rule at the AI Analysis stage; the output reaches a human who makes the final call, while a separate watchlist monitor loops back to re-trigger ingestion on its own." width="100%">
 
-Green = shipped (Sprint 0–4). Light green dashed = partially shipped
-(ranked dashboard + valuation live, Investment Brief still Sprint 5).
-Cream dashed = planned (Sprint 5–6, still stubs). Gold = the one thing no
-sprint replaces.
+Ingest → Screen → Quality → AI Analysis (citation-enforced) → Valuation →
+Committee → **human decides**, with a watchlist monitor looping back to
+re-trigger ingestion on its own. Green = shipped (Sprint 0–4). Light green
+dashed = partially shipped (Sprint 5, in progress). Cream dashed = planned
+(Sprint 6, still a stub). Gold = the one stage no sprint ever replaces.
 
-## Status
+**Every number traces back to a source.** A filing row, a price row, or a
+citation — never asserted without a path to where it came from
+(`docs/dashboard-glossary.md` defines every value; §A3/§A11 of the
+addendum define the guarantee).
 
-**Sprint 5 — Investment Committee + Investment Brief. In progress —
-real pilot run, not yet Done.**
-- Plan: [sprint-5-plan.md](docs/sprints/sprint-5-plan.md). Not yet
-  retro'd — the pilot is real but partial (21/69 companies), and
-  `assign_status()`'s thresholds aren't validated yet, so this isn't
-  Done.
-- Built and tested: three persona prompts (Quality/Bear/Valuation
-  Analyst, PRD §7) reading already-cited `ai_analysis` claims +
-  `valuations`, no new citation-extraction layer (§A19.6 decision: raw
-  quote surfaced inline instead, with an explicit "no citation" flag
-  where one's genuinely absent); PRD §8's weighted score wired to
-  `assign_status()` (70/50 starting-point thresholds — pilot-then-lock,
-  same posture as Sprint 4's discount rate); PRD §10 brief content —
-  including dedicated moat evidence/financial quality/valuation-range
-  sections, not just persona prose — template-stitched from the three
-  persona views (decision 3, no 4th LLM call); `committee_verdicts`
-  persistence with no partial writes and §A5 caching (a re-run against
-  unchanged inputs costs $0); the `committee` pipeline stage, defaulting
-  to exclude the known-bad tickers (§A17/§A18/§A20) rather than relying
-  on `--exclude` being remembered every run.
-- **Real pilot run: 21/69 companies, ~$1.9 spent** (of a $3 cap). Caught
-  and fixed several real bugs along the way, most seriously a **risk-
-  score polarity inversion** in `compute_overall_score()` — a riskier
-  company was scoring *higher*, the opposite of PRD §8's intent; found
-  by judge review of the real output, confirmed independently, fixed,
-  and every already-persisted verdict recomputed in place (no re-spend
-  needed). Current pilot result: 1 Investigate (ADBE), 15 Watch, 5
-  Reject — worth a human read before locking thresholds, per the plan's
-  own Definition of Done.
-- **New, deferred:** reviewing the pilot output also found a real bug in
-  Sprint 4's own DCF code — a negative trailing owner-earnings base
-  inverts the bear/base/bull scenario ordering (bull reads as the worst
-  case, not the best) for any company with negative owner earnings; 5/5
-  such companies in the current run are affected (ABNB, CRWD, EIX, PEG,
-  UBER). `margin_of_safety()`'s sign guard still prevents a false-
-  positive verdict, so this is a misleading range label, not a
-  misleading recommendation. Filed as
-  [GitHub issue #5](https://github.com/petehawtree/moat/issues/5),
-  deferred rather than fixed — see
-  [PRD_ADDENDUM.md §A22](docs/PRD_ADDENDUM.md#a22-a-negative-owner-earnings-base-inverts-dcf-scenario-ordering--deferred-github-issue-5)
-  for why Sprint 4's own verification didn't catch it.
-- 78 new tests (300 total, up from 222 at the end of Sprint 4).
-- **Independent review:** built the known-issues allowlist
-  [PRD_ADDENDUM.md §A24](docs/PRD_ADDENDUM.md#a24-the-known-issues-allowlist-a197-anticipated-now-built)
-  anticipated, so the automatic judge review (§A19.7) stops re-flagging
-  already-filed/already-decided items as new failures. First result with
-  it in place: two more real bugs found and fixed, then a genuinely clean
-  [`PASS WITH CONCERNS`](docs/judge-reports/judge-report-sprint-5-first-clean-run-20260918-143831.md)
-  — the first non-`FAIL` verdict this project's review has ever returned
-  (see [`docs/judge-reports/README.md`](docs/judge-reports/README.md)).
-- **Not done yet:** the remaining 48/69 companies, and a documented
-  human read of the pilot output before `assign_status()`'s thresholds
-  are treated as final.
+## Product principles
 
-**Sprint 4 — Owner Earnings DCF + scenario valuation. Done.**
-- Retro: [sprint-4.md](docs/sprints/sprint-4.md). Plan:
-  [sprint-4-plan.md](docs/sprints/sprint-4-plan.md). Decisions/findings:
-  [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A16, §A20.
-- Owner Earnings DCF (bear/base/bull, two-stage with a Gordon-growth
-  terminal value) plus three supporting cross-checks — FCF yield,
-  EV/EBIT, P/E vs. own historical range — all sharing one sign-flip-guard
-  discipline (§A16.4/V3): a negative or zero denominator/intrinsic value
-  reports an explicit non-numeric verdict, never a misleading number.
-- 70/91 `passed_screen` companies valued (420 rows) — the same 21-ticker
-  operational exclusion `ai_analysis` already uses (§A17's debt-tag/REIT
-  gaps), plus BKNG: a real price/shares data inconsistency found while
-  dry-running the full set, not a code defect (§A20/§A20.1).
-- A stale-data bug found the same way (NVDA's DCF silently anchored on
-  15-year-old capex data) was fixed before shipping: the owner-earnings
-  series is now restricted to each company's own trailing 10 fiscal
-  years.
-- Dashboard shows DCF range, margin of safety (rendering a negative bear
-  case distinctly, never as a number), FCF yield, EV/EBIT, P/E, and a
-  per-company assumption drill-down. 218 tests passing (48 new this
-  sprint).
+| Principle | What it looks like in the code |
+|---|---|
+| No metric without a source | Every fundamentals row joins back to the filing that reported it (§A11); every AI claim resolves to an accession + section + quote (§A3, §A15). |
+| Missing data is not failure | Metrics report pass/fail/**unavailable**, scored as % of *assessable* metrics — a company that can't be measured isn't indistinguishable from one that did badly (§A14). |
+| Sign-flip guards on every valuation output | A negative or zero denominator/intrinsic value returns an explicit non-numeric verdict, never a misleading number (§A16.4). |
+| Cost is a first-class constraint | Every AI stage runs under an explicit spend cap; a re-run against unchanged inputs costs $0 (§A5). |
+| Known problems are tracked, not hidden | [`docs/known-issues.md`](docs/known-issues.md) + 8 filed GitHub issues feed an adversarial independent review that runs on every push to `main`. |
 
-**Sprint 3.1 — citation/batch backlog closed; screen refreshed; the 90-company run corrected to 70 and completed. Done.**
-- Retro: [sprint-3-1.md](docs/sprints/sprint-3-1.md). Plan:
-  [sprint-3-1-plan.md](docs/sprints/sprint-3-1-plan.md).
-- Non-offline filing fetches now check SEC freshness before trusting the
-  cache; the batch submission path is wired end-to-end (persist → poll →
-  retrieve, resumable) with its own spend-cap enforcement; the citation
-  resolution ladder implements all six §A15.5 rungs with repeated-quote
-  disambiguation; 114 → 160 tests.
-- Re-running screen+quality against current code (unchanged since Sprint
-  3) dropped the passing count from **93/505 to 91/505** — the persisted
-  Sprint 2.2 figure below predates a code change. Independent (Codex)
-  judge review across three passes then found two pre-existing, still-open
-  data-quality gaps in that 91: incomplete debt-tag extraction (18
-  companies) and Real Estate still scored on metrics §A14 already flagged
-  as invalid for that sector. Excluded — not fixed — from the pending
-  90-company AI run, which is now **69 companies** (91 passed, minus AAPL
-  already analyzed, minus 21 excluded — the 20 debt/REIT tickers plus
-  GOOGL, a dual-class-ticker filing-lookup collision found by the
-  --dry-run itself, [§A18](docs/PRD_ADDENDUM.md#a18-dual-class-tickers-sharing-a-cik-silently-orphan-the-second-tickers-filing-row)).
-- A $1.80 mini-pilot on the largest/smallest outlier filings (MRK, PEG,
-  LIN) found `last_toc_cluster_pos` was scoped to the whole document
-  instead of front matter — 81% of the 69 were hitting `full_fallback`
-  (sending the entire filing) because of it, not the rare edge case
-  earlier assessed as zero-impact. Fixed; full_fallback dropped to 30%,
-  and item 6's projected cost dropped **$17.35 → $12.15**. Full detail:
-  addendum [§A17](docs/PRD_ADDENDUM.md#a17-sprint-31s-judge-pass-found-two-pre-existing-sprint-2-defects--excluded-from-item-6-not-fixed-there).
-- **Item 6 ran: 70 companies now have current analyses, $11.13 total real
-  spend** ($1.80 mini-pilot + $9.32 batch — under its own $12.15
-  projection), well under the $35 cap. The first real batch submission
-  crashed immediately on an SDK version mismatch
-  (`anthropic.types.MessageCreateParamsNonStreaming`, never actually
-  exercised by any prior test) — no money lost, fixed, retried, succeeded
-  completely: 67/67 persisted, 0 failed. See [sprint-3-1.md](docs/sprints/sprint-3-1.md)
-  for the full account.
+## What went wrong
 
-**Sprint 3 — AI qualitative analysis, citation-enforced. Done.**
-- Retro: [sprint-3.md](docs/sprints/sprint-3.md). Plan:
-  [sprint-3-plan.md](docs/sprints/sprint-3-plan.md). Citation architecture:
-  [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A15.
-- Two builds: the document layer the pipeline had never had (`filings` holds
-  accessions but no filing *text*), then the analysis on top of it.
-- Citations come from the API rather than the model, and every one is
-  resolved at call time into an immutable anchor — accession + section +
-  document hash + offsets + quote + context — that still means something
-  after the source has been re-fetched, re-chunked or superseded.
-- Revised after an [external review](docs/writeups/sprint-3-plan-external-review.md)
-  whose every code-level claim reproduced: one combined batched request per
-  company, claims parsed into their own table rather than inferred from API
-  response blocks, and re-anchoring recorded as events against anchors that
-  never change.
-- Pilot of 3 deliberately varied filers (AAPL, KO, JPM): 12 analyses, 99
-  citations, **100% exact `--reanchor`**, $1.91 spent of a $15 cap. Found
-  and fixed a real bug along the way — `toc_cluster`/boundary handling was
-  sending every real filing to full-document fallback, not targeted
-  sections; AAPL's input tokens dropped 71,731 → 29,000 once fixed. Two
-  smaller gaps deferred to Sprint 4 (a rarer `toc_cluster` case, a cosmetic
-  parser artifact) — see the retro.
+Ranked by how serious the failure actually was, not by how it reads.
 
-**Sprint 2.2 — data integrity. Done.**
-- Acted on a second external review that found the system not
-  investment-ready. Fixed: operating cash flow being scored as free cash
-  flow (155 companies), REIT revenue missing ASC 842 lease income (Camden
-  read $13m against a real ~$1.6bn), and unavailable data being scored as
-  failure (773 nulls).
-- Metrics now report **pass / fail / unavailable**, and the score is the
-  % of *assessable* metrics — a company we couldn't measure is no longer
-  indistinguishable from one that did badly.
-- **93/505** pass, down from 111: 38 were passing on substituted cash flow,
-  and financials are now excluded as unscreenable rather than mis-ranked on
-  metrics that don't describe a bank (§A14).
-- 31 tests passing. See [sprint-2-2.md](docs/sprints/sprint-2-2.md).
+| # | Failure | Severity | Caught by |
+|---|---|---|---|
+| 1 | Operating cash flow scored as free cash flow — 155 companies ranked on the wrong number | Serious — wrong investment signal | External review ([Sprint 2.2](docs/sprints/sprint-2-2.md)) |
+| 2 | Risk score rewarded risk instead of penalizing it (`compute_overall_score()` polarity inverted) | Serious — recommendation logic backwards | Independent judge review of real pilot output ([Sprint 5](docs/sprints/sprint-5-plan.md)) — fixed, every persisted verdict recomputed in place, **no re-spend** |
+| 3 | Missing data silently scored as a failing grade — 773 nulls | Serious — systematically penalized companies for gaps, not weakness | External review ([Sprint 2.2](docs/sprints/sprint-2-2.md)) |
+| 4 | NVDA's DCF silently anchored on 15-year-old capex data | Moderate — one company's valuation range was wrong | Dry-run before shipping ([Sprint 4](docs/sprints/sprint-4.md)) |
+| 5 | First batch submission crashed on an SDK version mismatch, never exercised by any prior test | Minor — caught at submission, no money lost | Immediate failure on the first real call ([Sprint 3.1](docs/sprints/sprint-3-1.md)) |
+| 6 | 81% of filings hit `full_fallback` (whole document sent, not targeted sections) | Minor — cost inefficiency, not a wrong number | $1.80 mini-pilot on outlier filings ([Sprint 3.1](docs/sprints/sprint-3-1.md)); still 30% today, [GitHub #4](https://github.com/petehawtree/moat/issues/4) |
 
-**Sprint 2.1 — ingest data integrity + filing provenance. Done.**
-- Stock-split detection now keyed on **filing restatement** rather than
-  inferred from a jump — fixes real dilution being erased at IPOs and
-  mergers (TKO 6.2% → 53.1%/yr, CRWV 6.6% → 50.7%/yr).
-- Ingest validation catches share counts filed in the wrong unit.
-- Every fundamentals row is traceable to a filing; `filings` table
-  populated (0 → 7,497 rows), raw SEC payloads cached (re-ingest 353s → 11s).
-- `python scripts/verify.py WMT shares_diluted` shows any stored number
-  beside every filing that reported it.
-- 25 tests passing. See [sprint-2-1.md](docs/sprints/sprint-2-1.md).
+## How AI was used to build it
 
-**Sprint 2 — sector-relative quant screen + ranked dashboard. Done.**
-- Screen: all 8 PRD §4 metrics scored against each company's own GICS
-  sector, not a flat bar — see [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A2/§A9.
-- Results: 111/505 passed at the time (93 after the Sprint 2.1/2.2 data
-  fixes). Top of the ranked
-  table is recognizable moat businesses (Adobe, Mastercard, Meta,
-  Moody's, MSCI, Nvidia, Verisk) — see
-  [`docs/sprints/sprint-2.md`](docs/sprints/sprint-2.md).
-- Dashboard: ranked table + per-company metric breakdown showing *why* a
-  company passed or failed each metric.
-- 16 tests passing.
-- A `share_dilution` defect found by external review has been fixed in
-  Sprint 2.1 below.
+**Maker → Tests → Judge → Human → Pilot.** Claude Code implements against
+the PRD and addendum; 302 tests gate correctness on every change; an
+independent adversarial reviewer (`judge.sh`, a *different* model reading
+the code and the database as untrusted claims — never assuming a test
+passing means the behavior is correct) runs automatically on every push to
+`main`; a human reads real output before thresholds get locked; every
+AI-calling stage pilots on a small, deliberately-varied subset under an
+explicit spend cap before a full run.
 
-**Sprint 1 — data foundation and company universe. Done.**
-- Universe: 518 unique US companies (S&P 500 + NASDAQ 100, deduplicated).
-- Fundamentals: 505/518 (97.5%) via SEC EDGAR XBRL. The 13 gaps are
-  explained, not bugs — see [`docs/PRD_ADDENDUM.md`](docs/PRD_ADDENDUM.md) §A7.
-- Prices: 518/518 (100%) via yfinance.
+The judge returned `FAIL` 14 times in a row — not 14 independent bugs, but
+the same small set of already-known, already-filed defects getting
+re-discovered because the reviewer had no way to tell "known and tracked"
+apart from "new breakage." Building [`docs/known-issues.md`](docs/known-issues.md)
+as an explicit allowlist fixed that: the next run found two genuinely new
+bugs, fixed them, and came back with this project's first
+[non-`FAIL` verdict](docs/judge-reports/judge-report-sprint-5-first-clean-run-20260918-143831.md).
 
-Run `python scripts/run_pipeline.py --init-db` (add `--init-only` to just create the schema) then
-`python scripts/run_pipeline.py --from-stage screen` to reproduce.
+## Key decisions
 
-Sprints 5-6 (committee/monitor) are still documented stubs — see the
-sprint table below.
+| Decision | Reason |
+|---|---|
+| Citations are resolved from the API at call time into a durable anchor (accession + section + hash + offsets + quote), not authored by the model | A model-authored citation is a claim, not evidence — it has to still mean something after the source is re-fetched, re-chunked, or superseded (§A15.2/§A15.3) |
+| An AI statement without a citation is shown with an explicit "no citation" flag, not rejected or hidden | The chosen control is surface support for a human to judge, not an automated citation-enforcement gate — decided up front, not discovered as a gap later (§A19.6) |
+| All 8 screen metrics are scored against each company's own GICS sector, not one flat threshold | A bank and a software company don't share a capital structure or margin profile (§A2/§A9) |
+| Known-bad tickers are excluded by default only at the Committee stage (the one producing a ranked recommendation); `ai_analysis`/`valuation` keep exclusion opt-in | A deliberate, scoped decision, not an oversight — see `sprint-5-plan.md` |
 
-## Scope for now
+## Build history
 
-- **Universe:** S&P 500 + NASDAQ 100 only (US). FTSE 350 is deferred —
-  see addendum §A1.
-- **Data:** free/near-free sources only — SEC EDGAR (structured, high
-  confidence) + yfinance (prices, supplementary). See addendum §A4 for
-  how confidence is tracked per record.
-- **Screening:** sector-relative, not one flat threshold for every company
-  — see addendum §A2.
-- **Stack:** Python, SQLite (single local file, no infra), Streamlit
-  dashboard, Claude API for the qualitative/valuation/committee stages
-  (Sprint 3+).
-
-## Sprint plan
-
-| Sprint | Scope | Summary |
+| Sprint | Scope | Status |
 |---|---|---|
-| 0 | Repo scaffold, schema, pipeline skeleton — **done** | [sprint-0.md](docs/sprints/sprint-0.md) |
-| 1 | Universe + price/fundamentals ingestion (US only) — **done** | [sprint-1.md](docs/sprints/sprint-1.md) |
-| 2 | Sector-relative quant screen + ranked dashboard — **done** (one metric defective, see 2.1) | [sprint-2.md](docs/sprints/sprint-2.md) |
-| 2.1 | Ingest data integrity + filing provenance — **done** | [sprint-2-1.md](docs/sprints/sprint-2-1.md) |
-| 2.2 | Data integrity: FCF, REIT revenue, FAIL vs UNAVAILABLE — **done** | [sprint-2-2.md](docs/sprints/sprint-2-2.md) |
-| 3 | AI business/moat/management/risk analysis (citation-enforced) — **done** | [sprint-3.md](docs/sprints/sprint-3.md) |
-| 3.1 | Citation/batch backlog + the 70-company AI run — **done** | [sprint-3-1.md](docs/sprints/sprint-3-1.md) |
-| 4 | Owner Earnings DCF + supporting valuation methods — **done** | [sprint-4.md](docs/sprints/sprint-4.md) |
-| 5 | Investment Committee + one-page Investment Brief — **in progress** | [sprint-5-plan.md](docs/sprints/sprint-5-plan.md) |
-| 6 | Watchlist monitoring | |
+| 0 | Repo scaffold, schema, pipeline skeleton | [done](docs/sprints/sprint-0.md) |
+| 1 | Universe + price/fundamentals ingestion (US only) | [done](docs/sprints/sprint-1.md) |
+| 2 | Sector-relative quant screen + ranked dashboard | [done](docs/sprints/sprint-2.md) (one metric defective, see 2.1) |
+| 2.1 | Ingest data integrity + filing provenance | [done](docs/sprints/sprint-2-1.md) |
+| 2.2 | Data integrity: FCF, REIT revenue, FAIL vs UNAVAILABLE | [done](docs/sprints/sprint-2-2.md) |
+| 3 | AI business/moat/management/risk analysis (citation-enforced) | [done](docs/sprints/sprint-3.md) |
+| 3.1 | Citation/batch backlog + the 70-company AI run | [done](docs/sprints/sprint-3-1.md) |
+| 4 | Owner Earnings DCF + supporting valuation methods | [done](docs/sprints/sprint-4.md) |
+| 5 | Investment Committee + one-page Investment Brief | [in progress](docs/sprints/sprint-5-plan.md) — real pilot run, 21/69 companies, thresholds not yet locked |
+| 6 | Watchlist monitoring | not started |
 
-## Setup
+Longer-form lessons: [three bugs in structured financial data](docs/writeups/three-bugs-in-structured-financial-data.md)
+· [what two code reviews found](docs/writeups/what-two-code-reviews-found.md).
+
+## Product artefacts
+
+- [Project_Moat_PRD_MVP.pdf](docs/Project_Moat_PRD_MVP.pdf) — original PRD
+- [PRD_ADDENDUM.md](docs/PRD_ADDENDUM.md) — every scoping decision made since, overrides the PRD where they differ
+- [docs/sprints/](docs/sprints/) — one retro per completed sprint
+- [docs/judge-reports/](docs/judge-reports/) — every independent review run, including the 14 `FAIL`s before the allowlist existed
+- [docs/known-issues.md](docs/known-issues.md) — every open defect and settled design decision, with why
+- [docs/dashboard-glossary.md](docs/dashboard-glossary.md) — every value on the dashboard, defined
+
+## Run it yourself
+
+<details>
+<summary>Setup</summary>
 
 ```bash
 python3 -m venv .venv
@@ -250,7 +189,17 @@ python scripts/run_pipeline.py --init-db --init-only
 pytest
 ```
 
-## Repo layout
+Reproduce the pipeline: `python scripts/run_pipeline.py --init-db` (add
+`--init-only` to just create the schema), then
+`python scripts/run_pipeline.py --from-stage screen`.
+
+Run the dashboard:
+
+```bash
+streamlit run moat/dashboard/app.py
+```
+
+### Repo layout
 
 ```
 moat/
@@ -268,8 +217,4 @@ docs/           # PRD + addendum
 tests/
 ```
 
-## Running the dashboard
-
-```bash
-streamlit run moat/dashboard/app.py
-```
+</details>

@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 
-# Pre-push hook: runs the independent judge (./judge.sh) automatically
-# whenever a push updates refs/heads/main on the remote. No-op for pushes
-# to any other branch. See docs/PRD_ADDENDUM.md §A19.7 for the reasoning
-# behind this cadence (not every commit, not manually-remembered-once).
+# Pre-push hook: runs the independent judge (./judge.sh) and the metrics
+# freshness check (scripts/metrics.py --check) automatically whenever a
+# push updates refs/heads/main on the remote. No-op for pushes to any
+# other branch. See docs/PRD_ADDENDUM.md §A19.7 for the judge cadence
+# reasoning (not every commit, not manually-remembered-once) — the metrics
+# check rides along for the same reason: a stale headline number in the
+# README is exactly the kind of thing nobody remembers to re-check.
 #
-# ADVISORY by default: a failing judge gate does not block the push (see
-# §A19.7 for why — the gate has no way yet to accept the already-filed,
-# out-of-scope Sprint 2 defects tracked in §A17, so hard-blocking today
-# would fail on every push for reasons nobody intends to act on
-# immediately). Set JUDGE_ENFORCE=1 to make a failing gate block the push.
+# ADVISORY by default: neither gate blocks the push. The judge gate has no
+# way yet to accept the already-filed, out-of-scope Sprint 2 defects
+# tracked in §A17, so hard-blocking today would fail on every push for
+# reasons nobody intends to act on immediately (§A19.7); the metrics gate
+# is advisory for the same reason data/moat.db can be absent (a fresh
+# clone, CI) without that being a real problem. Set JUDGE_ENFORCE=1 /
+# METRICS_ENFORCE=1 to make either gate block the push.
 #
 # One-time setup (hooks in .git/hooks/ are not tracked by git):
 #   git config core.hooksPath scripts/hooks
@@ -29,6 +34,26 @@ fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
+
+if [[ -f scripts/metrics.py ]]; then
+  METRICS_PYTHON="python3"
+  [[ -x .venv/bin/python ]] && METRICS_PYTHON=".venv/bin/python"
+  echo "pre-push: checking README metrics against docs/metrics.json..." >&2
+  set +e
+  "$METRICS_PYTHON" scripts/metrics.py --check 2>&1 | sed 's/^/  /' >&2
+  METRICS_EXIT=${PIPESTATUS[0]}
+  set -e
+  if [[ "$METRICS_EXIT" -ne 0 ]]; then
+    echo "pre-push: metrics check did NOT pass (exit $METRICS_EXIT)." >&2
+    echo "  Run \`python scripts/metrics.py --refresh && python scripts/metrics.py --render\` and commit the result." >&2
+    if [[ "${METRICS_ENFORCE:-0}" == "1" ]]; then
+      echo "  METRICS_ENFORCE=1 is set — blocking this push." >&2
+      exit 1
+    fi
+    echo "  Not blocking this push (advisory mode)." >&2
+  fi
+  echo >&2
+fi
 
 if [[ ! -x ./judge.sh ]]; then
   echo "pre-push: ./judge.sh not found or not executable — skipping automatic judge run." >&2

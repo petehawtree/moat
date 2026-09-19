@@ -1,6 +1,8 @@
 """Streamlit dashboard (PRD §9, §10). Sprint 1 shows raw ingest coverage;
 Sprint 2 adds the ranked/scored table; Sprint 5 adds the Investment Brief
-detail page.
+detail page. Reorganized into three tabs (Overview / Investment Committee /
+Universe & Screening) so a first-time viewer lands on the committee funnel
+and verdicts rather than pipeline internals.
 
 Run with: streamlit run moat/dashboard/app.py
 """
@@ -8,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -21,7 +24,9 @@ from moat.db.connection import get_connection
 
 st.set_page_config(page_title="Project Moat", layout="wide")
 st.title("Project Moat")
-st.caption("Personal research tool. Not investment advice.")
+st.warning(
+    "Personal research project — **not investment advice. Capital at risk.**"
+)
 
 def _resolve_claim_citation(claim_id: int, conn) -> dict | None:
     """One claim_id -> its original filing quote (§A19.6 decision: surface
@@ -183,6 +188,12 @@ if company_count == 0:
         "to load the universe and ingest fundamentals/prices."
     )
 else:
+    latest_data_date = conn.execute(
+        "SELECT MAX(completed_at) AS d FROM pipeline_runs WHERE status != 'failed'"
+    ).fetchone()["d"]
+    if latest_data_date:
+        st.caption(f"Data refreshed: {datetime.fromisoformat(latest_data_date).strftime('%-d %b %Y')}")
+
     sectors_raw = pd.read_sql_query(
         "SELECT DISTINCT sector FROM companies WHERE is_active = 1 ORDER BY sector", conn
     )["sector"]
@@ -200,17 +211,7 @@ else:
             return df
         return df[df["sector"].fillna("(no sector)").isin(selected_sectors)]
 
-    st.subheader("Sprint 1 — ingest coverage")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Companies in universe", company_count)
-
-    fundamentals_count = conn.execute(
-        "SELECT COUNT(DISTINCT ticker) AS n FROM fundamentals_annual"
-    ).fetchone()["n"]
-    col2.metric("With fundamentals data", fundamentals_count)
-
-    prices_count = conn.execute("SELECT COUNT(DISTINCT ticker) AS n FROM price_history").fetchone()["n"]
-    col3.metric("With price history", prices_count)
+    # --- shared data loads, used across tabs ---
 
     coverage = pd.read_sql_query(
         """
@@ -228,23 +229,6 @@ else:
         conn,
     )
     coverage = _filter_by_sector(coverage)
-    st.dataframe(coverage, use_container_width=True, height=500)
-
-    thin = coverage[coverage["years_of_fundamentals"] < 3]
-    if not thin.empty:
-        with st.expander(f"{len(thin)} companies with fewer than 3 years of fundamentals"):
-            st.dataframe(thin, use_container_width=True)
-
-    st.divider()
-    st.subheader("Sprint 2 — quant screen ranking")
-    st.caption(
-        "Sector-relative screen (docs/PRD_ADDENDUM.md §A2/§A9): each of the 8 "
-        "PRD §4 metrics passes only if it clears both an absolute floor and "
-        "the top-tercile bar within its own GICS sector. composite_score is "
-        "the % of *assessable* metrics passed — metrics we couldn't measure are "
-        "excluded rather than counted as failures (§A13), so `assessed` shows "
-        "how much of the company we could actually see."
-    )
 
     latest_run = conn.execute(
         """
@@ -254,13 +238,8 @@ else:
         ORDER BY started_at DESC LIMIT 1
         """
     ).fetchone()
-
-    if latest_run is None:
-        st.info(
-            "No screen results yet. Run "
-            "`python scripts/run_pipeline.py --from-stage screen` after ingest."
-        )
-    else:
+    ranked = pd.DataFrame()
+    if latest_run is not None:
         run_id = latest_run["run_id"]
         ranked = pd.read_sql_query(
             """
@@ -278,41 +257,6 @@ else:
             params=(run_id,),
         )
         ranked = _filter_by_sector(ranked)
-        passed_n = int(ranked["passed_screen"].sum())
-        st.caption(
-            f"Run `{run_id}` — {passed_n}/{len(ranked)} companies passed "
-            f"(composite_score >= {QUALITY_SCORE_PASS_THRESHOLD})."
-        )
-        st.dataframe(ranked, use_container_width=True, height=500)
-
-        st.markdown("**Why did a company pass or fail?** Pick a ticker for the per-metric breakdown.")
-        pick = st.selectbox("Ticker", ranked["ticker"].tolist()) if not ranked.empty else None
-        if pick:
-            detail = pd.read_sql_query(
-                """
-                SELECT metric, status, ROUND(value, 4) AS value, absolute_floor_pass,
-                       ROUND(sector_percentile, 1) AS sector_percentile,
-                       sector_relative_pass, sector_peer_group
-                FROM quant_scores
-                WHERE run_id = ? AND ticker = ?
-                ORDER BY metric
-                """,
-                conn,
-                params=(run_id, pick),
-            )
-            st.dataframe(detail, use_container_width=True)
-
-    st.divider()
-    st.subheader("Sprint 4 — valuation")
-    st.caption(
-        "Owner Earnings DCF (bear/base/bull, docs/PRD_ADDENDUM.md §A16) plus three "
-        "supporting cross-checks — FCF yield, EV/EBIT, and P/E vs. the company's own "
-        "5-10yr range. **Margin of safety uses the bear scenario** — PRD §1's "
-        "conservative 'low end of the range', never the midpoint. A bear case whose "
-        "intrinsic value is zero or negative shows as its own label, never a number: "
-        "the naive `(low - price) / low` formula sign-flips on a negative low, making "
-        "the least-safe case look the safest (§A16.4 / V3's guard)."
-    )
 
     latest_valuation_run = conn.execute(
         """
@@ -322,13 +266,8 @@ else:
         ORDER BY started_at DESC LIMIT 1
         """
     ).fetchone()
-
-    if latest_valuation_run is None:
-        st.info(
-            "No valuation results yet. Run "
-            "`python scripts/run_pipeline.py --from-stage valuation` after quality."
-        )
-    else:
+    val = pd.DataFrame()
+    if latest_valuation_run is not None:
         v_run_id = latest_valuation_run["run_id"]
         val = pd.read_sql_query(
             """
@@ -343,86 +282,6 @@ else:
         )
         val = _filter_by_sector(val)
 
-        def _bear_case_cell(row) -> str:
-            # NULL intrinsic_value_low means the DCF itself couldn't be
-            # computed for this company (no fiscal year with all of
-            # net_income/D&A/capex — see key_assumptions for the reason);
-            # that's a different, distinguishable case from a *computed*
-            # value that happens to be <= 0 (the guarded sign-flip case).
-            if pd.isna(row["intrinsic_value_low"]):
-                return "no data"
-            if row["intrinsic_value_low"] <= 0:
-                return "bear case: negative — not investable on this basis"
-            return f"{row['margin_of_safety_pct']:+.1%}"
-
-        summary_rows = []
-        for ticker, group in val.groupby("ticker"):
-            name = group["name"].iloc[0]
-            sector = group["sector"].iloc[0]
-            current_price = group["current_price"].iloc[0]
-            dcf = group[group["method"] == "owner_earnings_dcf"].set_index("scenario")
-            fcf_row = group[group["method"] == "fcf_yield"]
-            ev_row = group[group["method"] == "ev_ebit"]
-            pe_row = group[group["method"] == "pe_historical"]
-
-            row = {
-                "ticker": ticker, "name": name, "sector": sector,
-                "current_price": round(current_price, 2) if pd.notna(current_price) else None,
-            }
-            for scenario in ("bear", "base", "bull"):
-                value = dcf.loc[scenario, "intrinsic_value_low"] if scenario in dcf.index else None
-                row[f"dcf_{scenario}"] = round(value, 2) if pd.notna(value) else None
-            row["margin_of_safety"] = (
-                _bear_case_cell(dcf.loc["bear"]) if "bear" in dcf.index else "no data"
-            )
-            if not fcf_row.empty:
-                fcf_ka = json.loads(fcf_row.iloc[0]["key_assumptions"])
-                row["fcf_yield"] = f"{fcf_ka['fcf_yield']:.1%}" if "fcf_yield" in fcf_ka else "unavailable"
-            if not ev_row.empty:
-                ev_ka = json.loads(ev_row.iloc[0]["key_assumptions"])
-                row["ev_ebit"] = f"{ev_ka['ev_ebit_multiple']:.1f}x" if "ev_ebit_multiple" in ev_ka else "unavailable"
-            if not pe_row.empty:
-                pe_ka = json.loads(pe_row.iloc[0]["key_assumptions"])
-                current_pe = pe_ka.get("current")
-                row["pe_current"] = f"{current_pe:.1f}x" if current_pe is not None else "n/a"
-                row["pe_range_years"] = pe_ka.get("years_covered")
-                row["pe_low_confidence"] = pe_ka.get("low_confidence")
-            summary_rows.append(row)
-
-        summary = pd.DataFrame(summary_rows).sort_values("ticker")
-        st.caption(
-            f"Run `{v_run_id}` — {len(summary)} companies valued. "
-            f"P/E range low-confidence (< 5 years of own history): "
-            f"{int(summary['pe_low_confidence'].sum())}/{len(summary)} — "
-            "expected until price_history is backfilled beyond the current ~2yr "
-            "window for tickers ingested before Sprint 4 (see sprint-4.md)."
-        )
-        st.dataframe(summary, use_container_width=True, height=500)
-
-        st.markdown("**Full assumptions for one company** — the trailing owner-earnings "
-                     "series, growth/discount/terminal-growth inputs, and every "
-                     "supporting method's raw figures, not just the summary above.")
-        pick_val = st.selectbox("Ticker ", summary["ticker"].tolist()) if not summary.empty else None
-        if pick_val:
-            detail_rows = val[val["ticker"] == pick_val][["method", "scenario", "key_assumptions"]]
-            for _, r in detail_rows.iterrows():
-                label = r["method"] if r["scenario"] is None else f"{r['method']} ({r['scenario']})"
-                st.markdown(f"`{label}`")
-                st.json(json.loads(r["key_assumptions"]))
-
-    st.divider()
-    st.subheader("Sprint 5 — investment committee")
-    st.caption(
-        "Three persona perspectives (Quality / Bear / Valuation Analyst, PRD §7) "
-        "consolidated into the PRD §8 weighted score. **bear_case_severity is not "
-        "one of the six weighted components** — a 'high' severity caps an "
-        "otherwise-Investigate score to Watch (never an independent Reject, never "
-        "rescues a low score; see `assign_status()`). Every persona statement's "
-        "`[refs: N]` resolves back to its original filing quote below — no "
-        "second-pass entailment check; the reader eyeballs support directly "
-        "(§A19.6)."
-    )
-
     latest_committee_run = conn.execute(
         """
         SELECT run_id FROM pipeline_runs
@@ -431,13 +290,8 @@ else:
         ORDER BY started_at DESC LIMIT 1
         """
     ).fetchone()
-
-    if latest_committee_run is None:
-        st.info(
-            "No committee results yet. Run "
-            "`python scripts/run_pipeline.py --from-stage committee` after valuation."
-        )
-    else:
+    committee = pd.DataFrame()
+    if latest_committee_run is not None:
         c_run_id = latest_committee_run["run_id"]
         committee = pd.read_sql_query(
             """
@@ -458,87 +312,290 @@ else:
             params=(c_run_id,),
         )
         committee = _filter_by_sector(committee)
-        status_counts = committee["status"].value_counts()
-        st.caption(
-            f"Run `{c_run_id}` — {len(committee)} companies. "
-            f"Investigate: {status_counts.get('Investigate', 0)}, "
-            f"Watch: {status_counts.get('Watch', 0)}, "
-            f"Reject: {status_counts.get('Reject', 0)}."
+
+    tab_overview, tab_committee, tab_universe = st.tabs(
+        ["Overview", "Investment Committee", "Universe & Screening"]
+    )
+
+    with tab_overview:
+        screened_n = len(ranked) if latest_run is not None else None
+        passed_n = int(ranked["passed_screen"].sum()) if latest_run is not None else None
+        committee_n = len(committee) if latest_committee_run is not None else None
+        status_counts = committee["status"].value_counts() if latest_committee_run is not None else {}
+
+        cols = st.columns(6)
+        cols[0].metric("Universe", len(coverage))
+        cols[1].metric("Screened", screened_n if screened_n is not None else "—")
+        cols[2].metric("Passed screen", passed_n if passed_n is not None else "—")
+        cols[3].metric("Committee briefs", committee_n if committee_n is not None else "—")
+        cols[4].metric("Investigate", status_counts.get("Investigate", 0) if latest_committee_run is not None else "—")
+        cols[5].metric(
+            "Watch / Reject",
+            f"{status_counts.get('Watch', 0)} / {status_counts.get('Reject', 0)}"
+            if latest_committee_run is not None else "—",
         )
-        st.dataframe(committee, use_container_width=True, height=500)
 
-        st.markdown("**Investment Brief** — one-page view per company (PRD §10).")
-        pick_brief = st.selectbox("Ticker  ", committee["ticker"].tolist()) if not committee.empty else None
-        if pick_brief:
-            verdict_row = conn.execute(
-                "SELECT * FROM committee_verdicts WHERE run_id = ? AND ticker = ?",
-                (c_run_id, pick_brief),
-            ).fetchone()
-            company_row = conn.execute(
-                "SELECT * FROM companies WHERE ticker = ?", (pick_brief,)
-            ).fetchone()
-
-            st.markdown(f"### {pick_brief} — {company_row['name']}")
-            st.caption(
-                f"{company_row['sector'] or 'no GICS sector'} · "
-                f"data confidence: {verdict_row['data_confidence']} · "
-                f"status: **{verdict_row['status']}** ({verdict_row['overall_score']:.1f}/100)"
+        st.subheader("Screen passes by sector")
+        if latest_run is None or ranked.empty:
+            st.info("No screen results yet.")
+        else:
+            sector_breakdown = (
+                ranked.assign(sector=ranked["sector"].fillna("(no sector)"))
+                .groupby("sector")
+                .agg(passed=("passed_screen", "sum"), screened=("ticker", "count"))
             )
-            st.caption(
-                f"Company overview: {company_row['universe']} universe"
-                + (f" · CIK {company_row['cik']}" if company_row["cik"] else "")
+            sector_breakdown["not_passed"] = sector_breakdown["screened"] - sector_breakdown["passed"]
+            sector_breakdown = sector_breakdown.sort_values("passed", ascending=True)
+            st.bar_chart(
+                sector_breakdown[["passed", "not_passed"]],
+                horizontal=True,
             )
 
-            st.markdown("#### Moat evidence")
-            _render_moat_evidence(pick_brief, conn)
+    with tab_universe:
+        st.subheader("Ingest coverage")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Companies in universe", len(coverage))
 
-            st.markdown("#### Financial quality")
-            _render_financial_quality(pick_brief, conn)
+        fundamentals_count = conn.execute(
+            "SELECT COUNT(DISTINCT ticker) AS n FROM fundamentals_annual"
+        ).fetchone()["n"]
+        col2.metric("With fundamentals data", fundamentals_count)
 
-            st.markdown("#### Valuation range & margin of safety")
-            _render_valuation_range(pick_brief, conn)
+        prices_count = conn.execute("SELECT COUNT(DISTINCT ticker) AS n FROM price_history").fetchone()["n"]
+        col3.metric("With price history", prices_count)
 
-            st.markdown("#### Investment thesis")
-            st.caption(
-                "⚠️ Synthesized summary (Quality + Valuation Analyst verdict prose), not "
-                "individually cited — see Bull case / Bear case below for the underlying "
-                "STATEMENTs and their resolvable citations."
+        st.dataframe(coverage, use_container_width=True, height=500)
+
+        thin = coverage[coverage["years_of_fundamentals"] < 3]
+        if not thin.empty:
+            with st.expander(f"{len(thin)} companies with fewer than 3 years of fundamentals"):
+                st.dataframe(thin, use_container_width=True)
+
+        st.divider()
+        st.subheader("Quant screen ranking")
+        st.caption(
+            "Sector-relative screen (docs/PRD_ADDENDUM.md §A2/§A9): each of the 8 "
+            "PRD §4 metrics passes only if it clears both an absolute floor and "
+            "the top-tercile bar within its own GICS sector. composite_score is "
+            "the % of *assessable* metrics passed — metrics we couldn't measure are "
+            "excluded rather than counted as failures (§A13), so `assessed` shows "
+            "how much of the company we could actually see."
+        )
+
+        if latest_run is None:
+            st.info(
+                "No screen results yet. Run "
+                "`python scripts/run_pipeline.py --from-stage screen` after ingest."
             )
-            st.markdown(verdict_row["investment_thesis"] or "_not available_")
-
-            st.markdown("#### Bull case (Quality + Valuation Analyst)")
-            _render_persona_response(verdict_row["quality_analyst_view"] or "", conn, f"{pick_brief}_quality", "quality")
-            _render_persona_response(verdict_row["valuation_analyst_view"] or "", conn, f"{pick_brief}_valuation", "valuation")
-
-            st.markdown("#### Bear case")
-            _render_persona_response(verdict_row["bear_analyst_view"] or "", conn, f"{pick_brief}_bear", "bear")
-
-            st.markdown("#### Key things to monitor")
-            try:
-                monitor_items = json.loads(verdict_row["key_things_to_monitor"] or "[]")
-            except (json.JSONDecodeError, TypeError):
-                monitor_items = []
-            for item in monitor_items:
-                st.markdown(f"- {item}")
-            if not monitor_items:
-                st.markdown("_not available_")
-
-            st.markdown("#### AI conclusion")
+        else:
             st.caption(
-                "⚠️ Synthesized summary (all three persona verdicts), not individually "
-                "cited — same caveat as Investment thesis above."
+                f"Run `{latest_run['run_id']}` — {passed_n}/{len(ranked)} companies passed "
+                f"(composite_score >= {QUALITY_SCORE_PASS_THRESHOLD})."
             )
-            st.markdown(verdict_row["ai_conclusion"] or "_not available_")
+            st.dataframe(ranked, use_container_width=True, height=500)
 
-            with st.expander("Component scores"):
-                st.json({
-                    "business_quality_score": verdict_row["business_quality_score"],
-                    "competitive_moat_score": verdict_row["competitive_moat_score"],
-                    "financial_strength_score": verdict_row["financial_strength_score"],
-                    "management_score": verdict_row["management_score"],
-                    "valuation_score": verdict_row["valuation_score"],
-                    "risk_score": verdict_row["risk_score"],
-                    "bear_case_severity": verdict_row["bear_case_severity"],
-                })
+            st.markdown("**Why did a company pass or fail?** Pick a ticker for the per-metric breakdown.")
+            pick = st.selectbox("Ticker", ranked["ticker"].tolist()) if not ranked.empty else None
+            if pick:
+                detail = pd.read_sql_query(
+                    """
+                    SELECT metric, status, ROUND(value, 4) AS value, absolute_floor_pass,
+                           ROUND(sector_percentile, 1) AS sector_percentile,
+                           sector_relative_pass, sector_peer_group
+                    FROM quant_scores
+                    WHERE run_id = ? AND ticker = ?
+                    ORDER BY metric
+                    """,
+                    conn,
+                    params=(latest_run["run_id"], pick),
+                )
+                st.dataframe(detail, use_container_width=True)
+
+        st.divider()
+        st.subheader("Valuation")
+        st.caption(
+            "Owner Earnings DCF (bear/base/bull, docs/PRD_ADDENDUM.md §A16) plus three "
+            "supporting cross-checks — FCF yield, EV/EBIT, and P/E vs. the company's own "
+            "5-10yr range. **Margin of safety uses the bear scenario** — PRD §1's "
+            "conservative 'low end of the range', never the midpoint. A bear case whose "
+            "intrinsic value is zero or negative shows as its own label, never a number: "
+            "the naive `(low - price) / low` formula sign-flips on a negative low, making "
+            "the least-safe case look the safest (§A16.4 / V3's guard)."
+        )
+
+        if latest_valuation_run is None:
+            st.info(
+                "No valuation results yet. Run "
+                "`python scripts/run_pipeline.py --from-stage valuation` after quality."
+            )
+        else:
+            def _bear_case_cell(row) -> str:
+                # NULL intrinsic_value_low means the DCF itself couldn't be
+                # computed for this company (no fiscal year with all of
+                # net_income/D&A/capex — see key_assumptions for the reason);
+                # that's a different, distinguishable case from a *computed*
+                # value that happens to be <= 0 (the guarded sign-flip case).
+                if pd.isna(row["intrinsic_value_low"]):
+                    return "no data"
+                if row["intrinsic_value_low"] <= 0:
+                    return "bear case: negative — not investable on this basis"
+                return f"{row['margin_of_safety_pct']:+.1%}"
+
+            summary_rows = []
+            for ticker, group in val.groupby("ticker"):
+                name = group["name"].iloc[0]
+                sector = group["sector"].iloc[0]
+                current_price = group["current_price"].iloc[0]
+                dcf = group[group["method"] == "owner_earnings_dcf"].set_index("scenario")
+                fcf_row = group[group["method"] == "fcf_yield"]
+                ev_row = group[group["method"] == "ev_ebit"]
+                pe_row = group[group["method"] == "pe_historical"]
+
+                row = {
+                    "ticker": ticker, "name": name, "sector": sector,
+                    "current_price": round(current_price, 2) if pd.notna(current_price) else None,
+                }
+                for scenario in ("bear", "base", "bull"):
+                    value = dcf.loc[scenario, "intrinsic_value_low"] if scenario in dcf.index else None
+                    row[f"dcf_{scenario}"] = round(value, 2) if pd.notna(value) else None
+                row["margin_of_safety"] = (
+                    _bear_case_cell(dcf.loc["bear"]) if "bear" in dcf.index else "no data"
+                )
+                if not fcf_row.empty:
+                    fcf_ka = json.loads(fcf_row.iloc[0]["key_assumptions"])
+                    row["fcf_yield"] = f"{fcf_ka['fcf_yield']:.1%}" if "fcf_yield" in fcf_ka else "unavailable"
+                if not ev_row.empty:
+                    ev_ka = json.loads(ev_row.iloc[0]["key_assumptions"])
+                    row["ev_ebit"] = f"{ev_ka['ev_ebit_multiple']:.1f}x" if "ev_ebit_multiple" in ev_ka else "unavailable"
+                if not pe_row.empty:
+                    pe_ka = json.loads(pe_row.iloc[0]["key_assumptions"])
+                    current_pe = pe_ka.get("current")
+                    row["pe_current"] = f"{current_pe:.1f}x" if current_pe is not None else "n/a"
+                    row["pe_range_years"] = pe_ka.get("years_covered")
+                    row["pe_low_confidence"] = pe_ka.get("low_confidence")
+                summary_rows.append(row)
+
+            summary = pd.DataFrame(summary_rows).sort_values("ticker")
+            st.caption(
+                f"Run `{v_run_id}` — {len(summary)} companies valued. "
+                f"P/E range low-confidence (< 5 years of own history): "
+                f"{int(summary['pe_low_confidence'].sum())}/{len(summary)} — "
+                "expected until price_history is backfilled beyond the current ~2yr "
+                "window for tickers ingested before Sprint 4 (see sprint-4.md)."
+            )
+            st.dataframe(summary, use_container_width=True, height=500)
+
+            st.markdown("**Full assumptions for one company** — the trailing owner-earnings "
+                         "series, growth/discount/terminal-growth inputs, and every "
+                         "supporting method's raw figures, not just the summary above.")
+            pick_val = st.selectbox("Ticker ", summary["ticker"].tolist()) if not summary.empty else None
+            if pick_val:
+                detail_rows = val[val["ticker"] == pick_val][["method", "scenario", "key_assumptions"]]
+                for _, r in detail_rows.iterrows():
+                    label = r["method"] if r["scenario"] is None else f"{r['method']} ({r['scenario']})"
+                    st.markdown(f"`{label}`")
+                    st.json(json.loads(r["key_assumptions"]))
+
+    with tab_committee:
+        st.subheader("Investment committee")
+        st.caption(
+            "Three persona perspectives (Quality / Bear / Valuation Analyst, PRD §7) "
+            "consolidated into the PRD §8 weighted score. **bear_case_severity is not "
+            "one of the six weighted components** — a 'high' severity caps an "
+            "otherwise-Investigate score to Watch (never an independent Reject, never "
+            "rescues a low score; see `assign_status()`). Every persona statement's "
+            "`[refs: N]` resolves back to its original filing quote below — no "
+            "second-pass entailment check; the reader eyeballs support directly "
+            "(§A19.6)."
+        )
+
+        if latest_committee_run is None:
+            st.info(
+                "No committee results yet. Run "
+                "`python scripts/run_pipeline.py --from-stage committee` after valuation."
+            )
+        else:
+            c_run_id = latest_committee_run["run_id"]
+            st.caption(
+                f"Run `{c_run_id}` — {len(committee)} companies. "
+                f"Investigate: {status_counts.get('Investigate', 0)}, "
+                f"Watch: {status_counts.get('Watch', 0)}, "
+                f"Reject: {status_counts.get('Reject', 0)}."
+            )
+            st.dataframe(committee, use_container_width=True, height=500)
+
+            st.markdown("**Investment Brief** — one-page view per company (PRD §10).")
+            pick_brief = st.selectbox("Ticker  ", committee["ticker"].tolist()) if not committee.empty else None
+            if pick_brief:
+                verdict_row = conn.execute(
+                    "SELECT * FROM committee_verdicts WHERE run_id = ? AND ticker = ?",
+                    (c_run_id, pick_brief),
+                ).fetchone()
+                company_row = conn.execute(
+                    "SELECT * FROM companies WHERE ticker = ?", (pick_brief,)
+                ).fetchone()
+
+                st.markdown(f"### {pick_brief} — {company_row['name']}")
+                st.caption(
+                    f"{company_row['sector'] or 'no GICS sector'} · "
+                    f"data confidence: {verdict_row['data_confidence']} · "
+                    f"status: **{verdict_row['status']}** ({verdict_row['overall_score']:.1f}/100)"
+                )
+                st.caption(
+                    f"Company overview: {company_row['universe']} universe"
+                    + (f" · CIK {company_row['cik']}" if company_row["cik"] else "")
+                )
+
+                st.markdown("#### Moat evidence")
+                _render_moat_evidence(pick_brief, conn)
+
+                st.markdown("#### Financial quality")
+                _render_financial_quality(pick_brief, conn)
+
+                st.markdown("#### Valuation range & margin of safety")
+                _render_valuation_range(pick_brief, conn)
+
+                st.markdown("#### Investment thesis")
+                st.caption(
+                    "⚠️ Synthesized summary (Quality + Valuation Analyst verdict prose), not "
+                    "individually cited — see Bull case / Bear case below for the underlying "
+                    "STATEMENTs and their resolvable citations."
+                )
+                st.markdown(verdict_row["investment_thesis"] or "_not available_")
+
+                st.markdown("#### Bull case (Quality + Valuation Analyst)")
+                _render_persona_response(verdict_row["quality_analyst_view"] or "", conn, f"{pick_brief}_quality", "quality")
+                _render_persona_response(verdict_row["valuation_analyst_view"] or "", conn, f"{pick_brief}_valuation", "valuation")
+
+                st.markdown("#### Bear case")
+                _render_persona_response(verdict_row["bear_analyst_view"] or "", conn, f"{pick_brief}_bear", "bear")
+
+                st.markdown("#### Key things to monitor")
+                try:
+                    monitor_items = json.loads(verdict_row["key_things_to_monitor"] or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    monitor_items = []
+                for item in monitor_items:
+                    st.markdown(f"- {item}")
+                if not monitor_items:
+                    st.markdown("_not available_")
+
+                st.markdown("#### AI conclusion")
+                st.caption(
+                    "⚠️ Synthesized summary (all three persona verdicts), not individually "
+                    "cited — same caveat as Investment thesis above."
+                )
+                st.markdown(verdict_row["ai_conclusion"] or "_not available_")
+
+                with st.expander("Component scores"):
+                    st.json({
+                        "business_quality_score": verdict_row["business_quality_score"],
+                        "competitive_moat_score": verdict_row["competitive_moat_score"],
+                        "financial_strength_score": verdict_row["financial_strength_score"],
+                        "management_score": verdict_row["management_score"],
+                        "valuation_score": verdict_row["valuation_score"],
+                        "risk_score": verdict_row["risk_score"],
+                        "bear_case_severity": verdict_row["bear_case_severity"],
+                    })
 
 conn.close()

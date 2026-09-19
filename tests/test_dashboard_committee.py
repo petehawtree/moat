@@ -248,6 +248,28 @@ def test_dashboard_moat_evidence_follows_cache_hit_chain(dashboard_db):
     assert "Deep, durable switching costs." in md_text
 
 
+def test_dashboard_escapes_dollar_amounts_so_streamlit_does_not_render_them_as_latex(dashboard_db):
+    """Streamlit renders anything between a pair of unescaped `$` as LaTeX —
+    found in a real committee brief where a statement mentioning two dollar
+    figures ("$22.5B ... $25.2B") rendered as garbled math instead of text.
+    A single `$` (as in the currency f-strings elsewhere on the page) is
+    unaffected; this is specifically about AI free text with two or more."""
+    _seed_committee_verdict(
+        dashboard_db,
+        quality_view=(
+            "## VERDICT\nGood.\n\n## STATEMENTS\n"
+            "STATEMENT: Backlog grew from $22.5B to $25.2B. [refs: 1]\n"
+        ),
+        bear_view="## VERDICT\nOk.\n\n## STATEMENTS\nSTATEMENT: Fine. [refs: 1]\n",
+        valuation_view="## VERDICT\nFair.\n\n## STATEMENTS\nSTATEMENT: FCF yield is 8%.\n",
+    )
+    at = _run_app_against(dashboard_db)
+    assert not at.exception
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "\\$22.5B" in md_text
+    assert "\\$25.2B" in md_text
+
+
 def test_dashboard_flags_uncited_quality_bear_statements_but_not_valuation(dashboard_db):
     """The judge's finding: an unreferenced Quality/Bear STATEMENT rendered
     identically to a cited one, with no visible signal it lacks a filing

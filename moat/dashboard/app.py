@@ -22,6 +22,18 @@ from moat.committee.parser import extract_statements, extract_verdict
 from moat.config import QUALITY_SCORE_PASS_THRESHOLD
 from moat.db.connection import get_connection
 
+
+def _md(text: str) -> str:
+    """Escape `$` before handing AI-generated free text to st.markdown.
+
+    Streamlit renders anything between a pair of `$` as LaTeX (KaTeX). AI
+    prose routinely mentions two dollar figures in one statement (e.g. "$22.5B
+    ... to $25.2B"), which Streamlit then silently parses as a math span
+    instead of displaying the text — found while reviewing a real committee
+    brief, not something a test over parsed claim_text/refs would catch.
+    """
+    return text.replace("$", "\\$")
+
 st.set_page_config(page_title="Project Moat", layout="wide")
 st.title("Project Moat")
 st.warning(
@@ -57,16 +69,16 @@ def _render_persona_response(raw_text: str, conn, key_prefix: str, persona: str)
     """
     verdict = extract_verdict(raw_text)
     if verdict:
-        st.markdown(verdict)
+        st.markdown(_md(verdict))
     for i, stmt in enumerate(extract_statements(raw_text)):
-        st.markdown(f"- {stmt.text}")
+        st.markdown(f"- {_md(stmt.text)}")
         if stmt.refs:
             with st.expander(f"↳ {key_prefix} statement {i + 1}: {len(stmt.refs)} supporting citation(s)", expanded=False):
                 for claim_id in stmt.refs:
                     cite = _resolve_claim_citation(claim_id, conn)
                     if cite:
                         st.caption(f"[{claim_id}] {cite['accession_number']} · {cite['section_id']}")
-                        st.markdown(f"> {cite['quote']}")
+                        st.markdown(f"> {_md(cite['quote'])}")
                     else:
                         st.caption(f"[{claim_id}] — no stored citation found")
         elif persona != "valuation":
@@ -108,14 +120,14 @@ def _render_moat_evidence(ticker: str, conn) -> None:
         return
     for c in claims:
         if c["assertion_status"] == "insufficient_evidence":
-            st.markdown(f"- _insufficient evidence:_ {c['claim_text']}")
+            st.markdown(f"- _insufficient evidence:_ {_md(c['claim_text'])}")
             continue
-        st.markdown(f"- {c['claim_text']}")
+        st.markdown(f"- {_md(c['claim_text'])}")
         cite = _resolve_claim_citation(c["claim_id"], conn)
         if cite:
             with st.expander(f"↳ [{c['claim_id']}] source quote", expanded=False):
                 st.caption(f"{cite['accession_number']} · {cite['section_id']}")
-                st.markdown(f"> {cite['quote']}")
+                st.markdown(f"> {_md(cite['quote'])}")
 
 
 def _render_financial_quality(ticker: str, conn) -> None:
@@ -188,11 +200,10 @@ if company_count == 0:
         "to load the universe and ingest fundamentals/prices."
     )
 else:
-    latest_data_date = conn.execute(
-        "SELECT MAX(completed_at) AS d FROM pipeline_runs WHERE status != 'failed'"
-    ).fetchone()["d"]
-    if latest_data_date:
-        st.caption(f"Data refreshed: {datetime.fromisoformat(latest_data_date).strftime('%-d %b %Y')}")
+    latest_price_date = conn.execute("SELECT MAX(date) AS d FROM price_history").fetchone()["d"]
+    if latest_price_date:
+        d = datetime.fromisoformat(latest_price_date)
+        st.caption(f"Data refreshed: {d.day} {d.strftime('%b %Y')}")
 
     sectors_raw = pd.read_sql_query(
         "SELECT DISTINCT sector FROM companies WHERE is_active = 1 ORDER BY sector", conn
@@ -313,16 +324,23 @@ else:
         )
         committee = _filter_by_sector(committee)
 
+    # Cross-tab metrics computed once here (not inside a `with tab_*:` block) —
+    # tab_committee's caption and tab_overview's metric row both read these, and
+    # Streamlit executes every tab body top to bottom regardless of display
+    # order, so a value assigned inside one tab's block is still visible in a
+    # later one *only* by accident of code order. Keeping them here means
+    # reordering the `with` blocks below (e.g. to match display order) can
+    # never raise a NameError.
+    screened_n = len(ranked) if latest_run is not None else None
+    passed_n = int(ranked["passed_screen"].sum()) if latest_run is not None else None
+    committee_n = len(committee) if latest_committee_run is not None else None
+    status_counts = committee["status"].value_counts() if latest_committee_run is not None else {}
+
     tab_overview, tab_committee, tab_universe = st.tabs(
         ["Overview", "Investment Committee", "Universe & Screening"]
     )
 
     with tab_overview:
-        screened_n = len(ranked) if latest_run is not None else None
-        passed_n = int(ranked["passed_screen"].sum()) if latest_run is not None else None
-        committee_n = len(committee) if latest_committee_run is not None else None
-        status_counts = committee["status"].value_counts() if latest_committee_run is not None else {}
-
         cols = st.columns(6)
         cols[0].metric("Universe", len(coverage))
         cols[1].metric("Screened", screened_n if screened_n is not None else "—")
@@ -335,7 +353,15 @@ else:
             if latest_committee_run is not None else "—",
         )
 
-        st.subheader("Screen passes by sector")
+        if latest_committee_run is not None:
+            st.caption(
+                f"Committee briefs are a deliberately partial pilot ({committee_n}/{passed_n} "
+                "companies that passed the screen) — not every passing company has been run "
+                "through yet, and `assign_status()`'s 70/50 score thresholds are pilot-then-lock "
+                "starting values, not yet validated against real output. See sprint-5-plan.md."
+            )
+
+        st.subheader("Screen pass rate by sector")
         if latest_run is None or ranked.empty:
             st.info("No screen results yet.")
         else:
@@ -344,12 +370,18 @@ else:
                 .groupby("sector")
                 .agg(passed=("passed_screen", "sum"), screened=("ticker", "count"))
             )
-            sector_breakdown["not_passed"] = sector_breakdown["screened"] - sector_breakdown["passed"]
-            sector_breakdown = sector_breakdown.sort_values("passed", ascending=True)
-            st.bar_chart(
-                sector_breakdown[["passed", "not_passed"]],
-                horizontal=True,
-            )
+            # Passed/screened counts alone read as sector size, not pass rate —
+            # Technology dominating a stacked passed-vs-not_passed chart is an
+            # artifact of how many Technology companies were screened, not of
+            # how well the sector passes. Pass rate isolates the latter.
+            sector_breakdown["pass_rate"] = sector_breakdown["passed"] / sector_breakdown["screened"]
+            sector_breakdown = sector_breakdown.sort_values("pass_rate", ascending=True)
+            st.bar_chart(sector_breakdown[["pass_rate"]], horizontal=True)
+            with st.expander("Passed / screened counts per sector"):
+                st.dataframe(
+                    sector_breakdown[["passed", "screened"]].sort_values("screened", ascending=False),
+                    use_container_width=True,
+                )
 
     with tab_universe:
         st.subheader("Ingest coverage")
@@ -561,7 +593,7 @@ else:
                     "individually cited — see Bull case / Bear case below for the underlying "
                     "STATEMENTs and their resolvable citations."
                 )
-                st.markdown(verdict_row["investment_thesis"] or "_not available_")
+                st.markdown(_md(verdict_row["investment_thesis"]) if verdict_row["investment_thesis"] else "_not available_")
 
                 st.markdown("#### Bull case (Quality + Valuation Analyst)")
                 _render_persona_response(verdict_row["quality_analyst_view"] or "", conn, f"{pick_brief}_quality", "quality")
@@ -576,7 +608,7 @@ else:
                 except (json.JSONDecodeError, TypeError):
                     monitor_items = []
                 for item in monitor_items:
-                    st.markdown(f"- {item}")
+                    st.markdown(f"- {_md(item)}")
                 if not monitor_items:
                     st.markdown("_not available_")
 
@@ -585,7 +617,7 @@ else:
                     "⚠️ Synthesized summary (all three persona verdicts), not individually "
                     "cited — same caveat as Investment thesis above."
                 )
-                st.markdown(verdict_row["ai_conclusion"] or "_not available_")
+                st.markdown(_md(verdict_row["ai_conclusion"]) if verdict_row["ai_conclusion"] else "_not available_")
 
                 with st.expander("Component scores"):
                     st.json({

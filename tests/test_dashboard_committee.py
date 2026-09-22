@@ -285,3 +285,69 @@ def test_dashboard_flags_uncited_quality_bear_statements_but_not_valuation(dashb
     assert not at.exception
     caption_text = "\n".join(c.value for c in at.caption)
     assert caption_text.count("no citation for this statement") == 2  # quality + bear, not valuation
+
+
+def test_dashboard_brief_links_the_cited_sec_filing(dashboard_db):
+    """The brief and the committee table both link the SEC filing the
+    analysis cites — derived from the citations, not 'latest 10-K', so a
+    newer ingested-but-unanalysed filing must not be linked instead."""
+    _seed_committee_verdict(
+        dashboard_db,
+        quality_view="## VERDICT\nGood.\n\n## STATEMENTS\nSTATEMENT: Revenue grew. [refs: 1]\n",
+        bear_view="## VERDICT\nOk.\n\n## STATEMENTS\nSTATEMENT: Fine. [refs: 1]\n",
+        valuation_view="## VERDICT\nFair.\n\n## STATEMENTS\nSTATEMENT: FCF yield is 8%.\n",
+    )
+    conn = get_connection(db_path=dashboard_db)
+    conn.execute(
+        "INSERT INTO filings (accession_number, ticker, form_type, filing_date, document_url, retrieved_at) "
+        "VALUES ('0000-2', 'TEST', '10-K', '2026-01-01', 'http://newer-uncited', ?)", (NOW,),
+    )
+    conn.commit()
+    conn.close()
+
+    at = _run_app_against(dashboard_db)
+    assert not at.exception
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "[10-K filed 2025-01-01 (0000-1) ↗](http://x)" in md_text
+    assert "newer-uncited" not in md_text
+    committee_df = next(df.value for df in at.dataframe if "source_filing" in df.value.columns)
+    assert committee_df.loc[0, "source_filing"] == "http://x"
+    assert committee_df.loc[0, "brief"].endswith("?brief=TEST")
+
+
+def test_dashboard_brief_query_param_selects_that_ticker(dashboard_db):
+    _seed_committee_verdict(
+        dashboard_db,
+        quality_view="## VERDICT\nGood.\n\n## STATEMENTS\nSTATEMENT: Revenue grew. [refs: 1]\n",
+        bear_view="## VERDICT\nOk.\n\n## STATEMENTS\nSTATEMENT: Fine. [refs: 1]\n",
+        valuation_view="## VERDICT\nFair.\n\n## STATEMENTS\nSTATEMENT: FCF yield is 8%.\n",
+    )
+    conn = get_connection(db_path=dashboard_db)
+    conn.execute(
+        "INSERT INTO companies (ticker, name, sector, universe, is_active, added_date) "
+        "VALUES ('OTHR', 'Other Co', 'Technology', 'sp500', 1, ?)", (NOW,),
+    )
+    # Higher score, so OTHR sorts first and would be the default selection.
+    conn.execute(
+        "INSERT INTO committee_verdicts (run_id, ticker, overall_score, status, data_confidence, created_at) "
+        "VALUES ('crun', 'OTHR', 95, 'Investigate', 'high', ?)", (NOW,),
+    )
+    conn.commit()
+    conn.close()
+
+    from streamlit.testing.v1 import AppTest
+
+    real_connect = sqlite3.connect
+
+    def fake_connect(path, *a, **kw):
+        if str(path).endswith("data/moat.db"):
+            path = str(dashboard_db)
+        return real_connect(path, *a, **kw)
+
+    with patch("sqlite3.connect", side_effect=fake_connect):
+        at = AppTest.from_file(APP_PATH, default_timeout=60)
+        at.query_params["brief"] = "TEST"
+        at.run()
+    assert not at.exception
+    assert at.selectbox(key="brief_ticker").value == "TEST"
+    assert "TEST — Test Co" in "\n".join(m.value for m in at.markdown)

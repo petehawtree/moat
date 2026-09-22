@@ -46,10 +46,65 @@ def _resolve_claim_citation(claim_id: int, conn) -> dict | None:
     entailment check — the reader eyeballs support/non-support directly).
     """
     row = conn.execute(
-        "SELECT quote, accession_number, section_id FROM citations WHERE claim_id = ? LIMIT 1",
+        "SELECT ci.quote, ci.accession_number, ci.section_id, f.document_url "
+        "FROM citations ci LEFT JOIN filings f ON f.accession_number = ci.accession_number "
+        "WHERE ci.claim_id = ? LIMIT 1",
         (claim_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def _cite_label(cite: dict) -> str:
+    """'accession · section' caption, with the accession linked to its SEC
+    EDGAR filing index page when the filing row carries a URL."""
+    acc = cite["accession_number"]
+    if cite.get("document_url"):
+        acc = f"[{acc}]({cite['document_url']})"
+    return f"{acc} · {cite['section_id']}"
+
+
+def _brief_url(ticker: str) -> str:
+    """Shareable deep link to one ticker's Investment Brief. Absolute when
+    Streamlit knows the page URL (a real browser session), relative
+    otherwise (AppTest), which a browser resolves against the current page
+    anyway."""
+    base = (st.context.url or "").split("?")[0]
+    return f"{base}?brief={ticker}"
+
+
+def _source_filings(ticker: str, conn) -> list[dict]:
+    """The SEC filing(s) the brief is actually grounded on — every distinct
+    accession cited by this ticker's current ai_analysis claims (following
+    the same cache-hit run_id chain as _render_moat_evidence), newest
+    first. Derived from the citations rather than "latest 10-K in
+    `filings`", because a newer 10-K can be ingested without the analysis
+    being re-run against it.
+    """
+    from moat.committee.committee import _resolve_claims_run_id
+
+    rows = conn.execute(
+        "SELECT analysis_type, run_id FROM ai_analysis WHERE ticker = ? AND is_current = 1",
+        (ticker,),
+    ).fetchall()
+    accessions: set[str] = set()
+    for r in rows:
+        claims_run_id = _resolve_claims_run_id(ticker, r["analysis_type"], r["run_id"], conn)
+        accessions.update(
+            a["accession_number"] for a in conn.execute(
+                "SELECT DISTINCT ci.accession_number FROM citations ci "
+                "JOIN analysis_claims ac ON ac.claim_id = ci.claim_id "
+                "WHERE ac.run_id = ? AND ac.ticker = ? AND ac.analysis_type = ?",
+                (claims_run_id, ticker, r["analysis_type"]),
+            )
+        )
+    if not accessions:
+        return []
+    placeholders = ",".join("?" * len(accessions))
+    return [dict(f) for f in conn.execute(
+        f"SELECT accession_number, form_type, filing_date, document_url FROM filings "
+        f"WHERE accession_number IN ({placeholders}) ORDER BY filing_date DESC",
+        tuple(accessions),
+    )]
 
 
 def _render_persona_response(raw_text: str, conn, key_prefix: str, persona: str) -> None:
@@ -77,7 +132,7 @@ def _render_persona_response(raw_text: str, conn, key_prefix: str, persona: str)
                 for claim_id in stmt.refs:
                     cite = _resolve_claim_citation(claim_id, conn)
                     if cite:
-                        st.caption(f"[{claim_id}] {cite['accession_number']} · {cite['section_id']}")
+                        st.caption(f"[{claim_id}] {_cite_label(cite)}")
                         st.markdown(f"> {_md(cite['quote'])}")
                     else:
                         st.caption(f"[{claim_id}] — no stored citation found")
@@ -126,7 +181,7 @@ def _render_moat_evidence(ticker: str, conn) -> None:
         cite = _resolve_claim_citation(c["claim_id"], conn)
         if cite:
             with st.expander(f"↳ [{c['claim_id']}] source quote", expanded=False):
-                st.caption(f"{cite['accession_number']} · {cite['section_id']}")
+                st.caption(_cite_label(cite))
                 st.markdown(f"> {_md(cite['quote'])}")
 
 
@@ -323,6 +378,20 @@ else:
             params=(c_run_id,),
         )
         committee = _filter_by_sector(committee)
+        # Link columns rendered via st.column_config.LinkColumn below: the
+        # brief deep link (?brief=TICKER, read back further down) and the
+        # SEC filing the analysis was grounded on.
+        committee.insert(2, "brief", committee["ticker"].map(_brief_url))
+        committee.insert(3, "source_filing", [
+            (f[0]["document_url"] if (f := _source_filings(t, conn)) else None)
+            for t in committee["ticker"]
+        ])
+
+    # ?brief=TICKER deep link: open straight onto the Investment Committee
+    # tab with that ticker's brief selected.
+    brief_param = st.query_params.get("brief")
+    if brief_param not in (committee["ticker"].tolist() if not committee.empty else []):
+        brief_param = None
 
     # Cross-tab metrics computed once here (not inside a `with tab_*:` block) —
     # tab_committee's caption and tab_overview's metric row both read these, and
@@ -337,7 +406,8 @@ else:
     status_counts = committee["status"].value_counts() if latest_committee_run is not None else {}
 
     tab_overview, tab_committee, tab_universe = st.tabs(
-        ["Overview", "Investment Committee", "Universe & Screening"]
+        ["Overview", "Investment Committee", "Universe & Screening"],
+        default="Investment Committee" if brief_param else None,
     )
 
     with tab_overview:
@@ -554,10 +624,28 @@ else:
                 f"Watch: {status_counts.get('Watch', 0)}, "
                 f"Reject: {status_counts.get('Reject', 0)}."
             )
-            st.dataframe(committee, use_container_width=True, height=500)
+            st.dataframe(
+                committee, use_container_width=True, height=500,
+                column_config={
+                    "brief": st.column_config.LinkColumn("brief", display_text="Open brief ↗"),
+                    "source_filing": st.column_config.LinkColumn(
+                        "source filing", display_text="SEC filing ↗",
+                        help="The SEC filing the AI analysis and committee cite (EDGAR filing index)",
+                    ),
+                },
+            )
 
             st.markdown("**Investment Brief** — one-page view per company (PRD §10).")
-            pick_brief = st.selectbox("Ticker  ", committee["ticker"].tolist()) if not committee.empty else None
+            brief_options = committee["ticker"].tolist()
+
+            def _sync_brief_param() -> None:
+                st.query_params["brief"] = st.session_state["brief_ticker"]
+
+            pick_brief = st.selectbox(
+                "Ticker  ", brief_options,
+                index=brief_options.index(brief_param) if brief_param else 0,
+                key="brief_ticker", on_change=_sync_brief_param,
+            ) if not committee.empty else None
             if pick_brief:
                 verdict_row = conn.execute(
                     "SELECT * FROM committee_verdicts WHERE run_id = ? AND ticker = ?",
@@ -577,6 +665,15 @@ else:
                     f"Company overview: {company_row['universe']} universe"
                     + (f" · CIK {company_row['cik']}" if company_row["cik"] else "")
                 )
+                source_filings = _source_filings(pick_brief, conn)
+                if source_filings:
+                    st.markdown("**Source filing:** " + " · ".join(
+                        f"[{f['form_type']} filed {f['filing_date']} ({f['accession_number']}) ↗]({f['document_url']})"
+                        for f in source_filings
+                    ))
+                else:
+                    st.caption("Source filing: none cited")
+                st.markdown(f"[Link to this brief ↗]({_brief_url(pick_brief)})")
 
                 st.markdown("#### Moat evidence")
                 _render_moat_evidence(pick_brief, conn)

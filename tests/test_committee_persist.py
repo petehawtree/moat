@@ -555,3 +555,32 @@ def test_run_committee_is_idempotent_per_run_id(committee_db):
         "SELECT COUNT(*) AS n FROM committee_verdicts WHERE run_id = 'committee_run' AND ticker = 'TEST'"
     ).fetchone()["n"]
     assert count == 1
+
+
+def test_run_committee_records_the_input_runs_it_was_scored_on(committee_db):
+    """Judge finding: verdicts persisted no input provenance, so the brief
+    re-queried the latest runs and could show evidence the verdict never
+    saw. Both the fresh and the cache-hit path must record it — the
+    cache-hit row records *its own* call's inputs (identical content by
+    bundle key), not the cached row's."""
+    conn, claim_ids = committee_db
+    client = MagicMock()
+    client.messages.stream.side_effect = [
+        _stream_cm(_fake_message(t)) for t in _canned_responses(claim_ids)
+    ]
+    run_committee("TEST", "committee_run", "valuation_run", "quality_run", conn, client)
+
+    row = conn.execute("SELECT * FROM committee_verdicts WHERE run_id = 'committee_run'").fetchone()
+    assert row["valuation_run_id"] == "valuation_run"
+    assert row["quality_run_id"] == "quality_run"
+    assert json.loads(row["ai_claims_run_ids"]) == {
+        "business_quality": "ai_run", "moat": "ai_run", "management": "ai_run", "risk": "ai_run",
+    }
+
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_2', ?, 'complete')", (NOW,))
+    result = run_committee("TEST", "committee_run_2", "valuation_run", "quality_run", conn, client)
+    assert result["outcome"] == "cache_hit"
+    hit = conn.execute("SELECT * FROM committee_verdicts WHERE run_id = 'committee_run_2'").fetchone()
+    assert hit["valuation_run_id"] == "valuation_run"
+    assert hit["quality_run_id"] == "quality_run"
+    assert json.loads(hit["ai_claims_run_ids"])["moat"] == "ai_run"

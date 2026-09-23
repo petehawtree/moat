@@ -72,29 +72,86 @@ def _brief_url(ticker: str) -> str:
     return f"{base}?brief={ticker}"
 
 
-def _source_filings(ticker: str, conn) -> list[dict]:
-    """The SEC filing(s) the brief is actually grounded on — every distinct
-    accession cited by this ticker's current ai_analysis claims (following
-    the same cache-hit run_id chain as _render_moat_evidence), newest
-    first. Derived from the citations rather than "latest 10-K in
-    `filings`", because a newer 10-K can be ingested without the analysis
-    being re-run against it.
-    """
+def _current_claims_run_ids(ticker: str, conn) -> dict[str, str]:
+    """{analysis_type: run_id holding its analysis_claims} for the current
+    ai_analysis rows, following the cache-hit reused_from_run_id chain
+    (committee.py's _resolve_claims_run_id docstring)."""
     from moat.committee.committee import _resolve_claims_run_id
 
     rows = conn.execute(
         "SELECT analysis_type, run_id FROM ai_analysis WHERE ticker = ? AND is_current = 1",
         (ticker,),
     ).fetchall()
+    return {
+        r["analysis_type"]: _resolve_claims_run_id(ticker, r["analysis_type"], r["run_id"], conn)
+        for r in rows
+    }
+
+
+def _latest_run_for(table: str, ticker: str, conn) -> str | None:
+    """Newest non-failed run with rows for this ticker in `table`
+    (valuations or quant_scores)."""
+    row = conn.execute(
+        f"SELECT run_id FROM pipeline_runs WHERE run_id IN "
+        f"(SELECT DISTINCT run_id FROM {table} WHERE ticker = ?) "
+        "AND status != 'failed' ORDER BY started_at DESC LIMIT 1",
+        (ticker,),
+    ).fetchone()
+    return row["run_id"] if row else None
+
+
+def _verdict_inputs(ticker: str, verdict_row, conn) -> dict:
+    """The upstream runs a committee verdict was scored on, so every brief
+    section renders the same evidence the verdict saw — not whatever ran
+    most recently (judge finding: a brief could pair a verdict with newer,
+    unscored valuation/quant/AI evidence).
+
+    Verdicts persisted before committee_verdicts recorded its inputs have
+    NULL provenance; those fall back to the latest runs with
+    `recorded=False`, which the brief states explicitly.
+    """
+    latest = {
+        "valuation_run_id": _latest_run_for("valuations", ticker, conn),
+        "quality_run_id": _latest_run_for("quant_scores", ticker, conn),
+        "ai_claims_run_ids": _current_claims_run_ids(ticker, conn),
+    }
+    if verdict_row["valuation_run_id"] is None:
+        return {**latest, "recorded": False, "newer": []}
+    inputs = {
+        "valuation_run_id": verdict_row["valuation_run_id"],
+        "quality_run_id": verdict_row["quality_run_id"],
+        "ai_claims_run_ids": json.loads(verdict_row["ai_claims_run_ids"] or "{}"),
+        "recorded": True,
+    }
+    newer = []
+    if latest["valuation_run_id"] not in (None, inputs["valuation_run_id"]):
+        newer.append(f"valuation (run `{latest['valuation_run_id']}`)")
+    if latest["quality_run_id"] not in (None, inputs["quality_run_id"]):
+        newer.append(f"quant screen (run `{latest['quality_run_id']}`)")
+    changed_ai = sorted(
+        t for t, r in latest["ai_claims_run_ids"].items() if inputs["ai_claims_run_ids"].get(t) != r
+    )
+    if changed_ai:
+        newer.append(f"AI analysis ({', '.join(changed_ai)})")
+    inputs["newer"] = newer
+    return inputs
+
+
+def _source_filings(ticker: str, claims_run_ids: dict[str, str], conn) -> list[dict]:
+    """The SEC filing(s) the brief is actually grounded on — every distinct
+    accession cited by the given analysis claims runs, newest first.
+    Derived from the citations rather than "latest 10-K in `filings`",
+    because a newer 10-K can be ingested without the analysis being
+    re-run against it.
+    """
     accessions: set[str] = set()
-    for r in rows:
-        claims_run_id = _resolve_claims_run_id(ticker, r["analysis_type"], r["run_id"], conn)
+    for analysis_type, claims_run_id in claims_run_ids.items():
         accessions.update(
             a["accession_number"] for a in conn.execute(
                 "SELECT DISTINCT ci.accession_number FROM citations ci "
                 "JOIN analysis_claims ac ON ac.claim_id = ci.claim_id "
                 "WHERE ac.run_id = ? AND ac.ticker = ? AND ac.analysis_type = ?",
-                (claims_run_id, ticker, r["analysis_type"]),
+                (claims_run_id, ticker, analysis_type),
             )
         )
     if not accessions:
@@ -140,31 +197,21 @@ def _render_persona_response(raw_text: str, conn, key_prefix: str, persona: str)
             st.caption("⚠️ no citation for this statement — analyst synthesis, not a filing-grounded claim")
 
 
-def _render_moat_evidence(ticker: str, conn) -> None:
-    """PRD §10's 'moat evidence' section — the current ai_analysis 'moat'
-    claims and their citations directly, distinct from the free-text bull
-    case prose above (which synthesizes moat alongside everything else).
+def _render_moat_evidence(ticker: str, claims_run_id: str | None, conn) -> None:
+    """PRD §10's 'moat evidence' section — the ai_analysis 'moat' claims
+    and their citations directly, distinct from the free-text bull case
+    prose above (which synthesizes moat alongside everything else).
     Added after judge review of the first real pilot run found this PRD
     §10 field had no dedicated section at all.
 
-    Follows the same cache-hit run_id chain committee.py's
-    _resolve_claims_run_id already resolves for the committee's own
-    context-gathering — found missing here specifically by a later judge
-    round: a cache-hit ai_analysis row's own run_id has zero claims (they
-    stay under the run that originally parsed them), so querying by it
-    directly showed real, current moat evidence as "not available" for
-    every cache-hit-refreshed ticker (AAPL included).
+    `claims_run_id` is the run actually holding the claims (already
+    resolved through the cache-hit chain by _verdict_inputs) — querying a
+    cache-hit ai_analysis row's own run_id finds zero claims, which showed
+    real moat evidence as "not available" for AAPL and others.
     """
-    from moat.committee.committee import _resolve_claims_run_id
-
-    row = conn.execute(
-        "SELECT run_id FROM ai_analysis WHERE ticker = ? AND analysis_type = 'moat' AND is_current = 1",
-        (ticker,),
-    ).fetchone()
-    if row is None:
+    if claims_run_id is None:
         st.markdown("_not available_")
         return
-    claims_run_id = _resolve_claims_run_id(ticker, "moat", row["run_id"], conn)
     claims = conn.execute(
         "SELECT claim_id, claim_text, assertion_status FROM analysis_claims "
         "WHERE run_id = ? AND ticker = ? AND analysis_type = 'moat' ORDER BY claim_order",
@@ -185,22 +232,18 @@ def _render_moat_evidence(ticker: str, conn) -> None:
                 st.markdown(f"> {_md(cite['quote'])}")
 
 
-def _render_financial_quality(ticker: str, conn) -> None:
-    """PRD §10's 'financial quality' section — the latest quant screen
-    metrics for this company directly (moat/screen/quant_screen.py),
+def _render_financial_quality(ticker: str, quality_run_id: str | None, conn) -> None:
+    """PRD §10's 'financial quality' section — the quant screen metrics
+    from the run the verdict was scored on (moat/screen/quant_screen.py),
     same data as the Sprint 2 section's drill-down, pulled into the brief
     itself rather than requiring a second lookup."""
-    run = conn.execute(
-        "SELECT run_id FROM pipeline_runs WHERE run_id IN (SELECT DISTINCT run_id FROM quant_scores) "
-        "AND status != 'failed' ORDER BY started_at DESC LIMIT 1"
-    ).fetchone()
-    if run is None:
+    if quality_run_id is None:
         st.markdown("_not available_")
         return
     df = pd.read_sql_query(
         "SELECT metric, ROUND(value, 4) AS value, status, ROUND(sector_percentile, 1) AS sector_percentile "
         "FROM quant_scores WHERE run_id = ? AND ticker = ? ORDER BY metric",
-        conn, params=(run["run_id"], ticker),
+        conn, params=(quality_run_id, ticker),
     )
     if df.empty:
         st.markdown("_not available_")
@@ -208,22 +251,19 @@ def _render_financial_quality(ticker: str, conn) -> None:
     st.dataframe(df, use_container_width=True, hide_index=True)
 
 
-def _render_valuation_range(ticker: str, conn) -> None:
+def _render_valuation_range(ticker: str, valuation_run_id: str | None, conn) -> None:
     """PRD §10's 'valuation range' and 'margin of safety' sections — the
-    DCF bear/base/bull range and current price directly from `valuations`
+    DCF bear/base/bull range and current price from the `valuations` run
+    the verdict was scored on
     (moat/valuation/engine.py), same sign-guard rendering as the Sprint 4
     section, pulled into the brief itself."""
-    run = conn.execute(
-        "SELECT run_id FROM pipeline_runs WHERE run_id IN (SELECT DISTINCT run_id FROM valuations) "
-        "AND status != 'failed' ORDER BY started_at DESC LIMIT 1"
-    ).fetchone()
-    if run is None:
+    if valuation_run_id is None:
         st.markdown("_not available_")
         return
     rows = conn.execute(
         "SELECT method, scenario, intrinsic_value_low, current_price, margin_of_safety_pct "
         "FROM valuations WHERE run_id = ? AND ticker = ? AND method = 'owner_earnings_dcf'",
-        (run["run_id"], ticker),
+        (valuation_run_id, ticker),
     ).fetchall()
     by_scenario = {r["scenario"]: r for r in rows}
     if "bear" not in by_scenario:
@@ -369,7 +409,7 @@ else:
                    ROUND(cv.management_score, 1) AS management,
                    ROUND(cv.valuation_score, 1) AS valuation,
                    ROUND(cv.risk_score, 1) AS risk,
-                   cv.bear_case_severity, cv.data_confidence
+                   cv.bear_case_severity, cv.data_confidence, cv.ai_claims_run_ids
             FROM committee_verdicts cv JOIN companies c ON c.ticker = cv.ticker
             WHERE cv.run_id = ?
             ORDER BY cv.overall_score DESC
@@ -382,9 +422,13 @@ else:
         # brief deep link (?brief=TICKER, read back further down) and the
         # SEC filing the analysis was grounded on.
         committee.insert(2, "brief", committee["ticker"].map(_brief_url))
+        # The filing this verdict's claims cite — from its recorded claims
+        # runs, falling back to the current ones for pre-provenance verdicts.
         committee.insert(3, "source_filing", [
-            (f[0]["document_url"] if (f := _source_filings(t, conn)) else None)
-            for t in committee["ticker"]
+            (f[0]["document_url"] if (f := _source_filings(
+                t, json.loads(ids) if ids else _current_claims_run_ids(t, conn), conn,
+            )) else None)
+            for t, ids in zip(committee["ticker"], committee.pop("ai_claims_run_ids"))
         ])
 
     # ?brief=TICKER deep link: open straight onto the Investment Committee
@@ -665,7 +709,22 @@ else:
                     f"Company overview: {company_row['universe']} universe"
                     + (f" · CIK {company_row['cik']}" if company_row["cik"] else "")
                 )
-                source_filings = _source_filings(pick_brief, conn)
+                inputs = _verdict_inputs(pick_brief, verdict_row, conn)
+                if not inputs["recorded"]:
+                    st.warning(
+                        "This verdict predates input provenance, so the runs it was scored on "
+                        "weren't recorded. The sections below show the **latest** inputs, which "
+                        "may differ from what the committee saw. Re-running the committee stage "
+                        "records them."
+                    )
+                elif inputs["newer"]:
+                    st.warning(
+                        "Newer inputs exist than this verdict was scored on: "
+                        + "; ".join(inputs["newer"])
+                        + ". The brief below shows the inputs the verdict actually used; "
+                        "re-run the committee stage to score the newer ones."
+                    )
+                source_filings = _source_filings(pick_brief, inputs["ai_claims_run_ids"], conn)
                 if source_filings:
                     st.markdown("**Source filing:** " + " · ".join(
                         f"[{f['form_type']} filed {f['filing_date']} ({f['accession_number']}) ↗]({f['document_url']})"
@@ -676,13 +735,13 @@ else:
                 st.markdown(f"[Link to this brief ↗]({_brief_url(pick_brief)})")
 
                 st.markdown("#### Moat evidence")
-                _render_moat_evidence(pick_brief, conn)
+                _render_moat_evidence(pick_brief, inputs["ai_claims_run_ids"].get("moat"), conn)
 
                 st.markdown("#### Financial quality")
-                _render_financial_quality(pick_brief, conn)
+                _render_financial_quality(pick_brief, inputs["quality_run_id"], conn)
 
                 st.markdown("#### Valuation range & margin of safety")
-                _render_valuation_range(pick_brief, conn)
+                _render_valuation_range(pick_brief, inputs["valuation_run_id"], conn)
 
                 st.markdown("#### Investment thesis")
                 st.caption(

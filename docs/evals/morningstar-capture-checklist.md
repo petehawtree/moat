@@ -293,8 +293,42 @@ distinguished from noise.
 
 ## Freeze rules
 
+**Only Morningstar's half of the benchmark is frozen.** Moat's half is the
+thing under test — it is regenerated from the database on every eval run,
+by definition. So the capture never waits on Moat's code being in a
+particular state, and open defects are not a reason to delay it.
+
+Two consequences worth stating plainly, because they are easy to get
+backwards:
+
+- **Capture before a fix, not after.** Tier C is the instrument that
+  validates the fundamentals fixes. Capturing Morningstar's capex and D&A
+  while #9/#10/#11 are still open gives an independent check on whether
+  the fixes produce correct numbers (NEE's D&A should move from $65M to
+  ~$6.6bn; CBRE's should roughly double). Capture afterwards and the
+  before-state that makes the fix verifiable is gone.
+- **Tier B's cohort is drawn from Moat's verdicts, which move.** Lock it
+  as late in the trial as possible and record the committee `run_id` it
+  was drawn from. It has already shifted once: NVDA was one of two
+  Investigate verdicts in `20260923T105302Z` and is Watch in
+  `20260923T145220Z`, because the #9 capex fix gave it a DCF (see #11).
+
+Rules:
+
 - Snapshot date, source provider and analyst/report date recorded per record
+- **The Moat side of every comparison carries a `run_id`, not a date.** A
+  date is ambiguous — several pipeline runs can share one, and a re-run
+  supersedes without changing it. A future eval should be able to say
+  "scored against `20260923T145220Z`" and have that mean exactly one set
+  of verdicts. Record the committee, valuation and quality run ids
+  together, since `committee_verdicts` already stores its own
+  `valuation_run_id` and `quality_run_id`.
 - Expected answers are never edited because Moat disagrees — disagreements
   become investigations
 - Price-dependent metrics are always recomputed against the benchmark-date
-  price, never today's
+  price, never today's. Note that `current_price` is
+  `prices[-1]["close"]` (`moat/valuation/engine.py:497`) with no date
+  parameter, so a Moat re-run always uses the latest price — but each
+  `valuations` row persists the `current_price` it used, so what a given
+  run saw is always recoverable. Compare direction rather than magnitude
+  where the gap between capture and scoring run is wide.

@@ -19,6 +19,7 @@ import hashlib
 import time
 
 import anthropic
+import httpx
 
 from moat.analysis.pricing import DEFAULT_MODEL, estimate_cost
 from moat.committee.prompt import PROTOCOL_VERSION, build_request
@@ -42,7 +43,10 @@ class PersonaCallFailed(Exception):
 
 
 def _is_transient(exc: Exception) -> bool:
-    if isinstance(exc, anthropic.APIConnectionError):  # includes APITimeoutError
+    # A connection dropped *mid-stream* surfaces as a raw httpx transport
+    # error (e.g. ReadError "Connection reset by peer"), not wrapped by the
+    # SDK — found when it aborted the resumed 2026-09-23 run.
+    if isinstance(exc, (anthropic.APIConnectionError, httpx.TransportError)):  # incl. APITimeoutError
         return True
     if isinstance(exc, anthropic.APIStatusError):
         body = exc.body if isinstance(exc.body, dict) else {}
@@ -108,7 +112,7 @@ def call_persona(
             ) as stream:
                 message = stream.get_final_message()
             break
-        except anthropic.APIError as exc:
+        except (anthropic.APIError, httpx.TransportError) as exc:
             if not _is_transient(exc):
                 raise
             if delay is None:

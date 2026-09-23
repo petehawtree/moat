@@ -91,3 +91,14 @@ def test_non_transient_error_propagates_without_retry(no_sleep):
         call_persona(client, "TEST", "quality", "context")
     assert client.messages.stream.call_count == 1
     no_sleep.assert_not_called()
+
+
+def test_midstream_connection_reset_is_retried(no_sleep):
+    """A connection dropped mid-stream surfaces as a raw httpx.ReadError,
+    not an SDK APIError — it aborted the resumed 2026-09-23 run."""
+    client = MagicMock()
+    client.messages.stream.side_effect = [
+        _failing_stream(httpx.ReadError("[Errno 54] Connection reset by peer")), _ok_stream(),
+    ]
+    assert call_persona(client, "TEST", "valuation", "context").stop_reason == "end_turn"
+    assert client.messages.stream.call_count == 2

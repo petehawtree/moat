@@ -207,7 +207,21 @@ TAG_CANDIDATES: dict[str, tuple[list[str], str, str]] = {
         "USD",
         "duration",
     ),
-    "capex": (["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsForCapitalImprovements"], "USD", "duration"),
+    # capex: GitHub #9. PaymentsToAcquireProductiveAssets ("purchases of
+    # property, equipment and intangibles") is how NVDA (FY2022+), FTNT, LRCX
+    # and WAT (FY2023+) tag it. It includes intangible purchases, so it can
+    # run slightly above pure PP&E — the conservative direction for owner
+    # earnings — and ranks last so a PP&E-only tag wins whenever both exist.
+    # Oil-and-gas filers are handled by a summed tier in _capex(), not here.
+    # Deliberately NOT a candidate: PaymentsForProceedsFromProductiveAssets
+    # (WAT before FY2023), which is purchases *net of* disposal proceeds and
+    # would understate capex.
+    "capex": (
+        ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsForCapitalImprovements",
+         "PaymentsToAcquireProductiveAssets"],
+        "USD",
+        "duration",
+    ),
     "cash_and_equiv": (
         ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"],
         "USD",
@@ -229,6 +243,22 @@ _DA_COMBINED_TAGS = ["DepreciationDepletionAndAmortization", "DepreciationAmorti
 _DA_SPLIT_TAG = "Depreciation"
 _DA_SPLIT_AMORTIZATION_TAG = "AmortizationOfIntangibleAssets"
 _DA_SPLIT_SUM_LABEL = "Depreciation+AmortizationOfIntangibleAssets"
+# Fourth tier (GitHub #9): CASY tags its cash-flow D&A only as
+# DepreciationAndAmortization. Last resort, applied only to periods no
+# earlier tier covers, so no existing figure changes: some filers use this
+# tag on the income statement, where it can exclude D&A buried in cost of
+# sales, so the cash-flow tags above stay preferred.
+_DA_LAST_RESORT_TAG = "DepreciationAndAmortization"
+
+# Summed capex tier (GitHub #9): oil-and-gas producers (EOG) split capex
+# across additions to oil-and-gas properties and additions to other PP&E,
+# with no single total tag. Used only for periods no TAG_CANDIDATES capex
+# tag covers, and only when the oil-and-gas tag itself is present — "other
+# PP&E" alone is a fragment, not total capex. A missing "other" line is
+# treated as zero, same reasoning as the split-D&A tier.
+_CAPEX_OIL_GAS_TAG = "PaymentsToAcquireOilAndGasPropertyAndEquipment"
+_CAPEX_OTHER_PPE_TAG = "PaymentsToAcquireOtherPropertyPlantAndEquipment"
+_CAPEX_OIL_GAS_SUM_LABEL = "OilAndGasPropertyAndEquipment+OtherPropertyPlantAndEquipment"
 
 # Owner Earnings input (§A16.2): working-capital change. Unlike D&A, most
 # filers don't report one canonical ΔNWC line — they report several
@@ -289,6 +319,28 @@ def _depreciation_amortization(gaap: dict) -> dict[str, dict]:
         if d is None and a is None:
             continue
         merged[end] = {"val": (d or 0) + (a or 0), "_tag": _DA_SPLIT_SUM_LABEL}
+
+    for end, row in _annual_entries(gaap.get(_DA_LAST_RESORT_TAG), "USD", "duration").items():
+        merged.setdefault(end, {**row, "_tag": _DA_LAST_RESORT_TAG})
+    return merged
+
+
+def _capex(gaap: dict) -> dict[str, dict]:
+    """Capex across TAG_CANDIDATES' priority merge, then the oil-and-gas
+    summed tier for any period none of those tags cover (see
+    _CAPEX_OIL_GAS_TAG above)."""
+    names, unit_key, kind = TAG_CANDIDATES["capex"]
+    merged = dict(_merged_annual_entries(gaap, names, unit_key, kind))
+
+    oil_gas = _annual_entries(gaap.get(_CAPEX_OIL_GAS_TAG), "USD", "duration")
+    other = _annual_entries(gaap.get(_CAPEX_OTHER_PPE_TAG), "USD", "duration")
+    for end, og_row in oil_gas.items():
+        if end in merged or og_row.get("val") is None:
+            continue
+        merged[end] = {
+            "val": og_row["val"] + (other.get(end, {}).get("val") or 0),
+            "_tag": _CAPEX_OIL_GAS_SUM_LABEL,
+        }
     return merged
 
 
@@ -655,6 +707,7 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
         metric: _merged_annual_entries(gaap, names, unit_key, kind)
         for metric, (names, unit_key, kind) in TAG_CANDIDATES.items()
     }
+    series["capex"] = _capex(gaap)
     da_series = _depreciation_amortization(gaap)
     nwc_series = _annual_entries(gaap.get(_NWC_TAG), "USD", "duration")
 

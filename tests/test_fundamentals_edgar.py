@@ -214,3 +214,87 @@ def test_foreign_private_issuer_20f_yields_no_rows():
         }
     }
     assert extract_annual_fundamentals(facts) == []
+
+
+# ---------------------------------------------------------------------------
+# GitHub #9: capex / D&A tags the ingest didn't try
+# ---------------------------------------------------------------------------
+
+def _fy(val):
+    return {"units": {"USD": [_usd_row("2020-01-01", "2020-12-31", val)]}}
+
+
+def test_capex_falls_back_to_productive_assets_tag():
+    """NVDA (FY2022+), FTNT, LRCX, WAT (FY2023+) tag capex only as
+    PaymentsToAcquireProductiveAssets."""
+    facts = _da_nwc_facts({
+        "PaymentsToAcquireProductiveAssets": _fy(70),
+        "NetCashProvidedByUsedInOperatingActivities": _fy(300),
+    })
+    row = extract_annual_fundamentals(facts)[0]
+    assert row["capex"] == 70
+    assert row["free_cash_flow"] == 230
+
+
+def test_capex_ppe_tag_wins_over_productive_assets():
+    """Productive assets includes intangibles; a PP&E-only figure is preferred."""
+    facts = _da_nwc_facts({
+        "PaymentsToAcquirePropertyPlantAndEquipment": _fy(60),
+        "PaymentsToAcquireProductiveAssets": _fy(70),
+    })
+    assert extract_annual_fundamentals(facts)[0]["capex"] == 60
+
+
+def test_capex_sums_oil_and_gas_and_other_ppe():
+    """EOG reports capex split across two tags with no total."""
+    facts = _da_nwc_facts({
+        "PaymentsToAcquireOilAndGasPropertyAndEquipment": _fy(500),
+        "PaymentsToAcquireOtherPropertyPlantAndEquipment": _fy(40),
+    })
+    assert extract_annual_fundamentals(facts)[0]["capex"] == 540
+
+
+def test_capex_oil_and_gas_sum_treats_missing_other_ppe_as_zero():
+    facts = _da_nwc_facts({"PaymentsToAcquireOilAndGasPropertyAndEquipment": _fy(500)})
+    assert extract_annual_fundamentals(facts)[0]["capex"] == 500
+
+
+def test_capex_other_ppe_alone_is_not_treated_as_total_capex():
+    """'Other PP&E' is a fragment of an oil-and-gas filer's capex, not the total."""
+    facts = _da_nwc_facts({"PaymentsToAcquireOtherPropertyPlantAndEquipment": _fy(40)})
+    row = extract_annual_fundamentals(facts)[0]
+    assert row["capex"] is None
+    assert row["free_cash_flow"] is None
+
+
+def test_capex_single_tag_wins_over_oil_and_gas_sum():
+    facts = _da_nwc_facts({
+        "PaymentsToAcquirePropertyPlantAndEquipment": _fy(600),
+        "PaymentsToAcquireOilAndGasPropertyAndEquipment": _fy(500),
+        "PaymentsToAcquireOtherPropertyPlantAndEquipment": _fy(40),
+    })
+    assert extract_annual_fundamentals(facts)[0]["capex"] == 600
+
+
+def test_capex_ignores_net_of_proceeds_tag():
+    """WAT pre-FY2023: PaymentsForProceedsFromProductiveAssets is purchases
+    *net of* disposal proceeds and would understate capex — left unknown."""
+    facts = _da_nwc_facts({"PaymentsForProceedsFromProductiveAssets": _fy(50)})
+    assert extract_annual_fundamentals(facts)[0]["capex"] is None
+
+
+def test_da_falls_back_to_depreciation_and_amortization_tag():
+    """CASY tags D&A only as DepreciationAndAmortization."""
+    facts = _da_nwc_facts({"DepreciationAndAmortization": _fy(25)})
+    assert extract_annual_fundamentals(facts)[0]["depreciation_amortization"] == 25
+
+
+def test_da_split_tier_wins_over_last_resort_tag():
+    """The new last-resort tag must not change any figure an earlier tier
+    already produced."""
+    facts = _da_nwc_facts({
+        "Depreciation": _fy(30),
+        "AmortizationOfIntangibleAssets": _fy(8),
+        "DepreciationAndAmortization": _fy(25),
+    })
+    assert extract_annual_fundamentals(facts)[0]["depreciation_amortization"] == 38

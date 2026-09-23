@@ -27,7 +27,7 @@
   "commits": {
     "as_of": "2026-09-23",
     "source": "git rev-list --count HEAD",
-    "value": 120
+    "value": 121
   },
   "filings_rows": {
     "as_of": "2026-09-23",
@@ -42,12 +42,12 @@
   "github_issues_open": {
     "as_of": "2026-09-23",
     "source": "gh issue list --state all",
-    "value": 9
+    "value": 12
   },
   "github_issues_total": {
     "as_of": "2026-09-23",
     "source": "gh issue list --state all",
-    "value": 11
+    "value": 14
   },
   "screen_passed": {
     "as_of": "2026-09-23",

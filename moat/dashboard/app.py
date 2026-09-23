@@ -469,10 +469,11 @@ else:
 
         if latest_committee_run is not None:
             st.caption(
-                f"Committee briefs are a deliberately partial pilot ({committee_n}/{passed_n} "
-                "companies that passed the screen) — not every passing company has been run "
-                "through yet, and `assign_status()`'s 70/50 score thresholds are pilot-then-lock "
-                "starting values, not yet validated against real output. See sprint-5-plan.md."
+                f"Committee briefs cover {committee_n}/{passed_n} companies that passed the "
+                "screen — the rest are excluded for known, filed data defects (docs/known-issues.md) "
+                "or have no current AI analysis. `assign_status()`'s 70/50 score thresholds are "
+                "starting values, not yet validated; that's the external-benchmark eval's job "
+                "(see docs/sprints/sprint-5.md)."
             )
 
         st.subheader("Screen pass rate by sector")

@@ -197,7 +197,7 @@ Pre-push judge runs this sprint, all archived in
   once the known-issues allowlist existed.
 - **2026-09-22, FAIL** ([report](../judge-reports/judge-report-sprint-5-20260922-184711.md)):
   one HIGH (the brief mixing input runs, fixed as item 1 above) and two
-  MEDIUMs, **both still open** (see Carried forward).
+  MEDIUMs, **both still open**, filed as #12/#13 (see Carried forward).
 - **2026-09-23 10:44, FAIL** ([report](../judge-reports/judge-report-sprint-5-20260923-104446.md)):
   one HIGH (analyses not superseded, fixed as item 2).
 - **2026-09-23 11:41, PASS WITH CONCERNS** ([report](../judge-reports/judge-report-sprint-5-20260923-114138.md)):
@@ -213,14 +213,14 @@ Pre-push judge runs this sprint, all archived in
 ## Carried forward
 
 - **Thresholds**: to the external-benchmark eval, as above.
-- **Two MEDIUM judge findings (2026-09-22), not yet filed:**
-  - "Key things to monitor" keeps only the Bear statements' text, dropping
+- **Two MEDIUM judge findings (2026-09-22), filed as #12 and #13:**
+  - #12: "Key things to monitor" keeps only the Bear statements' text, dropping
     their refs, so monitor items render with neither citations nor the
     no-citation flag.
-  - The committee cache key omits fields the prompt renders
+  - #13: the committee cache key omits fields the prompt renders
     (`sector_peer_group`, company name/sector), so a sector reassignment
     can serve a stale verdict.
-- **`metrics.py --check` date false positive** (Low, 09-23 17:09): the
+- **#14, `metrics.py --check` date false positive** (Low, 09-23 17:09): the
   advisory check fails every day after rendering, even with identical
   values.
 - **GitHub #10** (D&A extracted *wrong*, e.g. NEE 101× too small; CBRE's

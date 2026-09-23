@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 from moat.analysis.prompt import ANALYSIS_TYPES
 from moat.analysis.pricing import DEFAULT_MODEL
-from moat.committee.caller import call_persona
+from moat.committee.caller import PersonaCallFailed, call_persona
 from moat.committee.parser import parse_persona_response
 from moat.committee.prompt import PERSONAS, PROTOCOL_VERSION, build_context_block
 
@@ -481,7 +481,13 @@ def run_committee(
                 "ticker": ticker, "outcome": "cost_capped", "cost_estimate": total_cost,
                 "reason": f"cap reached before {persona} persona call",
             }
-        result = call_persona(client, ticker, persona, context_block, model_id=model_id, dry_run=dry_run)
+        try:
+            result = call_persona(client, ticker, persona, context_block, model_id=model_id, dry_run=dry_run)
+        except PersonaCallFailed as exc:
+            # Nothing persisted for this ticker (same no-partial-writes rule
+            # as a refusal); spend on personas that did complete still counts.
+            return {"ticker": ticker, "outcome": "api_error", "reason": str(exc),
+                    "transient": True, "cost_estimate": total_cost}
         total_cost += result.cost_estimate
 
         if dry_run:

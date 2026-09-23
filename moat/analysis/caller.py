@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -335,7 +336,15 @@ def call_sync(
 # ---------------------------------------------------------------------------
 
 def _custom_id(ticker: str, prompt_sha: str) -> str:
-    return f"{ticker}_{prompt_sha[:16]}"
+    """Unique per submission, not just per (ticker, prompt): analysis_attempts
+    .custom_id is UNIQUE, and a (ticker, prompt) pair is legitimately
+    resubmitted after a validation failure. Without the random suffix that
+    retry collided with the failed attempt's row — and because the batch is
+    submitted *before* its pending rows are written, the collision left a
+    real, untracked batch running at Anthropic (found retrying CHD,
+    2026-09-23). Fits the Batch API's ^[a-zA-Z0-9_-]{1,64}$ custom_id rule.
+    """
+    return f"{ticker}_{prompt_sha[:16]}_{uuid.uuid4().hex[:8]}"
 
 
 def submit_batch(

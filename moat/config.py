@@ -91,18 +91,25 @@ CONFIDENCE_LOW = "low"       # yfinance-only / unverified
 # ---------------------------------------------------------------------
 
 # §A17 (GitHub issue #1): confirmed `total_debt IS NULL` extraction gap —
-# not a reliable "no debt" signal for these 18 tickers. Feeds the quant
+# not a reliable "no debt" signal for these tickers. Feeds the quant
 # screen's debt metric, ev_ebit()'s enterprise-value debt add-back, and
-# (Sprint 5) financial_strength/valuation persona input alike.
+# (Sprint 5) financial_strength/valuation persona input alike. The second
+# row newly passed the 20260923T122501Z screen once GitHub #9 recovered
+# their FCF metrics — same NULL-debt condition, so same exclusion (SYY and
+# MELI clearly carry debt; the rest may be near debt-free, but the screen
+# can't tell "no debt" from "debt not extracted").
 DEBT_TAG_GAP_TICKERS = frozenset({
     "A", "ADSK", "ALAB", "ALNY", "DDOG", "DECK", "DXCM", "GRMN", "LULU",
     "MNST", "NOW", "PLTR", "PM", "RMD", "ROL", "SHOP", "VRTX", "WSM",
+    "ANET", "EXPD", "ISRG", "MELI", "PANW", "SYY",
 })
 
 # §A17 (GitHub issue #2): REITs scored on gross_margin/free_cash_flow/debt —
 # metrics the addendum already documented as invalid for this business
 # model (FFO/AFFO not yet implemented).
-REIT_INVALID_METRICS_TICKERS = frozenset({"AMT", "SBAC"})
+# CCI (tower REIT, same model as AMT/SBAC) newly passed the
+# 20260923T122501Z screen once GitHub #9 recovered its FCF.
+REIT_INVALID_METRICS_TICKERS = frozenset({"AMT", "SBAC", "CCI"})
 
 # §A18 (GitHub issue #3): GOOG/GOOGL share one CIK; GOOGL's own
 # `filings.ticker` lookups return nothing even though the filing is cached

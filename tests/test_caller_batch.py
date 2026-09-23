@@ -193,3 +193,17 @@ def test_submit_batch_builds_real_request_shape(tmp_path):
     assert len(params["messages"]) == 1
     assert params["messages"][0]["role"] == "user"
     assert isinstance(params["messages"][0]["content"], list)  # the document+text content blocks
+
+
+def test_custom_id_is_unique_per_submission_and_batch_api_valid():
+    """Resubmitting the same (ticker, prompt) after a validation failure
+    must not reuse the failed attempt's custom_id — analysis_attempts
+    .custom_id is UNIQUE, and the collision happened only after the batch
+    was already submitted (CHD, 2026-09-23)."""
+    import re
+    from moat.analysis.caller import _custom_id
+
+    a, b = _custom_id("CHD", "c8802a4cba6f3fa5" * 4), _custom_id("CHD", "c8802a4cba6f3fa5" * 4)
+    assert a != b
+    assert a.startswith("CHD_c8802a4cba6f3fa5_")
+    assert re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", a)

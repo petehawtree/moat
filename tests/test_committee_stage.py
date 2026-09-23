@@ -126,3 +126,55 @@ def test_no_quality_or_valuation_run_raises():
     import pytest
     with pytest.raises(RuntimeError, match="committee needs"):
         run_committee_stage(conn, "committee_run")
+
+
+def _run_with_outcomes(conn, outcomes: dict):
+    """outcomes: ticker -> result dict overrides; default persisted."""
+    calls = []
+
+    def fake_run_committee(ticker, *a, **kw):
+        calls.append(ticker)
+        return {"ticker": ticker, "outcome": "persisted", "cost_estimate": 0.01,
+                "overall_score": 60.0, "status": "Watch", **outcomes.get(ticker, {})}
+
+    with patch("moat.committee.committee.run_committee", side_effect=fake_run_committee), \
+         patch("moat.config.ANTHROPIC_API_KEY", "dummy-key-not-used"):
+        run_committee_stage(conn, "committee_run", include_excluded=True)
+    return calls
+
+
+_TRANSIENT = {"outcome": "api_error", "transient": True, "cost_estimate": 0.0}
+_DATA_ERROR = {"outcome": "api_error", "reason": "missing current ai_analysis type(s)", "cost_estimate": 0.0}
+
+
+def test_one_transient_failure_skips_that_ticker_and_continues():
+    tickers = ["T1", "T2", "T3", "T4"]
+    conn = _conn_with(tickers, tickers, tickers)
+    calls = _run_with_outcomes(conn, {"T2": _TRANSIENT})
+    assert calls == tickers
+
+
+def test_consecutive_transient_failures_halt_the_stage():
+    tickers = ["T1", "T2", "T3", "T4", "T5", "T6"]
+    conn = _conn_with(tickers, tickers, tickers)
+    calls = _run_with_outcomes(conn, {t: _TRANSIENT for t in ["T2", "T3", "T4"]})
+    assert calls == ["T1", "T2", "T3", "T4"]  # stops before T5
+
+
+def test_data_problem_api_errors_do_not_count_toward_the_halt():
+    tickers = ["T1", "T2", "T3", "T4", "T5"]
+    conn = _conn_with(tickers, tickers, tickers)
+    calls = _run_with_outcomes(conn, {t: _DATA_ERROR for t in ["T1", "T2", "T3", "T4"]})
+    assert calls == tickers
+
+
+def test_committee_client_uses_a_short_read_timeout():
+    """The SDK default (600s read) let one stalled stream block ~10 minutes
+    before the retry could kick in."""
+    from moat.committee.caller import CLIENT_TIMEOUT
+
+    conn = _conn_with(["T1"], ["T1"], ["T1"])
+    with patch("anthropic.Anthropic") as anthropic_cls:
+        _run(conn, include_excluded=True)
+    assert anthropic_cls.call_args.kwargs["timeout"] is CLIENT_TIMEOUT
+    assert CLIENT_TIMEOUT.read == 120.0

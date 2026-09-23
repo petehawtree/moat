@@ -166,3 +166,15 @@ def test_data_problem_api_errors_do_not_count_toward_the_halt():
     conn = _conn_with(tickers, tickers, tickers)
     calls = _run_with_outcomes(conn, {t: _DATA_ERROR for t in ["T1", "T2", "T3", "T4"]})
     assert calls == tickers
+
+
+def test_committee_client_uses_a_short_read_timeout():
+    """The SDK default (600s read) let one stalled stream block ~10 minutes
+    before the retry could kick in."""
+    from moat.committee.caller import CLIENT_TIMEOUT
+
+    conn = _conn_with(["T1"], ["T1"], ["T1"])
+    with patch("anthropic.Anthropic") as anthropic_cls:
+        _run(conn, include_excluded=True)
+    assert anthropic_cls.call_args.kwargs["timeout"] is CLIENT_TIMEOUT
+    assert CLIENT_TIMEOUT.read == 120.0

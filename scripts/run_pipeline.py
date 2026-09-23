@@ -328,7 +328,8 @@ def run_committee_stage(
     from moat.config import ANTHROPIC_API_KEY
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY not set — cannot run committee stage")
-    client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    from moat.committee.caller import CLIENT_TIMEOUT
+    client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=CLIENT_TIMEOUT)
 
     outcomes: dict[str, int] = {}
     accumulated_cost = 0.0

@@ -32,6 +32,14 @@ from moat.committee.prompt import PROTOCOL_VERSION, build_request
 _TRANSIENT_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504, 529}
 _TRANSIENT_ERROR_TYPES = {"overloaded_error", "api_error", "rate_limit_error", "timeout_error"}
 RETRY_DELAYS_SECONDS = (5, 20, 60)
+
+# The SDK's default read timeout is 600s: a stream that stalls mid-response
+# (connection open, nothing arriving) blocks 10 minutes before failing into
+# the retry above — found on the 2026-09-23 run, where MPC took ~10 minutes
+# and the next ticker stalled 11+. A persona response streams continuously
+# and finishes well inside a minute, so 120s with no bytes means stalled.
+# httpx's read timeout is per-read (between chunks), not the whole response.
+CLIENT_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 _sleep = time.sleep  # patched out in tests
 
 

@@ -16,9 +16,41 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import time
+
+import anthropic
 
 from moat.analysis.pricing import DEFAULT_MODEL, estimate_cost
 from moat.committee.prompt import PROTOCOL_VERSION, build_request
+
+
+# Transient API failures worth retrying. A mid-stream error event (the
+# 2026-09-23 committee run died on one, twice) arrives as a plain
+# APIStatusError whose HTTP status is the stream's own 200, so the error
+# *type* in the body is what identifies it — the status code alone can't.
+_TRANSIENT_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504, 529}
+_TRANSIENT_ERROR_TYPES = {"overloaded_error", "api_error", "rate_limit_error", "timeout_error"}
+RETRY_DELAYS_SECONDS = (5, 20, 60)
+_sleep = time.sleep  # patched out in tests
+
+
+class PersonaCallFailed(Exception):
+    """A persona call still failing on a transient API error after every
+    retry. run_committee() turns this into a per-company 'api_error'
+    outcome; anything *not* transient (bad request, auth) propagates, since
+    it would fail every company the same way."""
+
+
+def _is_transient(exc: Exception) -> bool:
+    if isinstance(exc, anthropic.APIConnectionError):  # includes APITimeoutError
+        return True
+    if isinstance(exc, anthropic.APIStatusError):
+        body = exc.body if isinstance(exc.body, dict) else {}
+        error = body.get("error") if isinstance(body.get("error"), dict) else body
+        if error.get("type") in _TRANSIENT_ERROR_TYPES:
+            return True
+        return exc.status_code in _TRANSIENT_STATUS_CODES
+    return False
 
 
 @dataclasses.dataclass
@@ -65,13 +97,25 @@ def call_persona(
             prompt_sha256=prompt_sha, protocol_version=PROTOCOL_VERSION,
         )
 
-    with client.messages.stream(
-        model=model_id,
-        max_tokens=4_096,
-        system=system,
-        messages=[{"role": "user", "content": user_message}],
-    ) as stream:
-        message = stream.get_final_message()
+    message = None
+    for attempt, delay in enumerate((*RETRY_DELAYS_SECONDS, None)):
+        try:
+            with client.messages.stream(
+                model=model_id,
+                max_tokens=4_096,
+                system=system,
+                messages=[{"role": "user", "content": user_message}],
+            ) as stream:
+                message = stream.get_final_message()
+            break
+        except anthropic.APIError as exc:
+            if not _is_transient(exc):
+                raise
+            if delay is None:
+                raise PersonaCallFailed(
+                    f"{persona}: transient API error after {attempt + 1} attempts: {exc}"
+                ) from exc
+            _sleep(delay)
 
     if message.stop_reason == "refusal":
         return PersonaCallResult(

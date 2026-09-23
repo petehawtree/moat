@@ -9,7 +9,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -584,3 +584,17 @@ def test_run_committee_records_the_input_runs_it_was_scored_on(committee_db):
     assert hit["valuation_run_id"] == "valuation_run"
     assert hit["quality_run_id"] == "quality_run"
     assert json.loads(hit["ai_claims_run_ids"])["moat"] == "ai_run"
+
+
+def test_run_committee_transient_failure_is_a_per_company_api_error(committee_db):
+    """After call_persona's retries are exhausted, run_committee reports an
+    api_error for this company (persisting nothing) instead of raising —
+    so one API blip no longer aborts the whole committee stage."""
+    from moat.committee.caller import PersonaCallFailed
+
+    conn, _ = committee_db
+    with patch("moat.committee.committee.call_persona", side_effect=PersonaCallFailed("quality: overloaded")):
+        result = run_committee("TEST", "committee_run", "valuation_run", "quality_run", conn, MagicMock())
+    assert result["outcome"] == "api_error"
+    assert result["transient"] is True
+    assert conn.execute("SELECT COUNT(*) FROM committee_verdicts").fetchone()[0] == 0

@@ -250,6 +250,11 @@ def _latest_valuation_run_id(conn) -> str | None:
     return row["run_id"] if row else None
 
 
+# Consecutive per-ticker api_errors (after call_persona's own retries)
+# before run_committee_stage stops: the API is down, not one bad call.
+COMMITTEE_MAX_CONSECUTIVE_API_ERRORS = 3
+
+
 def run_committee_stage(
     conn,
     run_id: str,
@@ -327,11 +332,23 @@ def run_committee_stage(
 
     outcomes: dict[str, int] = {}
     accumulated_cost = 0.0
+    consecutive_api_errors = 0
     for ticker in tickers:
         if not dry_run and accumulated_cost >= cost_cap_usd:
             print(
                 f"    cost cap ${cost_cap_usd:.2f} reached after {sum(outcomes.values())} tickers "
                 f"— halting. Re-run from committee to continue."
+            )
+            break
+        if consecutive_api_errors >= COMMITTEE_MAX_CONSECUTIVE_API_ERRORS:
+            # One transient failure is skipped and the run continues (each
+            # already retried in call_persona); several in a row means the
+            # API itself is down — stop rather than grind through every
+            # remaining ticker's retry backoff. Finished verdicts are cache
+            # hits on the re-run.
+            print(
+                f"    {consecutive_api_errors} consecutive transient API failures — halting. "
+                f"Re-run from committee to continue (completed tickers are cache hits)."
             )
             break
 
@@ -343,6 +360,9 @@ def run_committee_stage(
         outcome = result.get("outcome", "api_error")
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
         accumulated_cost += result.get("cost_estimate") or 0.0
+        # Only transient API failures count — run_committee also reports
+        # data problems (e.g. a missing analysis type) as api_error.
+        consecutive_api_errors = consecutive_api_errors + 1 if result.get("transient") else 0
 
         if dry_run:
             print(f"    {ticker}: {outcome}")

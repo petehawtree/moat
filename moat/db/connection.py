@@ -86,6 +86,12 @@ _ADDED_COLUMNS = {
         # on every invocation, including a re-run against unchanged inputs.
         "cache_key":             "TEXT",
         "reused_from_run_id":    "TEXT",
+        # Input provenance, added after judge review found the brief
+        # re-queried the *latest* valuation/quant/AI runs, so it could pair
+        # a verdict with evidence it was never scored on.
+        "valuation_run_id":      "TEXT",
+        "quality_run_id":        "TEXT",
+        "ai_claims_run_ids":     "TEXT",
     },
 }
 

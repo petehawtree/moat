@@ -311,7 +311,11 @@ def find_cached_committee_verdict(ticker: str, bundle_key: str, conn) -> dict | 
     return dict(row) if row else None
 
 
-def _persist_cache_hit(run_id: str, ticker: str, cached: dict, conn) -> None:
+def _persist_cache_hit(run_id: str, ticker: str, cached: dict, provenance: dict, conn) -> None:
+    """Copies the cached verdict forward, but records *this* call's input
+    run ids as its provenance, not the cached row's: the bundle key match
+    means the current inputs render identically to the ones it was scored
+    on, and the current runs are the ones the brief should show."""
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """
@@ -320,8 +324,9 @@ def _persist_cache_hit(run_id: str, ticker: str, cached: dict, conn) -> None:
             bear_case_severity, business_quality_score, competitive_moat_score,
             financial_strength_score, management_score, valuation_score, risk_score,
             overall_score, status, data_confidence, investment_thesis,
-            key_things_to_monitor, ai_conclusion, cache_key, reused_from_run_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            key_things_to_monitor, ai_conclusion, cache_key, reused_from_run_id,
+            valuation_run_id, quality_run_id, ai_claims_run_ids, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             run_id, ticker,
@@ -330,7 +335,9 @@ def _persist_cache_hit(run_id: str, ticker: str, cached: dict, conn) -> None:
             cached["financial_strength_score"], cached["management_score"], cached["valuation_score"],
             cached["risk_score"], cached["overall_score"], cached["status"], cached["data_confidence"],
             cached["investment_thesis"], cached["key_things_to_monitor"], cached["ai_conclusion"],
-            cached["cache_key"], cached["run_id"], now,
+            cached["cache_key"], cached["run_id"],
+            provenance["valuation_run_id"], provenance["quality_run_id"], provenance["ai_claims_run_ids"],
+            now,
         ),
     )
     conn.commit()
@@ -424,6 +431,14 @@ def run_committee(
             "reason": f"missing current ai_analysis type(s): {sorted(missing_types)}",
         }
     claims_by_type = _fetch_claims_by_type(ticker, conn, current_rows=current_ai_rows)
+    provenance = {
+        "valuation_run_id": valuation_run_id,
+        "quality_run_id": quality_run_id,
+        "ai_claims_run_ids": json.dumps({
+            r["analysis_type"]: _resolve_claims_run_id(ticker, r["analysis_type"], r["run_id"], conn)
+            for r in current_ai_rows
+        }, sort_keys=True),
+    }
 
     valuation_rows = _fetch_valuation_rows(ticker, valuation_run_id, conn)
     if not valuation_rows:
@@ -440,7 +455,7 @@ def run_committee(
     if not dry_run:
         cached = find_cached_committee_verdict(ticker, bundle_key, conn)
         if cached is not None:
-            _persist_cache_hit(run_id, ticker, cached, conn)
+            _persist_cache_hit(run_id, ticker, cached, provenance, conn)
             return {
                 "ticker": ticker, "outcome": "cache_hit", "cost_estimate": 0.0,
                 "reused_from_run_id": cached["run_id"],
@@ -505,8 +520,9 @@ def run_committee(
             bear_case_severity, business_quality_score, competitive_moat_score,
             financial_strength_score, management_score, valuation_score, risk_score,
             overall_score, status, data_confidence, investment_thesis,
-            key_things_to_monitor, ai_conclusion, cache_key, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            key_things_to_monitor, ai_conclusion, cache_key,
+            valuation_run_id, quality_run_id, ai_claims_run_ids, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             run_id, ticker,
@@ -516,7 +532,9 @@ def run_committee(
             component_scores["financial_strength_score"], component_scores["management_score"],
             component_scores["valuation_score"], component_scores["risk_score"],
             overall, status, data_confidence, investment_thesis,
-            key_things_to_monitor, ai_conclusion, bundle_key, now,
+            key_things_to_monitor, ai_conclusion, bundle_key,
+            provenance["valuation_run_id"], provenance["quality_run_id"], provenance["ai_claims_run_ids"],
+            now,
         ),
     )
     conn.commit()

@@ -351,3 +351,67 @@ def test_dashboard_brief_query_param_selects_that_ticker(dashboard_db):
     assert not at.exception
     assert at.selectbox(key="brief_ticker").value == "TEST"
     assert "TEST — Test Co" in "\n".join(m.value for m in at.markdown)
+
+
+def _seed_valuation_run(conn, run_id, started_at, bear_value):
+    conn.execute(
+        "INSERT INTO pipeline_runs (run_id, started_at, status) VALUES (?, ?, 'complete')", (run_id, started_at),
+    )
+    conn.execute(
+        "INSERT INTO valuations (run_id, ticker, method, scenario, intrinsic_value_low, "
+        "intrinsic_value_high, current_price, margin_of_safety_pct, key_assumptions, created_at) "
+        "VALUES (?, 'TEST', 'owner_earnings_dcf', 'bear', ?, ?, 100.0, 0.0, '{}', ?)",
+        (run_id, bear_value, bear_value, NOW),
+    )
+    # The Sprint 4 summary table needs a pe_historical row to exist (see
+    # test_dashboard_brief_renders_moat_financial_and_valuation_sections).
+    conn.execute(
+        "INSERT INTO valuations (run_id, ticker, method, scenario, current_price, key_assumptions, created_at) "
+        "VALUES (?, 'TEST', 'pe_historical', NULL, 100.0, ?, ?)",
+        (run_id, json.dumps({"current": 18.0, "low": 12.0, "high": 25.0, "years_covered": 8,
+                             "low_confidence": False, "status": "ok"}), NOW),
+    )
+
+
+def test_dashboard_brief_renders_the_runs_the_verdict_was_scored_on_not_the_latest(dashboard_db):
+    """Judge finding [HIGH]: the brief re-queried the newest valuation/quant/
+    AI runs, so a verdict could be shown beside evidence it was never
+    scored on. With provenance recorded, the brief must render the
+    recorded runs and say that newer inputs exist."""
+    _seed_committee_verdict(
+        dashboard_db,
+        quality_view="## VERDICT\nGood.\n\n## STATEMENTS\nSTATEMENT: Revenue grew. [refs: 1]\n",
+        bear_view="## VERDICT\nOk.\n\n## STATEMENTS\nSTATEMENT: Fine. [refs: 1]\n",
+        valuation_view="## VERDICT\nFair.\n\n## STATEMENTS\nSTATEMENT: FCF yield is 8%.\n",
+    )
+    conn = get_connection(db_path=dashboard_db)
+    _seed_valuation_run(conn, "vrun_scored", "2026-01-01T00:00:00+00:00", 90.0)
+    _seed_valuation_run(conn, "vrun_newer", "2026-02-01T00:00:00+00:00", 55.0)
+    conn.execute(
+        "UPDATE committee_verdicts SET valuation_run_id = 'vrun_scored', quality_run_id = 'qrun', "
+        "ai_claims_run_ids = ? WHERE ticker = 'TEST'",
+        (json.dumps({"business_quality": "arun"}),),
+    )
+    conn.commit()
+    conn.close()
+
+    at = _run_app_against(dashboard_db)
+    assert not at.exception
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "DCF bear: $90.00" in md_text
+    assert "$55.00" not in md_text
+    warnings = "\n".join(w.value for w in at.warning)
+    assert "Newer inputs exist" in warnings
+    assert "vrun_newer" in warnings
+
+
+def test_dashboard_brief_flags_verdicts_with_no_recorded_inputs(dashboard_db):
+    _seed_committee_verdict(
+        dashboard_db,
+        quality_view="## VERDICT\nGood.\n\n## STATEMENTS\nSTATEMENT: Revenue grew. [refs: 1]\n",
+        bear_view="## VERDICT\nOk.\n\n## STATEMENTS\nSTATEMENT: Fine. [refs: 1]\n",
+        valuation_view="## VERDICT\nFair.\n\n## STATEMENTS\nSTATEMENT: FCF yield is 8%.\n",
+    )
+    at = _run_app_against(dashboard_db)
+    assert not at.exception
+    assert any("predates input provenance" in w.value for w in at.warning)

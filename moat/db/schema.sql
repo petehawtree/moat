@@ -334,6 +334,12 @@ CREATE TABLE IF NOT EXISTS committee_verdicts (
     investment_thesis           TEXT,
     key_things_to_monitor       TEXT,   -- JSON array of strings
     ai_conclusion                TEXT,
+    -- Input provenance: the exact upstream runs this verdict was scored on,
+    -- so the brief renders those rather than whatever ran most recently.
+    -- NULL on verdicts persisted before these columns existed.
+    valuation_run_id            TEXT,
+    quality_run_id              TEXT,   -- quant_scores/quality_scores run
+    ai_claims_run_ids           TEXT,   -- JSON {analysis_type: run_id holding its analysis_claims}
     created_at                  TEXT NOT NULL,
     PRIMARY KEY (run_id, ticker)
 );

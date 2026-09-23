@@ -89,18 +89,23 @@ def find_cached_run(ticker: str, bundle_key: str, conn) -> str | None:
     return row["run_id"] if row else None
 
 
-def _supersede_for_bundle(conn, ticker: str, bundle_key: str, new_run_id: str) -> None:
-    """Set is_current=0 on all prior current analyses for this ticker+bundle."""
+def _supersede_prior_analyses(conn, ticker: str, new_run_id: str) -> None:
+    """Set is_current=0 on every other current analysis for this ticker once
+    new_run_id's rows are written, so exactly one version per analysis type
+    stays current. Prior rows are kept as history, never deleted.
+
+    Judge finding: this used to match on the *same* cache_key only — but a
+    new filing, prompt, model or normalizer always changes the key, so a
+    refreshed analysis left the old bundle current beside the new one, and
+    the committee/dashboard (which read every is_current=1 row) could mix
+    them. The fresh-analysis path also never called it at all.
+    """
     conn.execute(
         "UPDATE ai_analysis SET is_current = 0, superseded_by_run_id = ? "
-        "WHERE ticker = ? AND cache_key = ? AND run_id != ? AND is_current = 1",
-        (new_run_id, ticker, bundle_key, new_run_id),
+        "WHERE ticker = ? AND run_id != ? AND is_current = 1",
+        (new_run_id, ticker, new_run_id),
     )
 
-
-# ---------------------------------------------------------------------------
-# Pipeline-run helper
-# ---------------------------------------------------------------------------
 
 def _ensure_pipeline_run(run_id: str, conn) -> None:
     """Insert a pipeline_runs row if one does not already exist."""
@@ -172,7 +177,7 @@ def persist_result(
                          reused_from_run_id, orig["claim_coverage"], now),
                     )
 
-            _supersede_for_bundle(conn, result.ticker, bundle_key, run_id)
+            _supersede_prior_analyses(conn, result.ticker, run_id)
 
             attempt_id = _write_attempt(
                 conn, run_id, result, bundle_key, now,
@@ -279,6 +284,8 @@ def persist_result(
                      cite.cited_text, cite.quote_sha256,
                      cite.prefix, cite.suffix, now),
                 )
+
+        _supersede_prior_analyses(conn, result.ticker, run_id)
 
         attempt_id = _write_attempt(
             conn, run_id, result, bundle_key, now, outcome="persisted",
@@ -598,7 +605,7 @@ def persist_cache_hit(
                 (run_id, ticker, at, orig["content"], model_id,
                  PROTOCOL_VERSION, bundle_key, reused_from, orig["claim_coverage"], now),
             )
-    _supersede_for_bundle(conn, ticker, bundle_key, run_id)
+    _supersede_prior_analyses(conn, ticker, run_id)
     attempt_id = _write_cache_attempt(
         conn, run_id, ticker, model_id, prompt_sha, PROTOCOL_VERSION, reused_from, now,
         accession=accession,
@@ -852,7 +859,7 @@ def run_analysis(
                      PROTOCOL_VERSION, bundle_key,
                      reused_from, orig["claim_coverage"], now),
                 )
-        _supersede_for_bundle(conn, ticker, bundle_key, run_id)
+        _supersede_prior_analyses(conn, ticker, run_id)
         attempt_id = _write_cache_attempt(
             conn, run_id, ticker, model_id, prompt_sha,
             PROTOCOL_VERSION, reused_from, now, accession=accession,

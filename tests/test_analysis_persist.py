@@ -503,3 +503,84 @@ class TestRunAnalysisAmendmentFallback:
         assert result["outcome"] == "dry_run"
         # Confirms extraction actually happened against the fallback filing.
         client.messages.count_tokens.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Supersession across a changed bundle (judge finding, 2026-09-23)
+# ---------------------------------------------------------------------------
+
+def _insert_old_bundle(conn):
+    for at in ANALYSIS_TYPES:
+        conn.execute(
+            "INSERT INTO ai_analysis (run_id, ticker, analysis_type, content, model, "
+            "prompt_version, cache_key, is_current, claim_coverage, created_at) "
+            f"VALUES ('old_run','TST','{at}','stale','m','v1','old-bundle',1,1.0,'2026-01-01')"
+        )
+    conn.commit()
+
+
+def _current_rows(conn):
+    return conn.execute(
+        "SELECT run_id, analysis_type FROM ai_analysis WHERE ticker = 'TST' AND is_current = 1"
+    ).fetchall()
+
+
+class TestSupersedeAcrossChangedBundle:
+    """A new filing/prompt/model always changes the bundle key; the old
+    bundle's rows must stop being current, on both the fresh and the
+    cache-hit path, leaving exactly one current row per analysis type."""
+
+    def test_fresh_analysis_supersedes_a_different_bundle(self, tmp_path):
+        conn = _make_db(tmp_path)
+        _insert_old_bundle(conn)
+        _insert_doc(conn, 1, "new_doc_sha", tmp_path / "doc.txt")
+        (tmp_path / "doc.txt").write_text("hello world extra text for context")
+
+        with patch("moat.analysis.persist.NORM_VERSION", "v1"):
+            persist_result(_make_result(), _make_parsed(), "new_run", conn)
+
+        current = _current_rows(conn)
+        assert {r["run_id"] for r in current} == {"new_run"}
+        assert sorted(r["analysis_type"] for r in current) == sorted(ANALYSIS_TYPES)
+        old = conn.execute(
+            "SELECT is_current, superseded_by_run_id FROM ai_analysis WHERE run_id = 'old_run'"
+        ).fetchall()
+        assert len(old) == 4  # kept as history, not deleted
+        assert all(r["is_current"] == 0 and r["superseded_by_run_id"] == "new_run" for r in old)
+
+    def test_cache_hit_supersedes_a_different_bundle(self, tmp_path):
+        conn = _make_db(tmp_path)
+        _insert_old_bundle(conn)
+        # The cache source: an earlier run of the *new* bundle, already superseded.
+        for at in ANALYSIS_TYPES:
+            conn.execute(
+                "INSERT INTO ai_analysis (run_id, ticker, analysis_type, content, model, "
+                "prompt_version, cache_key, is_current, claim_coverage, created_at) "
+                f"VALUES ('src_run','TST','{at}','fresh','m','v1','new-bundle',0,1.0,'2026-01-02')"
+            )
+        conn.commit()
+
+        with patch("moat.analysis.persist.NORM_VERSION", "v1"):
+            persist_result(_make_result(), _make_parsed(), "new_run", conn, reused_from_run_id="src_run")
+
+        current = _current_rows(conn)
+        assert {r["run_id"] for r in current} == {"new_run"}
+        assert len(current) == len(ANALYSIS_TYPES)
+
+    def test_other_tickers_are_untouched(self, tmp_path):
+        conn = _make_db(tmp_path)
+        _insert_old_bundle(conn)
+        conn.execute(
+            "INSERT INTO ai_analysis (run_id, ticker, analysis_type, content, model, "
+            "prompt_version, cache_key, is_current, claim_coverage, created_at) "
+            "VALUES ('other_run','OTHR','moat','x','m','v1','k',1,1.0,'2026-01-01')"
+        )
+        _insert_doc(conn, 1, "new_doc_sha", tmp_path / "doc.txt")
+        (tmp_path / "doc.txt").write_text("hello world extra text for context")
+
+        with patch("moat.analysis.persist.NORM_VERSION", "v1"):
+            persist_result(_make_result(), _make_parsed(), "new_run", conn)
+
+        assert conn.execute(
+            "SELECT is_current FROM ai_analysis WHERE ticker = 'OTHR'"
+        ).fetchone()["is_current"] == 1

@@ -1,76 +1,76 @@
 {
   "ai_analyses_companies": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "SELECT COUNT(DISTINCT ticker) FROM ai_analysis WHERE is_current=1 (data/moat.db)",
-    "value": 72
+    "value": 86
   },
   "ai_spend_analysis_stage": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "SUM(cost_estimate) over analysis_attempts, all outcomes \u2014 real dollars spent even on a validation_failed attempt (data/moat.db)",
-    "value": 13.033
+    "value": 15.327
   },
   "ai_spend_committee_pilot": {
-    "as_of": "2026-09-18",
-    "source": "manual \u2014 Sprint 5 committee pilot (21/69 companies, of a $3 cap); the committee stage computes cost_estimate per call but never persists it (committee_verdicts has no cost column), so this figure can't be recomputed from data/moat.db. Update by hand from a real run's logged spend and revise as_of. See docs/sprints/sprint-5-plan.md.",
-    "value": 1.9
+    "as_of": "2026-09-23",
+    "source": "manual \u2014 every Sprint 5 committee run: the 21-company pilot (~$1.90), the full 69-company run on refreshed prices ($4.33), the 80-company run after GitHub #9 ($6.47, incl. ~$1.70 of an accidental duplicate run) and CHD ($0.07). The committee stage computes cost_estimate per call but never persists it (committee_verdicts has no cost column), so this figure can't be recomputed from data/moat.db. Update by hand from a real run's logged spend and revise as_of. See docs/sprints/sprint-5.md.",
+    "value": 12.77
   },
   "ai_spend_total": {
-    "as_of": "2026-09-19",
-    "source": "ai_spend_analysis_stage + ai_spend_committee_pilot (oldest input: 2026-09-18)",
-    "value": 14.93
+    "as_of": "2026-09-23",
+    "source": "ai_spend_analysis_stage + ai_spend_committee_pilot (oldest input: 2026-09-23)",
+    "value": 28.1
   },
   "citations_total": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "SELECT COUNT(*) FROM citations (data/moat.db)",
-    "value": 2411
+    "value": 2883
   },
   "commits": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "git rev-list --count HEAD",
-    "value": 102
+    "value": 121
   },
   "filings_rows": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "SELECT COUNT(*) FROM filings (data/moat.db)",
-    "value": 7499
+    "value": 7517
   },
   "fundamentals_coverage": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "SELECT COUNT(DISTINCT ticker) FROM fundamentals_annual (data/moat.db)",
-    "value": 505
+    "value": 506
   },
   "github_issues_open": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "gh issue list --state all",
-    "value": 7
+    "value": 12
   },
   "github_issues_total": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "gh issue list --state all",
-    "value": 8
+    "value": 14
   },
   "screen_passed": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "SUM(passed_screen) over the latest quality_scores run (data/moat.db)",
-    "value": 91
+    "value": 109
   },
   "screen_total": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "latest quality_scores run, same query as the dashboard's `latest_run` (data/moat.db)",
     "value": 505
   },
   "tests_collected": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "pytest --collect-only -q",
-    "value": 302
+    "value": 330
   },
   "tests_passing": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "pytest -q summary line",
-    "value": 301
+    "value": 329
   },
   "universe_companies": {
-    "as_of": "2026-09-19",
+    "as_of": "2026-09-23",
     "source": "SELECT COUNT(*) FROM companies WHERE is_active=1 (data/moat.db)",
     "value": 518
   }

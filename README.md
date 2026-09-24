@@ -25,7 +25,7 @@ figure) and the Sprint 3.1 retro for the 70-company/citation batch run:
 <!-- metrics:start -->
 | | | |
 |---|---|---|
-| 121 commits | 518-company universe, 506 with fundamentals | 109/505 pass the quant screen |
+| 123 commits | 518-company universe, 506 with fundamentals | 109/505 pass the quant screen |
 | 86 companies fully AI-analyzed, 2,883 citations | ~$28.1 total AI spend across every pilot to date | 330 tests, 329 passing (1 opt-in live-API test) |
 | 14 GitHub issues filed, 12 open — tracked, not hidden | | |
 
@@ -102,7 +102,7 @@ addendum define the guarantee).
 | Missing data is not failure | Metrics report pass/fail/**unavailable**, scored as % of *assessable* metrics — a company that can't be measured isn't indistinguishable from one that did badly (§A14). |
 | Sign-flip guards on every valuation output | A negative or zero denominator/intrinsic value returns an explicit non-numeric verdict, never a misleading number (§A16.4). |
 | Cost is a first-class constraint | Every AI stage runs under an explicit spend cap; a re-run against unchanged inputs costs $0 (§A5). |
-| Known problems are tracked, not hidden | [`docs/known-issues.md`](docs/known-issues.md) + 8 filed GitHub issues feed an adversarial independent review that runs on every push to `main`. |
+| Known problems are tracked, not hidden | [`docs/known-issues.md`](docs/known-issues.md) + 14 filed GitHub issues (12 open) feed an adversarial independent review that runs on every push to `main`. |
 
 ## What went wrong
 

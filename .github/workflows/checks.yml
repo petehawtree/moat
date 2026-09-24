@@ -1,0 +1,75 @@
+# Remote counterpart to scripts/hooks/pre-push.
+#
+# The local hook only fires when *you* push refs/heads/main. Merging a pull
+# request in GitHub's web UI runs no local hook at all, so nothing checked
+# the README's headline numbers on that path. This closes that gap.
+#
+# What this deliberately does NOT do: run ./judge.sh. The judge reads the
+# code *and* data/moat.db as untrusted claims (JUDGE_PROMPT.md), and the
+# database is gitignored — a runner would see code only. The risk-score
+# polarity inversion, this project's second-worst defect, was found by
+# reviewing real pilot output; a code-only judge would have missed it.
+# Running the weaker half under the judge's name is worse than not running
+# it, so the judge stays local. See docs/PRD_ADDENDUM.md §A19.7.
+#
+# The same limit applies to metrics: CI can verify README.md agrees with
+# docs/metrics.json, but not that docs/metrics.json agrees with reality,
+# because reality lives in a database only the dev machine has. The
+# freshness step below is the closest available proxy.
+
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to match the development environment (3.9.6). Raising this
+      # would test a Python nobody actually runs the pipeline on.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # README <-> docs/metrics.json consistency. Needs neither the
+      # database nor `gh`: cmd_check() reads those two files and nothing
+      # else, so it behaves identically here and locally.
+      - name: Metrics match the README
+        run: python scripts/metrics.py --check
+
+      # Advisory, matching the pre-push hook's own default (§A19.7): warn,
+      # never block. A stale as_of is a prompt to re-run --refresh on a
+      # machine that has data/moat.db, not a reason to reject a commit
+      # that may not touch metrics at all.
+      - name: Metrics freshness (advisory)
+        run: |
+          python - <<'PY'
+          import datetime, json, pathlib
+          m = json.loads(pathlib.Path("docs/metrics.json").read_text())
+          oldest = min(v["as_of"] for v in m.values())
+          age = (datetime.date.today() - datetime.date.fromisoformat(oldest)).days
+          stale = [k for k, v in sorted(m.items()) if v["as_of"] == oldest]
+          print(f"oldest metric as_of {oldest} ({age} days): {', '.join(stale)}")
+          if age > 30:
+              print(f"::warning file=docs/metrics.json::Headline metrics are {age} days old "
+                    f"(oldest: {oldest}). Run `python scripts/metrics.py --refresh --render` "
+                    f"on a machine with data/moat.db and commit the result.")
+          PY
+
+      # The one test that costs money and needs live credentials is gated
+      # on RUN_LIVE_API_TESTS, which is unset here — so this needs no
+      # secrets and makes no network calls.
+      - name: Tests
+        run: pytest -q

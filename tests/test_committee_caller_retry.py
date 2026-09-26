@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import anthropic
-import httpx
+import httpx2
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -16,19 +16,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from moat.committee import caller
 from moat.committee.caller import PersonaCallFailed, call_persona
 
-_REQ = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+_REQ = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
 
 
 def _midstream_overloaded():
     """The exact shape the SDK raises for an SSE `error` event: a generic
     APIStatusError carrying the stream's own HTTP 200."""
     body = {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
-    return anthropic.APIStatusError(str(body), response=httpx.Response(200, request=_REQ), body=body)
+    return anthropic.APIStatusError(str(body), response=httpx2.Response(200, request=_REQ), body=body)
 
 
 def _bad_request():
     body = {"type": "error", "error": {"type": "invalid_request_error", "message": "bad"}}
-    return anthropic.BadRequestError(str(body), response=httpx.Response(400, request=_REQ), body=body)
+    return anthropic.BadRequestError(str(body), response=httpx2.Response(400, request=_REQ), body=body)
 
 
 def _ok_stream():
@@ -94,11 +94,11 @@ def test_non_transient_error_propagates_without_retry(no_sleep):
 
 
 def test_midstream_connection_reset_is_retried(no_sleep):
-    """A connection dropped mid-stream surfaces as a raw httpx.ReadError,
+    """A connection dropped mid-stream surfaces as a raw httpx2.ReadError,
     not an SDK APIError — it aborted the resumed 2026-09-23 run."""
     client = MagicMock()
     client.messages.stream.side_effect = [
-        _failing_stream(httpx.ReadError("[Errno 54] Connection reset by peer")), _ok_stream(),
+        _failing_stream(httpx2.ReadError("[Errno 54] Connection reset by peer")), _ok_stream(),
     ]
     assert call_persona(client, "TEST", "valuation", "context").stop_reason == "end_turn"
     assert client.messages.stream.call_count == 2

@@ -19,7 +19,7 @@ import hashlib
 import time
 
 import anthropic
-import httpx
+import httpx2
 
 from moat.analysis.pricing import DEFAULT_MODEL, estimate_cost
 from moat.committee.prompt import PROTOCOL_VERSION, build_request
@@ -38,8 +38,11 @@ RETRY_DELAYS_SECONDS = (5, 20, 60)
 # the retry above — found on the 2026-09-23 run, where MPC took ~10 minutes
 # and the next ticker stalled 11+. A persona response streams continuously
 # and finishes well inside a minute, so 120s with no bytes means stalled.
-# httpx's read timeout is per-read (between chunks), not the whole response.
-CLIENT_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+# httpx2's read timeout is per-read (between chunks), not the whole response.
+# anthropic 1.x builds its client on httpx2, not httpx — a plain httpx.Timeout
+# is no longer accepted (github.com/anthropics/anthropic-sdk-python v1.0.0
+# migration notes).
+CLIENT_TIMEOUT = httpx2.Timeout(120.0, connect=10.0)
 _sleep = time.sleep  # patched out in tests
 
 
@@ -51,10 +54,10 @@ class PersonaCallFailed(Exception):
 
 
 def _is_transient(exc: Exception) -> bool:
-    # A connection dropped *mid-stream* surfaces as a raw httpx transport
+    # A connection dropped *mid-stream* surfaces as a raw httpx2 transport
     # error (e.g. ReadError "Connection reset by peer"), not wrapped by the
     # SDK — found when it aborted the resumed 2026-09-23 run.
-    if isinstance(exc, (anthropic.APIConnectionError, httpx.TransportError)):  # incl. APITimeoutError
+    if isinstance(exc, (anthropic.APIConnectionError, httpx2.TransportError)):  # incl. APITimeoutError
         return True
     if isinstance(exc, anthropic.APIStatusError):
         body = exc.body if isinstance(exc.body, dict) else {}
@@ -120,7 +123,7 @@ def call_persona(
             ) as stream:
                 message = stream.get_final_message()
             break
-        except (anthropic.APIError, httpx.TransportError) as exc:
+        except (anthropic.APIError, httpx2.TransportError) as exc:
             if not _is_transient(exc):
                 raise
             if delay is None:

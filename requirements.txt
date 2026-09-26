@@ -9,5 +9,7 @@ tenacity>=8.2       # retry/backoff for flaky free APIs
 python-dotenv>=1.0
 streamlit>=1.37
 anthropic>=1,<2     # Sprint 3+: AI analysis stages; 1.x major release, not 0.x
+httpx2>=2,<3        # anthropic 1.x builds on httpx2, not httpx; moat/committee/caller.py
+                    # imports it directly for Timeout/TransportError, so it's a direct dep here
 
 pytest>=8.2

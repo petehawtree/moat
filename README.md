@@ -81,13 +81,13 @@ yfinance (prices, supplementary), with confidence tracked per record (§A4).
 
 ## How it works
 
-<img src="docs/img/architecture.svg" alt="Project Moat pipeline: three free data sources feed an ingestion stage that writes into one shared SQLite store; five stages read and write that same store in sequence, with a citation-enforcement rule at the AI Analysis stage; the output reaches a human who makes the final call, while a separate watchlist monitor loops back to re-trigger ingestion on its own." width="100%">
+<img src="docs/img/architecture.svg" alt="Project Moat pipeline: three free data sources feed an ingestion stage that writes into one shared SQLite store; six stages — ingest, screen, quality, citation-enforced AI analysis, valuation, and the investment committee — read and write that same store in sequence, feeding a ranked dashboard and one-page brief; the output reaches a human who makes the final call. A planned Sprint 6 evaluates the committee's agents and experiments with MCP and multi-agent workflows, with watchlist monitoring deferred." width="100%">
 
 Ingest → Screen → Quality → AI Analysis (citation-enforced) → Valuation →
-Committee → **human decides**, with a watchlist monitor looping back to
-re-trigger ingestion on its own. Green = shipped (Sprint 0–4). Light green
-dashed = partially shipped (Sprint 5, in progress). Cream dashed = planned
-(Sprint 6, still a stub). Gold = the one stage no sprint ever replaces.
+Committee → **human decides**. Green = shipped (Sprint 0–5). Cream dashed =
+planned (Sprint 6 — Investment Committee agent eval, MCP, and multi-agent
+R&D; watchlist monitoring deferred, still a stub, §A26). Gold = the one
+stage no sprint ever replaces.
 
 **Every number traces back to a source.** A filing row, a price row, or a
 citation — never asserted without a path to where it came from
@@ -158,7 +158,7 @@ bugs, fixed them, and came back with this project's first
 | 3.1 | Citation/batch backlog + the 70-company AI run | [done](docs/sprints/sprint-3-1.md) |
 | 4 | Owner Earnings DCF + supporting valuation methods | [done](docs/sprints/sprint-4.md) |
 | 5 | Investment Committee + one-page Investment Brief | [done](docs/sprints/sprint-5.md) — 81 companies scored; Investigate/Watch/Reject thresholds deferred to the external-benchmark eval |
-| 6 | Watchlist monitoring | not started |
+| 6 | Investment Committee agent eval, MCP & multi-agent R&D (watchlist monitoring deferred, §A26) | [planned](docs/sprints/sprint-6-plan.md) |
 
 Longer-form lessons: [three bugs in structured financial data](docs/writeups/three-bugs-in-structured-financial-data.md)
 · [what two code reviews found](docs/writeups/what-two-code-reviews-found.md).

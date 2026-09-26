@@ -1803,3 +1803,47 @@ with the correction to the reported mechanism recorded there (not just
 here) so a future reader doesn't chase the wrong fix (disabling split
 adjustment, which doesn't exist as a separate setting) instead of the
 right one (`auto_adjust=False` + a full `price_history` re-ingest).
+
+### A26 Sprint 6 rescoped: watchlist deferred in favor of agent evaluation and multi-agent R&D
+
+**Decision:** Sprint 6, previously scoped as watchlist/monitoring
+(`watchlist_events`, live re-run triggers on earnings/price/management-change
+— named as Sprint 6's job since sprint-0.md and reaffirmed as out-of-scope-for-
+Sprint-5 in `sprint-5-plan.md`), is deferred. Sprint 6 becomes an AI-practice
+sprint instead: an evaluation harness for the Investment Committee's three
+personas (Quality/Bear/Valuation Analyst) and its `assign_status()`
+thresholds, plus experimentation with MCP and multi-agent workflow patterns
+as alternatives to the committee's current fixed sequential design. See
+[`sprint-6-plan.md`](sprints/sprint-6-plan.md) for the plan itself; this
+entry records the reasoning for the record.
+
+**Why:** Sprint 5 shipped the committee end to end but explicitly could not
+validate what it shipped — `assign_status()`'s 70/50 Investigate/Watch/Reject
+thresholds are starting values, not pilot-validated (sprint-5.md's "What the
+plan got wrong": *"'Pilot-then-lock' named no standard to lock against... that
+is why it moves to the eval rather than being ticked here"*), and that
+"external-benchmark eval" is already named, repeatedly, as the thing that has
+to happen before rankings can be called final (sprint-5.md's Carried
+forward; `docs/judge-reports/judge-report-sprint-5-20260923-170924.md`'s own
+top action item). Building live monitoring/triggers on top of a status field
+that isn't yet trusted would be automating a re-run around a threshold that
+might itself be wrong — the wrong order of operations. Separately, this
+project's stated point is as much the AI-engineering lesson as the
+investment-research output (README: *"the product-management and
+AI-engineering lessons are the point"*), and a three-persona LLM committee
+whose agents have never been evaluated against a benchmark, and whose
+workflow has only ever been tried one way (fixed sequential personas, no
+tool use), is exactly the kind of gap that lesson exists to close.
+
+**Consequence:** Sprint 6 scope becomes (1) the external-benchmark eval
+harness for the committee's status thresholds — the work item Sprint 5
+already deferred to it, now actually scheduled rather than indefinitely
+"carried forward"; (2) evaluating the three-persona design itself against
+that harness — prompt/persona effectiveness, agreement/disagreement
+patterns, where the fixed weighting in `compute_overall_score()` over- or
+under-responds; (3) experimenting with MCP as the tool/context layer for
+committee agents; (4) experimenting with alternative multi-agent workflow
+shapes (e.g. debate, supervisor-worker) against the current fixed sequential
+one. Watchlist/monitoring moves to a later, unscheduled sprint — nothing was
+ever built for it (`watchlist_events` is schema'd, unused), so nothing is
+stranded by the deferral.

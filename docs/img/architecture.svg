@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1220" role="img" aria-label="Diagram: three free data sources feed an ingestion stage that writes into one shared SQLite store. Ingest, the sector-relative screen, the quality score, citation-checked AI analysis, and Owner Earnings valuation are done and shipped; a ranked dashboard is live, with the one-page Investment Brief still to come; the AI investment committee remains planned. The result reaches a human who makes the final call, while a separate watchlist monitor (also planned) loops back to re-trigger ingestion on its own.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1220" role="img" aria-label="Diagram: three free data sources feed an ingestion stage that writes into one shared SQLite store. Ingest, the sector-relative screen, the quality score, citation-checked AI analysis, Owner Earnings valuation, the AI investment committee, and the ranked dashboard with its one-page Investment Brief are all done and shipped, though the dashboard's Investigate/Watch/Reject status thresholds are not yet validated. The result reaches a human who makes the final call. A planned Sprint 6 evaluates the investment committee's agents and experiments with MCP and multi-agent workflows, using the dashboard's output as benchmark input; watchlist monitoring is deferred.">
   <style>
     .node-title { font-family: Georgia, 'Times New Roman', serif; font-weight: 700; text-transform: uppercase; letter-spacing: 0.01em; fill: #1b2420; }
     .node-title-inv { fill: #f5f3e8; }
@@ -120,24 +120,22 @@
       <line x1="340" y1="836" x2="340" y2="864" class="flow-line" marker-end="url(#arrow)"></line>
 
       <!-- ================= STAGE 5: COMMITTEE ================= -->
-      <rect x="60" y="866" width="560" height="80" rx="3" class="box-planned"></rect>
-      <text x="590" y="882" text-anchor="end" class="tag" font-size="9">SPRINT 5</text>
-      <text x="340" y="900" text-anchor="middle" class="node-title" font-size="15">INVESTMENT COMMITTEE</text>
-      <text x="340" y="922" text-anchor="middle" class="node-sub" font-size="11">3 AI personas debate it → one weighted score</text>
+      <rect x="60" y="866" width="560" height="80" rx="3" class="box-done"></rect>
+      <text x="340" y="900" text-anchor="middle" class="node-title node-title-inv" font-size="15">INVESTMENT COMMITTEE</text>
+      <text x="340" y="922" text-anchor="middle" class="node-sub node-sub-inv" font-size="11">3 AI personas debate it → one weighted score — 81 companies scored</text>
 
       <line x1="340" y1="946" x2="340" y2="978" class="flow-line" marker-end="url(#arrow)"></line>
 
       <!-- ================= DASHBOARD ================= -->
-      <rect x="60" y="980" width="560" height="80" rx="3" class="box-partial"></rect>
-      <text x="590" y="996" text-anchor="end" class="tag" font-size="9">BRIEF: SPRINT 5</text>
-      <text x="340" y="1014" text-anchor="middle" class="node-title" font-size="15">RANKED DASHBOARD + BRIEF</text>
-      <text x="340" y="1036" text-anchor="middle" class="node-sub" font-size="11">coverage + ranked table + valuation live · Investment Brief still to come</text>
+      <rect x="60" y="980" width="560" height="80" rx="3" class="box-done"></rect>
+      <text x="340" y="1014" text-anchor="middle" class="node-title node-title-inv" font-size="15">RANKED DASHBOARD + BRIEF</text>
+      <text x="340" y="1036" text-anchor="middle" class="node-sub node-sub-inv" font-size="11">ranked table + one-page brief live · status thresholds not yet validated</text>
 
-      <!-- branch to HUMAN and WATCHLIST -->
+      <!-- branch to HUMAN and AGENT EVAL & R&D -->
       <line x1="260" y1="1060" x2="200" y2="1102" class="flow-line" marker-end="url(#arrow)"></line>
       <line x1="420" y1="1060" x2="480" y2="1102" class="flow-line" marker-end="url(#arrow)"></line>
       <text x="180" y="1082" text-anchor="middle" class="flow-label" font-size="9.5">brief</text>
-      <text x="500" y="1082" text-anchor="middle" class="flow-label" font-size="9.5">diffs vs prior run</text>
+      <text x="500" y="1082" text-anchor="middle" class="flow-label" font-size="9.5">benchmark input</text>
 
       <!-- ================= HUMAN ================= -->
       <rect x="60" y="1104" width="270" height="80" rx="3" class="box-human"></rect>
@@ -145,15 +143,11 @@
       <text x="195" y="1156" text-anchor="middle" class="node-sub node-sub-gold" font-size="10">Investigate · Watch · Reject</text>
       <text x="195" y="1170" text-anchor="middle" class="node-sub node-sub-gold" font-size="10">— the call is always yours</text>
 
-      <!-- ================= WATCHLIST ================= -->
+      <!-- ================= AGENT EVAL & R&D ================= -->
       <rect x="350" y="1104" width="270" height="80" rx="3" class="box-planned"></rect>
       <text x="600" y="1120" text-anchor="end" class="tag" font-size="9">SPRINT 6</text>
-      <text x="485" y="1140" text-anchor="middle" class="node-title" font-size="14">WATCHLIST</text>
-      <text x="485" y="1160" text-anchor="middle" class="node-sub" font-size="10">re-run triggers: earnings,</text>
-      <text x="485" y="1174" text-anchor="middle" class="node-sub" font-size="10">price threshold, mgmt change</text>
-
-      <!-- feedback loop -->
-      <path d="M600,1104 C 760,900 760,350 622,190" class="loop-line" marker-end="url(#arrow-loop)"></path>
-      <text x="726" y="650" text-anchor="middle" class="flow-label" font-size="10" fill="#8a6d19" transform="rotate(-90 726 650)">re-run trigger</text>
+      <text x="485" y="1140" text-anchor="middle" class="node-title" font-size="13">AGENT EVAL &amp; R&amp;D</text>
+      <text x="485" y="1160" text-anchor="middle" class="node-sub" font-size="10">committee eval, MCP,</text>
+      <text x="485" y="1174" text-anchor="middle" class="node-sub" font-size="10">multi-agent workflows</text>
 
     </svg>

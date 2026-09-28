@@ -51,9 +51,10 @@ import openpyxl
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Morningstar export header -> our field name. Headers are matched by prefix,
-# because the rating column arrives as "Morningstar Rating for Stocks" in some
-# views and truncated in others.
+# Morningstar export header -> our field name. Headers match by PREFIX, so more
+# specific names MUST come first: "EBITDA" before "EBIT", and the
+# "(Normalized)"/"(Forward)" return variants before their bare forms, or the
+# shorter name swallows the longer one.
 COLUMNS = {
     "Ticker": "ticker",
     "Name": "company_name",
@@ -69,6 +70,32 @@ COLUMNS = {
     "Price/Fair Value": "price_fair_value",
     "Last Price": "last_price",
     "Market Cap": "market_cap",
+    "1-Star Price": "one_star_price",
+    "5-Star Price": "five_star_price",
+    "Return on Invested Capital (Normalized)": "roic_normalized",
+    "Return on Invested Capital": "roic",
+    "Return on Equity (Normalized)": "roe_normalized",
+    "Return on Equity (Forward)": "roe_forward",
+    "Return on Equity": "roe",
+    "Revenue": "revenue",
+    "Gross Margin": "gross_margin",
+    "Operating Margin": "operating_margin",
+    "Net Income": "net_income",
+    "EBITDA": "ebitda",
+    "EBIT": "ebit",
+    "Cash Flow from Operations": "operating_cash_flow",
+    "Capital Expenditures": "capex",
+    "Free Cash Flow": "free_cash_flow",
+    "Total Debt": "total_debt",
+    "Cash (Balance Sheet)": "cash_and_equiv",
+    "Total Equity": "total_equity",
+    "Working Capital": "working_capital",
+    "Goodwill and Other Intangibles": "goodwill_and_intangibles",
+    "Shares Outstanding": "shares_outstanding",
+    "Enterprise Value": "enterprise_value",
+    "Financial Health Grade": "financial_health_grade",
+    "Profitability Grade": "profitability_grade",
+    "Growth Grade": "growth_grade",
     "Analyst": "analyst",
     "Report Date": "report_date",
 }
@@ -94,6 +121,23 @@ def coverage_tier(row: dict) -> tuple[str, list[str]]:
     if not row.get("capital_allocation"):
         signals.append("no_capital_allocation")
     return ("quantitative" if signals else "analyst"), signals
+
+
+
+_BAND_LADDER = {1.5625: "Low", 1.9286: "Medium", 2.5833: "High", 3.5: "Very High"}
+
+
+def _band_to_uncertainty(width):
+    """Which uncertainty the star band implies. Derived from 24 analyst-covered
+    companies with zero variance. Quantitatively rated names carry a narrower
+    band and fall off this ladder, so OFF_LADDER is the cleanest signal that a
+    row is quant-rated rather than analyst-covered."""
+    if width is None:
+        return None
+    for w, label in _BAND_LADDER.items():
+        if abs(width - w) < 0.02:
+            return label
+    return "OFF_LADDER"
 
 
 def resolve_benchmark_dir() -> Path:
@@ -204,6 +248,12 @@ def main() -> int:
             rec["price_fair_value_calc"] = (
                 round(float(lp) / float(fv), 6) if fv and lp else None
             )
+            fs, os_ = rec.get("five_star_price"), rec.get("one_star_price")
+            rec["required_margin_of_safety_pct"] = (
+                round((1 - float(fs) / float(fv)) * 100, 2) if fv and fs else None
+            )
+            rec["band_width_x"] = round(float(os_) / float(fs), 4) if fs and os_ else None
+            rec["uncertainty_implied_by_band"] = _band_to_uncertainty(rec.get("band_width_x"))
             rec["coverage_tier"], rec["coverage_signals"] = coverage_tier(rec)
             tiers[rec["coverage_tier"]] += 1
             rec.update(

@@ -1,11 +1,11 @@
 {
   "ai_analyses_companies": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "SELECT COUNT(DISTINCT ticker) FROM ai_analysis WHERE is_current=1 (data/moat.db)",
     "value": 86
   },
   "ai_spend_analysis_stage": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "SUM(cost_estimate) over analysis_attempts, all outcomes \u2014 real dollars spent even on a validation_failed attempt (data/moat.db)",
     "value": 15.327
   },
@@ -15,62 +15,62 @@
     "value": 12.77
   },
   "ai_spend_total": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "ai_spend_analysis_stage + ai_spend_committee_pilot (oldest input: 2026-09-23)",
     "value": 28.1
   },
   "citations_total": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "SELECT COUNT(*) FROM citations (data/moat.db)",
     "value": 2883
   },
   "commits": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "git rev-list --count HEAD",
-    "value": 127
+    "value": 133
   },
   "filings_rows": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "SELECT COUNT(*) FROM filings (data/moat.db)",
     "value": 7517
   },
   "fundamentals_coverage": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "SELECT COUNT(DISTINCT ticker) FROM fundamentals_annual (data/moat.db)",
     "value": 506
   },
   "github_issues_open": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "gh issue list --state all",
     "value": 14
   },
   "github_issues_total": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "gh issue list --state all",
     "value": 16
   },
   "screen_passed": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "SUM(passed_screen) over the latest quality_scores run (data/moat.db)",
     "value": 109
   },
   "screen_total": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "latest quality_scores run, same query as the dashboard's `latest_run` (data/moat.db)",
     "value": 505
   },
   "tests_collected": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "pytest --collect-only -q",
     "value": 330
   },
   "tests_passing": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "pytest -q summary line",
     "value": 329
   },
   "universe_companies": {
-    "as_of": "2026-09-24",
+    "as_of": "2026-09-28",
     "source": "SELECT COUNT(*) FROM companies WHERE is_active=1 (data/moat.db)",
     "value": 518
   }

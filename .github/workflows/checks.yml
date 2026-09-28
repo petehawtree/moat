@@ -36,9 +36,17 @@ jobs:
 
       # Pinned to match the development environment (3.9.6). Raising this
       # would test a Python nobody actually runs the pipeline on.
+      #
+      # 3.11, not 3.9: requirements.txt pins anthropic>=1,<2, and anthropic 1.x
+      # requires Python >=3.10, so a 3.9 runner cannot install the declared
+      # dependencies at all. Worth knowing that the dev venv is still 3.9 with
+      # anthropic 0.121.0 left over from before the pin — it satisfies the
+      # imports but not requirements.txt, so local green and a fresh install
+      # are not currently the same test. Nothing declares a minimum Python
+      # (no pyproject/setup.py), which is why the mismatch went unnoticed.
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.11'
           cache: pip
 
       - run: pip install -r requirements.txt

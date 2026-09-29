@@ -16,3 +16,6 @@ sprints executed against.
 - [Sprint 3.1 — Citation/batch backlog + the authorized 90-company run](sprint-3-1.md)
 - [Sprint 4 — Owner Earnings DCF + scenario valuation](sprint-4.md)
 - [Sprint 5 — Investment Committee + Investment Brief](sprint-5.md)
+
+Planned: [Sprint 6 — External-benchmark eval](sprint-6-plan.md).
+Not yet scheduled: [future sprints](future-sprints.md).

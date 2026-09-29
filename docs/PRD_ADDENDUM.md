@@ -1847,3 +1847,39 @@ shapes (e.g. debate, supervisor-worker) against the current fixed sequential
 one. Watchlist/monitoring moves to a later, unscheduled sprint — nothing was
 ever built for it (`watchlist_events` is schema'd, unused), so nothing is
 stranded by the deferral.
+
+### A27 Sprint 6 narrowed to eval only, with a data-baseline phase first
+
+**Decision:** Sprint 6 gains a phase ahead of the harness, Sprint 6.0,
+which fixes four defects (#15, #1 re-scoped, #16, #10) and re-runs the
+pipeline. This amends §A26's "no changes to ingest/screen/valuation" and its
+exclusion of #10. Details are in
+[`sprint-6-plan.md`](sprints/sprint-6-plan.md).
+
+**Why:** the Morningstar capture (`docs/evals/benchmark-prep-outcome.md`)
+is complete and frozen, but the Moat run it was compared against,
+`20260923T122501Z`, is not a fair subject. 427 of 518 tickers were priced on
+August closes (#15). #16 moves five screen verdicts. #1 affects 128
+companies, not the 24 catalogued. Scoring that run alone would measure known
+defects, not the pipeline.
+
+**Consequence:** the harness scores both the baseline run and the post-fix
+run. The frozen benchmark was captured before these fixes so that each one
+could be measured. Scoring both runs uses that: the difference between runs
+is each fix's effect. #5, the single universe-wide `DISCOUNT_RATE`, and an
+uncertainty-scaled required margin of safety stay out of 6.0. They are
+design choices to test in the eval, not defects to fix before it.
+
+Three definitional differences found by Tier C are settled as decisions,
+not defects: free cash flow stays operating cash flow minus capex, total
+debt excludes leases, and `fundamentals_quarterly` stays unpopulated.
+Treating a definitional difference as an extraction defect is the mistake
+#16 was nearly filed as.
+
+**Also decided 2026-09-29: MCP and alternative multi-agent workflows leave
+Sprint 6.** §A26 bundled them with the eval. Each is a sprint in its own
+right: MCP replaces how every committee agent gets its context, and debate or
+supervisor-worker changes the committee's shape. Both also depend on the
+harness this sprint builds to be scored at all. They move to
+[`future-sprints.md`](sprints/future-sprints.md) and get planned once the
+eval has run, when there is a baseline to beat.

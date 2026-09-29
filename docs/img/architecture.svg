@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1220" role="img" aria-label="Diagram: three free data sources feed an ingestion stage that writes into one shared SQLite store. Ingest, the sector-relative screen, the quality score, citation-checked AI analysis, Owner Earnings valuation, the AI investment committee, and the ranked dashboard with its one-page Investment Brief are all done and shipped, though the dashboard's Investigate/Watch/Reject status thresholds are not yet validated. The result reaches a human who makes the final call. A planned Sprint 6 evaluates the investment committee's agents and experiments with MCP and multi-agent workflows, using the dashboard's output as benchmark input; watchlist monitoring is deferred.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1220" role="img" aria-label="Diagram: three free data sources feed an ingestion stage that writes into one shared SQLite store. Ingest, the sector-relative screen, the quality score, citation-checked AI analysis, Owner Earnings valuation, the AI investment committee, and the ranked dashboard with its one-page Investment Brief are all done and shipped, though the dashboard's Investigate/Watch/Reject status thresholds are not yet validated. The result reaches a human who makes the final call. A planned Sprint 6 evaluates the pipeline against an external benchmark, using the dashboard's output as input; MCP, multi-agent workflows and watchlist monitoring are future sprints.">
   <style>
     .node-title { font-family: Georgia, 'Times New Roman', serif; font-weight: 700; text-transform: uppercase; letter-spacing: 0.01em; fill: #1b2420; }
     .node-title-inv { fill: #f5f3e8; }
@@ -146,8 +146,8 @@
       <!-- ================= AGENT EVAL & R&D ================= -->
       <rect x="350" y="1104" width="270" height="80" rx="3" class="box-planned"></rect>
       <text x="600" y="1120" text-anchor="end" class="tag" font-size="9">SPRINT 6</text>
-      <text x="485" y="1140" text-anchor="middle" class="node-title" font-size="13">AGENT EVAL &amp; R&amp;D</text>
-      <text x="485" y="1160" text-anchor="middle" class="node-sub" font-size="10">committee eval, MCP,</text>
-      <text x="485" y="1174" text-anchor="middle" class="node-sub" font-size="10">multi-agent workflows</text>
+      <text x="485" y="1140" text-anchor="middle" class="node-title" font-size="13">BENCHMARK EVAL</text>
+      <text x="485" y="1160" text-anchor="middle" class="node-sub" font-size="10">external benchmark,</text>
+      <text x="485" y="1174" text-anchor="middle" class="node-sub" font-size="10">status thresholds</text>
 
     </svg>

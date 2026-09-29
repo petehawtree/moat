@@ -232,23 +232,48 @@ TAG_CANDIDATES: dict[str, tuple[list[str], str, str]] = {
     "long_term_debt_current": (["LongTermDebtCurrent", "DebtCurrent"], "USD", "instant"),
 }
 
-# Owner Earnings input (§A16.2): D&A tag tiers, merged the same way as
-# TAG_CANDIDATES above (whichever tag covers a given period wins, in
-# priority order) — the combined cash-flow-statement line most filers use,
-# falling back to the accretion variant. A third tier (sum of the split
-# Depreciation + AmortizationOfIntangibleAssets tags) is handled separately
-# in _depreciation_amortization, because it's a combination rule, not a
-# priority merge — summed rather than substituted.
+# Owner Earnings input (§A16.2): D&A source tiers, chosen per period as the
+# FIRST USABLE source in this order (GitHub #10 rewrote the merge):
+#   1. DepreciationDepletionAndAmortization
+#   2. DepreciationAmortizationAndAccretionNet
+#   3. split sum: Depreciation + AmortizationOfIntangibleAssets
+#   4. DepreciationAndAmortization (last resort, GitHub #9)
+# "Usable" means present and >= 0. A negative value is REJECTED, not
+# abs()'d: for financials (WRB, ALL, KKR) the accretion-net tag includes
+# bond accretion and can legitimately be net negative, so its magnitude is
+# not D&A (WRB FY2024 is -170.6M against 55M of depreciation). AES stores
+# -1,457M the same way. A rejected negative is flagged, and if nothing else
+# is usable the value is None: unknown stays unknown (§A13).
+#
+# The split sum requires Depreciation. Only a missing (or rejected-negative)
+# AmortizationOfIntangibleAssets is treated as 0, because a filer with no
+# intangibles legitimately has none; zero depreciation is not a real state,
+# so a missing Depreciation never zero-fills. Before GitHub #10 either
+# missing component was zero-filled, which stored amortization alone as D&A
+# (NEE 65M vs 6,580M; CBRE about half its true value; 583 company-years) and
+# pre-empted tier 4.
 _DA_COMBINED_TAGS = ["DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet"]
 _DA_SPLIT_TAG = "Depreciation"
 _DA_SPLIT_AMORTIZATION_TAG = "AmortizationOfIntangibleAssets"
 _DA_SPLIT_SUM_LABEL = "Depreciation+AmortizationOfIntangibleAssets"
 # Fourth tier (GitHub #9): CASY tags its cash-flow D&A only as
-# DepreciationAndAmortization. Last resort, applied only to periods no
-# earlier tier covers, so no existing figure changes: some filers use this
-# tag on the income statement, where it can exclude D&A buried in cost of
-# sales, so the cash-flow tags above stay preferred.
+# DepreciationAndAmortization. Last resort: some filers use this tag on the
+# income statement, where it can exclude D&A buried in cost of sales, so the
+# cash-flow tags above stay preferred.
 _DA_LAST_RESORT_TAG = "DepreciationAndAmortization"
+
+# D&A quality flags (GitHub #10). Names deliberately avoid the substrings
+# `share_count_unit_outlier` / `implausible_ratio`, which
+# moat/screen/quant_screen.py matches on: D&A flags must not change screen
+# results.
+FLAG_DA_NEGATIVE_REJECTED = "da_negative_rejected"
+FLAG_DA_BELOW_DA_TAG = "da_below_da_tag"
+# Cross-check: a tier 1-3 figure below this fraction of a positive
+# DepreciationAndAmortization value is flagged. Flag only, never override:
+# some filers use that tag on the income statement, or for a broader set of
+# items, so it isn't safe as a replacement; the flag makes a low figure
+# visible for review.
+_DA_CROSSCHECK_MIN_RATIO = 0.8
 
 # Summed capex tier (GitHub #9): oil-and-gas producers (EOG) split capex
 # across additions to oil-and-gas properties and additions to other PP&E,
@@ -296,33 +321,77 @@ def _merged_annual_entries(gaap: dict, names: list[str], unit_key: str, kind: st
 
 
 def _depreciation_amortization(gaap: dict) -> dict[str, dict]:
-    """Merge D&A across the combined-tag tiers, then fill any period neither
-    combined tag covers by summing the split Depreciation +
-    AmortizationOfIntangibleAssets tags (§A16.2's third tier).
+    """Per period end, the first usable D&A source (GitHub #10, §A16.2).
 
-    A period missing one of the two split tags still gets a value — a filer
-    with no amortizable intangibles legitimately reports no
-    AmortizationOfIntangibleAssets tag at all, and treating "not present" as
-    "zero" here is correct (unlike NWC's fragments, there's no risk of
-    silently missing a *different* real component: depreciation + intangible
-    amortization is, by definition, the whole of D&A).
+    Order: DepreciationDepletionAndAmortization, then
+    DepreciationAmortizationAndAccretionNet, then Depreciation +
+    AmortizationOfIntangibleAssets, then DepreciationAndAmortization. A
+    source is usable when present and >= 0; negatives are rejected (not
+    abs()'d, see the comment above _DA_COMBINED_TAGS) and flagged with
+    FLAG_DA_NEGATIVE_REJECTED.
+
+    The split sum needs Depreciation; a missing or negative amortization
+    counts as 0, but a missing Depreciation never zero-fills. If no source
+    is usable, val is None (§A13) while any rejection flag is kept. Periods
+    with no source at all are omitted.
+
+    FLAG_DA_BELOW_DA_TAG is added when a tier 1-3 figure is strictly below
+    _DA_CROSSCHECK_MIN_RATIO of a positive DepreciationAndAmortization value.
+    It never changes the value.
+
+    Returns {period_end: {"val", "_tag", "_flags"}}.
     """
-    merged = dict(_merged_annual_entries(gaap, _DA_COMBINED_TAGS, "USD", "duration"))
+    def entries(tag):
+        return _annual_entries(gaap.get(tag), "USD", "duration")
 
-    depreciation = _annual_entries(gaap.get(_DA_SPLIT_TAG), "USD", "duration")
-    amortization = _annual_entries(gaap.get(_DA_SPLIT_AMORTIZATION_TAG), "USD", "duration")
-    for end in set(depreciation) | set(amortization):
-        if end in merged:
-            continue  # a combined tag already covers this period; don't override it
+    combined = [(t, entries(t)) for t in _DA_COMBINED_TAGS]
+    depreciation = entries(_DA_SPLIT_TAG)
+    amortization = entries(_DA_SPLIT_AMORTIZATION_TAG)
+    last_resort = entries(_DA_LAST_RESORT_TAG)
+
+    ends = set(depreciation) | set(amortization) | set(last_resort)
+    for _, e in combined:
+        ends |= set(e)
+
+    result: dict[str, dict] = {}
+    for end in sorted(ends):
         d = depreciation.get(end, {}).get("val")
         a = amortization.get(end, {}).get("val")
-        if d is None and a is None:
-            continue
-        merged[end] = {"val": (d or 0) + (a or 0), "_tag": _DA_SPLIT_SUM_LABEL}
+        amortization_rejected = a is not None and a < 0  # treated as absent
+        # The split sum exists only when Depreciation does; a negative
+        # Depreciation stays negative so the loop below rejects it.
+        split = None
+        if d is not None:
+            split = d if d < 0 else d + (0 if a is None or amortization_rejected else a)
 
-    for end, row in _annual_entries(gaap.get(_DA_LAST_RESORT_TAG), "USD", "duration").items():
-        merged.setdefault(end, {**row, "_tag": _DA_LAST_RESORT_TAG})
-    return merged
+        candidates = [(e.get(end, {}).get("val"), name) for name, e in combined]
+        candidates.append((split, _DA_SPLIT_SUM_LABEL))
+        candidates.append((last_resort.get(end, {}).get("val"), _DA_LAST_RESORT_TAG))
+
+        # First usable source wins. A negative skipped on the way is flagged;
+        # one below the winning tier was never in play, so it isn't.
+        flags: list[str] = []
+        val = tag = None
+        for v, name in candidates:
+            if v is None:
+                continue
+            if v < 0:
+                if FLAG_DA_NEGATIVE_REJECTED not in flags:
+                    flags.append(FLAG_DA_NEGATIVE_REJECTED)
+                continue
+            val, tag = v, name
+            if name == _DA_SPLIT_SUM_LABEL and amortization_rejected and FLAG_DA_NEGATIVE_REJECTED not in flags:
+                flags.append(FLAG_DA_NEGATIVE_REJECTED)
+            break
+
+        lr = last_resort.get(end, {}).get("val")
+        if val is not None and tag != _DA_LAST_RESORT_TAG and lr and lr > 0 and val < _DA_CROSSCHECK_MIN_RATIO * lr:
+            flags.append(FLAG_DA_BELOW_DA_TAG)
+
+        if val is None and not flags:
+            continue  # no source existed at all
+        result[end] = {"val": val, "_tag": tag, "_flags": flags}
+    return result
 
 
 def _capex(gaap: dict) -> dict[str, dict]:
@@ -802,6 +871,7 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
         flags = check_row_quality(row) + check_ratio_plausibility(row)
         if working_capital_change is None:
             flags.append(FLAG_NWC_UNAVAILABLE)
+        flags.extend(da_series.get(end, {}).get("_flags", []))  # GitHub #10
         row["quality_flags"] = ",".join(flags) or None
         rows.append(row)
 

@@ -298,3 +298,147 @@ def test_da_split_tier_wins_over_last_resort_tag():
         "DepreciationAndAmortization": _fy(25),
     })
     assert extract_annual_fundamentals(facts)[0]["depreciation_amortization"] == 38
+
+
+# ---------------------------------------------------------------------------
+# GitHub #10: D&A tier order, negative rejection, cross-check flag
+# ---------------------------------------------------------------------------
+
+def _da_row(extra_gaap):
+    rows = extract_annual_fundamentals(_da_nwc_facts(extra_gaap))
+    assert len(rows) == 1
+    return rows[0]
+
+
+def _flags(row):
+    return (row["quality_flags"] or "").split(",")
+
+
+def test_da_nee_fy2025_amortization_alone_does_not_pre_empt_da_tag():
+    """NEE FY2025: only AmortizationOfIntangibleAssets (65,000,000) plus
+    DepreciationAndAmortization (6,580,000,000), no Depreciation. Stored
+    before: 65,000,000 (amortization alone). Expected: 6,580,000,000."""
+    row = _da_row({
+        "AmortizationOfIntangibleAssets": _fy(65_000_000),
+        "DepreciationAndAmortization": _fy(6_580_000_000),
+    })
+    assert row["depreciation_amortization"] == 6_580_000_000
+    assert "da_negative_rejected" not in _flags(row)
+    assert "da_below_da_tag" not in _flags(row)
+
+
+def test_da_cbre_fy2019_amortization_alone_does_not_pre_empt_da_tag():
+    """CBRE FY2019: AmortizationOfIntangibleAssets 225,700,000 and
+    DepreciationAndAmortization 439,224,000. Stored before: 225,700,000.
+    Expected: 439,224,000."""
+    row = _da_row({
+        "AmortizationOfIntangibleAssets": _fy(225_700_000),
+        "DepreciationAndAmortization": _fy(439_224_000),
+    })
+    assert row["depreciation_amortization"] == 439_224_000
+
+
+def test_da_peg_fy2019_amortization_alone_is_unknown():
+    """PEG FY2019: only AmortizationOfIntangibleAssets (108,000,000).
+    Stored before: 108,000,000. Expected: None. Accepted trade-off: unknown
+    over wrong (§A13); amortization alone is not D&A."""
+    row = _da_row({"AmortizationOfIntangibleAssets": _fy(108_000_000)})
+    assert row["depreciation_amortization"] is None
+
+
+def test_da_aes_fy2025_negative_accretion_tag_rejected_split_wins():
+    """AES FY2025: DepreciationAmortizationAndAccretionNet -1,457,000,000
+    stored before. Expected: split sum 1,330,000,000 + 94,000,000 =
+    1,424,000,000, da_negative_rejected, and no da_below_da_tag
+    (1,424 / 1,457 = 0.977 >= 0.8)."""
+    row = _da_row({
+        "DepreciationAmortizationAndAccretionNet": _fy(-1_457_000_000),
+        "Depreciation": _fy(1_330_000_000),
+        "AmortizationOfIntangibleAssets": _fy(94_000_000),
+        "DepreciationAndAmortization": _fy(1_457_000_000),
+    })
+    assert row["depreciation_amortization"] == 1_424_000_000
+    assert "da_negative_rejected" in _flags(row)
+    assert "da_below_da_tag" not in _flags(row)
+
+
+def test_da_wrb_fy2024_negative_accretion_net_falls_to_depreciation():
+    """WRB FY2024: DepreciationAmortizationAndAccretionNet -170,638,000
+    (bond accretion dominates) stored before. Expected: Depreciation alone,
+    55,000,000, with da_negative_rejected."""
+    row = _da_row({
+        "DepreciationAmortizationAndAccretionNet": _fy(-170_638_000),
+        "Depreciation": _fy(55_000_000),
+    })
+    assert row["depreciation_amortization"] == 55_000_000
+    assert "da_negative_rejected" in _flags(row)
+
+
+def test_da_luv_fy2007_negative_last_resort_tag_is_unknown():
+    """LUV FY2007: DepreciationAndAmortization -555,000,000 only. Stored
+    before: -555,000,000. Expected: None with da_negative_rejected."""
+    row = _da_row({"DepreciationAndAmortization": _fy(-555_000_000)})
+    assert row["depreciation_amortization"] is None
+    assert "da_negative_rejected" in _flags(row)
+
+
+def test_da_adsk_fy2018_split_sum_above_crosscheck_ratio_not_flagged():
+    """ADSK FY2018 (2017-02-01 to 2018-01-31): Depreciation 67,600,000 +
+    AmortizationOfIntangibleAssets 20,200,000 = 87,800,000 against
+    DepreciationAndAmortization 108,400,000. Ratio 87.8/108.4 = 0.810 is
+    above 0.8, so NOT flagged."""
+    period = ("2017-02-01", "2018-01-31")
+
+    def fact(val):
+        return {"units": {"USD": [_usd_row(*period, val)]}}
+
+    facts = {"facts": {"us-gaap": {
+        "Revenues": fact(2_000_000_000),
+        "NetIncomeLoss": fact(100_000_000),
+        "Depreciation": fact(67_600_000),
+        "AmortizationOfIntangibleAssets": fact(20_200_000),
+        "DepreciationAndAmortization": fact(108_400_000),
+    }}}
+    row = extract_annual_fundamentals(facts)[0]
+    assert row["depreciation_amortization"] == 87_800_000
+    assert "da_below_da_tag" not in _flags(row)
+
+
+def test_da_crosscheck_boundary_is_strictly_below_80_percent():
+    """Chosen 79 vs tag 100 -> flagged; chosen 80 vs tag 100 -> not flagged.
+    The value is never overridden either way."""
+    low = _da_row({"DepreciationDepletionAndAmortization": _fy(79), "DepreciationAndAmortization": _fy(100)})
+    assert low["depreciation_amortization"] == 79
+    assert "da_below_da_tag" in _flags(low)
+    edge = _da_row({"DepreciationDepletionAndAmortization": _fy(80), "DepreciationAndAmortization": _fy(100)})
+    assert edge["depreciation_amortization"] == 80
+    assert "da_below_da_tag" not in _flags(edge)
+
+
+def test_da_negative_amortization_component_treated_as_absent():
+    """A negative AmortizationOfIntangibleAssets (-5) is rejected: D&A is
+    depreciation alone (30), flagged da_negative_rejected."""
+    row = _da_row({"Depreciation": _fy(30), "AmortizationOfIntangibleAssets": _fy(-5)})
+    assert row["depreciation_amortization"] == 30
+    assert "da_negative_rejected" in _flags(row)
+
+
+def test_da_flags_do_not_disqualify_share_counts_in_screen():
+    """The D&A flags must not trip quant_screen's share-count filter, which
+    matches on `share_count_unit_outlier` only."""
+    from moat.screen.quant_screen import _usable_share_row
+
+    assert _usable_share_row({"quality_flags": "da_negative_rejected,da_below_da_tag"})
+    assert not _usable_share_row({"quality_flags": "share_count_unit_outlier"})
+
+
+def test_da_negative_below_winning_tier_is_not_flagged():
+    """A negative source ranked below the one that won was never in play, so
+    nothing was rejected and no flag is raised (GitHub #10)."""
+    facts = _da_nwc_facts({
+        "DepreciationDepletionAndAmortization": _fy(50),
+        "DepreciationAndAmortization": _fy(-50),
+    })
+    row = extract_annual_fundamentals(facts)[0]
+    assert row["depreciation_amortization"] == 50
+    assert "da_negative_rejected" not in (row["quality_flags"] or "")

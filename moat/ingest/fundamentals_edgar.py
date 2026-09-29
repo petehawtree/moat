@@ -228,9 +228,44 @@ TAG_CANDIDATES: dict[str, tuple[list[str], str, str]] = {
         "instant",
     ),
     "stockholders_equity": (["StockholdersEquity"], "USD", "instant"),
-    "long_term_debt_noncurrent": (["LongTermDebtNoncurrent"], "USD", "instant"),
-    "long_term_debt_current": (["LongTermDebtCurrent", "DebtCurrent"], "USD", "instant"),
 }
+
+# total_debt (GitHub #1): borrowings, excluding leases (§A27). Filers tag debt
+# in many overlapping ways, and summing LongTermDebtNoncurrent +
+# LongTermDebtCurrent alone missed it entirely for ~126 companies and caught
+# only a fragment for others (TDG stored 124M of 29.3bn, AVGO and ORCL were
+# understated ~20x). Per period, in order:
+#   1. the LARGEST of the lease-free totals present: LongTermDebt,
+#      DebtLongtermAndShorttermCombinedAmount, and LongTermDebtNoncurrent +
+#      (LongTermDebtCurrent, else DebtCurrent). Each measures a subset of
+#      true borrowing, and filers often tag one of them partially (CSGP's
+#      LongTermDebt is 140M against 993M non-current; MCD's LongTermDebt
+#      omits the current portion), so the largest is the least incomplete.
+#      Scored against the external benchmark this lifts agreement within 25%
+#      from 50% to 61% of companies.
+#   2. a finance-lease-inclusive total, flagged FLAG_DEBT_INCLUDES_FINANCE_LEASES
+#      (AMT reports debt only this way: 37.2bn).
+#   3. an instrument-level total, flagged FLAG_DEBT_FROM_INSTRUMENT_TAG: the
+#      larger of NotesPayable (DHI, MAA, O) and convertible notes (NOW, DDOG,
+#      DXCM). Senior/secured/unsecured pieces are NOT summed: filers overlap
+#      them, so a sum can double-count.
+#   4. a current-portion-only figure, flagged FLAG_DEBT_CURRENT_ONLY. Current
+#      debt alone is a fragment wherever a fuller total exists (AMT's
+#      LongTermDebtCurrent is 3.39bn of 37.2bn), so it ranks last.
+# No debt tag at all stays NULL, never 0: F, PCAR and AES report debt only
+# in their own extension namespaces, and a zero would read as "no debt".
+# Negative values are ignored; a debt balance can't be negative.
+_DEBT_TOTAL_TAGS = ["LongTermDebt", "DebtLongtermAndShorttermCombinedAmount"]
+_DEBT_NONCURRENT_TAG = "LongTermDebtNoncurrent"
+_DEBT_CURRENT_TAGS = ["LongTermDebtCurrent", "DebtCurrent"]
+_DEBT_WITH_LEASES_TOTAL_TAG = "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities"
+_DEBT_WITH_LEASES_NONCURRENT_TAG = "LongTermDebtAndCapitalLeaseObligations"
+_DEBT_WITH_LEASES_CURRENT_TAG = "LongTermDebtAndCapitalLeaseObligationsCurrent"
+_DEBT_NOTES_PAYABLE_TAG = "NotesPayable"
+_DEBT_CONVERTIBLE_TAGS = ["ConvertibleLongTermNotesPayable", "ConvertibleNotesPayableCurrent"]
+FLAG_DEBT_INCLUDES_FINANCE_LEASES = "debt_includes_finance_leases"
+FLAG_DEBT_FROM_INSTRUMENT_TAG = "debt_from_instrument_tag"
+FLAG_DEBT_CURRENT_ONLY = "debt_current_portion_only"
 
 # Owner Earnings input (§A16.2): D&A source tiers, chosen per period as the
 # FIRST USABLE source in this order (GitHub #10 rewrote the merge):
@@ -391,6 +426,62 @@ def _depreciation_amortization(gaap: dict) -> dict[str, dict]:
         if val is None and not flags:
             continue  # no source existed at all
         result[end] = {"val": val, "_tag": tag, "_flags": flags}
+    return result
+
+
+def _total_debt(gaap: dict) -> dict[str, dict]:
+    """total_debt per period end, by the tiers above _DEBT_TOTAL_TAGS
+    (GitHub #1). Returns {period_end: {"val", "_flags"}}."""
+    def entries(tag):
+        return {
+            end: row["val"]
+            for end, row in _annual_entries(gaap.get(tag), "USD", "instant").items()
+            if row.get("val") is not None and row["val"] >= 0
+        }
+
+    def sum_present(*values):
+        present = [v for v in values if v is not None]
+        return sum(present) if present else None
+
+    totals = [entries(t) for t in _DEBT_TOTAL_TAGS]
+    noncurrent = entries(_DEBT_NONCURRENT_TAG)
+    current_by_tag = [entries(t) for t in _DEBT_CURRENT_TAGS]
+    with_leases_total = entries(_DEBT_WITH_LEASES_TOTAL_TAG)
+    with_leases_noncurrent = entries(_DEBT_WITH_LEASES_NONCURRENT_TAG)
+    with_leases_current = entries(_DEBT_WITH_LEASES_CURRENT_TAG)
+    notes_payable = entries(_DEBT_NOTES_PAYABLE_TAG)
+    convertible = [entries(t) for t in _DEBT_CONVERTIBLE_TAGS]
+
+    sources = totals + [noncurrent, with_leases_total, with_leases_noncurrent,
+                        with_leases_current, notes_payable] + current_by_tag + convertible
+    ends = set().union(*sources)
+
+    result: dict[str, dict] = {}
+    for end in ends:
+        current = next((c[end] for c in current_by_tag if end in c), None)
+
+        lease_free = [t[end] for t in totals if end in t]
+        if end in noncurrent:
+            lease_free.append(noncurrent[end] + (current or 0))
+        if lease_free:
+            result[end] = {"val": max(lease_free), "_flags": []}
+            continue
+
+        with_leases = with_leases_total.get(end)
+        if with_leases is None:
+            with_leases = sum_present(with_leases_noncurrent.get(end), with_leases_current.get(end))
+        if with_leases is not None:
+            result[end] = {"val": with_leases, "_flags": [FLAG_DEBT_INCLUDES_FINANCE_LEASES]}
+            continue
+
+        instruments = [v for v in (notes_payable.get(end),
+                                   sum_present(*(c.get(end) for c in convertible))) if v is not None]
+        if instruments:
+            result[end] = {"val": max(instruments), "_flags": [FLAG_DEBT_FROM_INSTRUMENT_TAG]}
+            continue
+
+        if current is not None:
+            result[end] = {"val": current, "_flags": [FLAG_DEBT_CURRENT_ONLY]}
     return result
 
 
@@ -792,6 +883,7 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
     }
     series["capex"] = _capex(gaap)
     da_series = _depreciation_amortization(gaap)
+    debt_series = _total_debt(gaap)
     nwc_series = _annual_entries(gaap.get(_NWC_TAG), "USD", "duration")
 
     period_ends = set(series["revenue"]) | set(series["net_income"])
@@ -834,9 +926,8 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
             free_cash_flow = operating_cash_flow - val["capex"]
 
         equity = val["stockholders_equity"]
-        total_debt = None
-        if val["long_term_debt_noncurrent"] is not None or val["long_term_debt_current"] is not None:
-            total_debt = (val["long_term_debt_noncurrent"] or 0) + (val["long_term_debt_current"] or 0)
+        debt_entry = debt_series.get(end, {})
+        total_debt = debt_entry.get("val")
 
         roic = None
         if operating_income is not None and equity is not None and total_debt is not None:
@@ -885,6 +976,7 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
         if working_capital_change is None:
             flags.append(FLAG_NWC_UNAVAILABLE)
         flags.extend(da_series.get(end, {}).get("_flags", []))  # GitHub #10
+        flags.extend(debt_series.get(end, {}).get("_flags", []))  # GitHub #1
         row["quality_flags"] = ",".join(flags) or None
         rows.append(row)
 

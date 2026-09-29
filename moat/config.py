@@ -90,19 +90,11 @@ CONFIDENCE_LOW = "low"       # yfinance-only / unverified
 # still be overridden via --exclude/--include-excluded for a specific run.
 # ---------------------------------------------------------------------
 
-# §A17 (GitHub issue #1): confirmed `total_debt IS NULL` extraction gap —
-# not a reliable "no debt" signal for these tickers. Feeds the quant
-# screen's debt metric, ev_ebit()'s enterprise-value debt add-back, and
-# (Sprint 5) financial_strength/valuation persona input alike. The second
-# row newly passed the 20260923T122501Z screen once GitHub #9 recovered
-# their FCF metrics — same NULL-debt condition, so same exclusion (SYY and
-# MELI clearly carry debt; the rest may be near debt-free, but the screen
-# can't tell "no debt" from "debt not extracted").
-DEBT_TAG_GAP_TICKERS = frozenset({
-    "A", "ADSK", "ALAB", "ALNY", "DDOG", "DECK", "DXCM", "GRMN", "LULU",
-    "MNST", "NOW", "PLTR", "PM", "RMD", "ROL", "SHOP", "VRTX", "WSM",
-    "ANET", "EXPD", "ISRG", "MELI", "PANW", "SYY",
-})
+# GitHub #1's DEBT_TAG_GAP_TICKERS (24 tickers) was removed in Sprint 6.0:
+# total_debt now comes from a tiered tag hierarchy universe-wide
+# (moat/ingest/fundamentals_edgar.py::_total_debt), so the exclusion no
+# longer stands in for a fix. A company with no debt tag at all still stores
+# NULL, which the screen reports as unavailable, not as "no debt".
 
 # §A17 (GitHub issue #2): REITs scored on gross_margin/free_cash_flow/debt —
 # metrics the addendum already documented as invalid for this business
@@ -134,10 +126,10 @@ PRICE_MAX_STALENESS_TRADING_DAYS = 3
 # these constants exist so a caller who *does* want the known-current list
 # doesn't have to retype it, not to silently change prior sprints' behavior.
 AI_ANALYSIS_KNOWN_EXCLUDED_TICKERS = (
-    DEBT_TAG_GAP_TICKERS | REIT_INVALID_METRICS_TICKERS | DUAL_CLASS_FILING_GAP_TICKERS
+    REIT_INVALID_METRICS_TICKERS | DUAL_CLASS_FILING_GAP_TICKERS
 )
 VALUATION_KNOWN_EXCLUDED_TICKERS = (
-    DEBT_TAG_GAP_TICKERS | REIT_INVALID_METRICS_TICKERS | PRICE_SHARE_ANOMALY_TICKERS
+    REIT_INVALID_METRICS_TICKERS | PRICE_SHARE_ANOMALY_TICKERS
 )
 # Sprint 5 C8: the committee stage defaults to excluding this union, since a
 # committee verdict needs *both* upstream stages clean — the highest-stakes

@@ -609,3 +609,107 @@ def test_roe_first_stored_year_uses_comparative_balance_sheet():
     rows = extract_annual_fundamentals(facts)
     assert len(rows) == 1
     assert rows[0]["roe"] == pytest.approx(0.2)
+
+
+# ---------------------------------------------------------------------
+# total_debt tiers (GitHub #1). Real companyfacts values at each company's
+# latest fiscal year-end; "before" is what the NonCurrent + Current sum stored.
+# ---------------------------------------------------------------------
+
+def _debt_row(instants: dict, end: str = "2025-12-31") -> dict:
+    start = f"{int(end[:4]) - 1}{end[4:]}"
+    gaap = {
+        "Revenues": {"units": {"USD": [_usd_row(start, end, 1000)]}},
+        "NetIncomeLoss": {"units": {"USD": [_usd_row(start, end, 100)]}},
+    }
+    for tag, val in instants.items():
+        gaap[tag] = {"units": {"USD": [_instant_row(end, val)]}}
+    return extract_annual_fundamentals({"facts": {"us-gaap": gaap}})[-1]
+
+
+def test_debt_a_long_term_debt_only():
+    """A (Agilent) FY2025: only LongTermDebt is tagged. Before: NULL.
+    After: 3,050M, no flag."""
+    row = _debt_row({"LongTermDebt": 3_050_000_000}, end="2025-10-31")
+    assert row["total_debt"] == 3_050_000_000
+    assert "debt_" not in (row["quality_flags"] or "")
+
+
+def test_debt_adsk_long_term_debt_only():
+    """ADSK FY2026: LongTermDebt 2,500M only. Before: NULL."""
+    assert _debt_row({"LongTermDebt": 2_500_000_000}, end="2026-01-31")["total_debt"] == 2_500_000_000
+
+
+def test_debt_amt_lease_inclusive_total_beats_current_fragment():
+    """AMT FY2025: no lease-free total, only LongTermDebtCurrent 3,387.8M plus
+    lease-inclusive tags. Before: 3,387.8M (debt/FCF 0.9x, passing). After:
+    the lease-inclusive total 37,220.3M, flagged; the current-only figure is a
+    fragment and ranks last."""
+    row = _debt_row({
+        "LongTermDebtCurrent": 3_387_800_000,
+        "LongTermDebtAndCapitalLeaseObligations": 33_832_500_000,
+        "LongTermDebtAndCapitalLeaseObligationsCurrent": 3_387_800_000,
+        "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities": 37_220_300_000,
+    })
+    assert row["total_debt"] == 37_220_300_000
+    assert "debt_includes_finance_leases" in row["quality_flags"]
+
+
+def test_debt_tdg_total_beats_current_fragment():
+    """TDG FY2025: LongTermDebt 29,291M, LongTermDebtCurrent 124M, no
+    NonCurrent tag. Before: 124M (236x understated). After: 29,291M."""
+    row = _debt_row({"LongTermDebt": 29_291_000_000, "LongTermDebtCurrent": 124_000_000,
+                     "LongTermDebtAndCapitalLeaseObligations": 29_167_000_000}, end="2025-09-30")
+    assert row["total_debt"] == 29_291_000_000
+    assert "debt_" not in (row["quality_flags"] or "")
+
+
+def test_debt_mcd_split_beats_noncurrent_only_long_term_debt():
+    """MCD FY2025: LongTermDebt 39,973M equals NonCurrent and omits the 725M
+    current portion. Largest lease-free total: 39,973 + 725 = 40,698M."""
+    row = _debt_row({"LongTermDebt": 39_973_000_000, "LongTermDebtNoncurrent": 39_973_000_000,
+                     "LongTermDebtCurrent": 725_000_000})
+    assert row["total_debt"] == 40_698_000_000
+
+
+def test_debt_csgp_partial_long_term_debt_does_not_win():
+    """CSGP FY2025: LongTermDebt 140M is partial against NonCurrent 993M."""
+    row = _debt_row({"LongTermDebt": 140_000_000, "LongTermDebtNoncurrent": 993_000_000})
+    assert row["total_debt"] == 993_000_000
+
+
+def test_debt_now_convertible_notes_instrument_tier():
+    """NOW FY2025: only ConvertibleLongTermNotesPayable 1,491M. Before: NULL."""
+    row = _debt_row({"ConvertibleLongTermNotesPayable": 1_491_000_000})
+    assert row["total_debt"] == 1_491_000_000
+    assert "debt_from_instrument_tag" in row["quality_flags"]
+
+
+def test_debt_dhi_notes_payable_instrument_tier():
+    """DHI FY2025: only NotesPayable 5,965.5M. Before: NULL."""
+    row = _debt_row({"NotesPayable": 5_965_500_000}, end="2025-09-30")
+    assert row["total_debt"] == 5_965_500_000
+    assert "debt_from_instrument_tag" in row["quality_flags"]
+
+
+def test_debt_instrument_pieces_are_not_summed():
+    """Senior/secured/unsecured pieces overlap across filers, so a company
+    tagging only those (BXP, DLR) stays NULL rather than risk double-counting."""
+    row = _debt_row({"SeniorNotes": 9_806_000_000, "SecuredDebt": 4_280_000_000})
+    assert row["total_debt"] is None
+
+
+def test_debt_no_tag_stays_null_not_zero():
+    """F/PCAR report debt only in extension namespaces; absence is unknown."""
+    assert _debt_row({})["total_debt"] is None
+
+
+def test_debt_current_only_is_last_resort_and_flagged():
+    row = _debt_row({"DebtCurrent": 50})
+    assert row["total_debt"] == 50
+    assert "debt_current_portion_only" in row["quality_flags"]
+
+
+def test_debt_negative_values_ignored():
+    row = _debt_row({"LongTermDebt": -5, "LongTermDebtNoncurrent": 40})
+    assert row["total_debt"] == 40

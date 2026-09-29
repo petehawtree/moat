@@ -251,6 +251,7 @@ def compute_committee_bundle_key(
     quality_row: dict | None,
     data_confidence: str,
     model_id: str,
+    company_row: dict | None = None,
 ) -> str:
     """Content-stable cache key covering every input the context block
     (prompt.py's build_context_block) actually renders into all three
@@ -268,6 +269,12 @@ def compute_committee_bundle_key(
     `quality_row` close #7 itself in the same pass, since both gaps have
     the same fix shape (hash everything the context block shows, not a
     hand-picked subset of it).
+
+    GitHub #13 (fixed in Sprint 6.0, whose re-run invalidates every cached
+    verdict anyway): the context block also renders the company's name and
+    sector and each quant row's `sector_peer_group`. Without them, a sector
+    reclassification returned the same key and served a verdict scored
+    under the old peer-group context.
     """
     valuation_summary = sorted(
         (r["method"], r["scenario"], r["intrinsic_value_low"], r["intrinsic_value_high"],
@@ -275,7 +282,7 @@ def compute_committee_bundle_key(
         for r in valuation_rows
     )
     quant_summary = sorted(
-        (r["metric"], r["value"], r["status"], r["sector_percentile"])
+        (r["metric"], r["value"], r["status"], r["sector_percentile"], r.get("sector_peer_group"))
         for r in quant_rows
     )
     quality_summary = (
@@ -289,6 +296,9 @@ def compute_committee_bundle_key(
             "quant": quant_summary,
             "quality": quality_summary,
             "data_confidence": data_confidence,
+            "company": (
+                (company_row.get("name"), company_row.get("sector")) if company_row else None
+            ),
             "model_id": model_id,
             "protocol_version": PROTOCOL_VERSION,
         },
@@ -451,6 +461,7 @@ def run_committee(
     ai_cache_keys = {r["analysis_type"]: r["cache_key"] for r in current_ai_rows}
     bundle_key = compute_committee_bundle_key(
         ai_cache_keys, valuation_rows, quant_rows, quality_row, data_confidence, model_id,
+        company_row=company_row,
     )
     if not dry_run:
         cached = find_cached_committee_verdict(ticker, bundle_key, conn)

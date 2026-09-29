@@ -1876,6 +1876,17 @@ debt excludes leases, and `fundamentals_quarterly` stays unpopulated.
 Treating a definitional difference as an extraction defect is the mistake
 #16 was nearly filed as.
 
+A fourth difference is settled the same way: `operating_income` stays GAAP as
+reported. The benchmark adjusts out one-off items (ADBE FY2024 differs by
+exactly the $1.0bn Figma termination fee), so Tier C scores operating margin
+within a tolerance.
+
+**Scope exception, #13.** Sprint 6's "Out" list excludes #11–#14, but #13
+(committee cache key omits sector fields) is fixed in 6.0. Its only cost was
+invalidating every cached verdict once, and the 6.0 re-run does that anyway,
+so fixing it now is free and fixing it later is a full re-score. #11 stays
+out: it changes valuation methodology, which the eval measures first.
+
 ROE goes the other way: `roe` moves to net income over **average** equity
 (#16), rather than keeping ending equity and flagging near-zero
 denominators, the cheaper option on the issue. Ending equity was inherited,

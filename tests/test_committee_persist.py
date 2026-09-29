@@ -598,3 +598,35 @@ def test_run_committee_transient_failure_is_a_per_company_api_error(committee_db
     assert result["outcome"] == "api_error"
     assert result["transient"] is True
     assert conn.execute("SELECT COUNT(*) FROM committee_verdicts").fetchone()[0] == 0
+
+
+def _cache_miss_after(committee_db, mutate_sql: str) -> int:
+    conn, claim_ids = committee_db
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_1', ?, 'complete')", (NOW,))
+    conn.execute("INSERT INTO pipeline_runs (run_id, started_at, status) VALUES ('committee_run_2', ?, 'complete')", (NOW,))
+    conn.commit()
+    client = MagicMock()
+    texts = _canned_responses(claim_ids)
+    client.messages.stream.side_effect = [_stream_cm(_fake_message(t)) for t in texts] * 2
+
+    assert run_committee("TEST", "committee_run_1", "valuation_run", "quality_run", conn, client)["outcome"] == "persisted"
+    conn.execute(mutate_sql)
+    conn.commit()
+    second = run_committee("TEST", "committee_run_2", "valuation_run", "quality_run", conn, client)
+    assert second["outcome"] == "persisted"
+    return client.messages.stream.call_count
+
+
+def test_run_committee_cache_miss_when_sector_peer_group_changes(committee_db):
+    """GitHub #13: sector_peer_group is rendered into every quant line of the
+    context block, so changing only it must not return a cached verdict."""
+    calls = _cache_miss_after(
+        committee_db, "UPDATE quant_scores SET sector_peer_group = 'Health Care' WHERE ticker = 'TEST'"
+    )
+    assert calls == 6
+
+
+def test_run_committee_cache_miss_when_company_sector_changes(committee_db):
+    """GitHub #13: the context header renders the company's sector."""
+    calls = _cache_miss_after(committee_db, "UPDATE companies SET sector = 'Industrials' WHERE ticker = 'TEST'")
+    assert calls == 6

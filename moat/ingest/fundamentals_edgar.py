@@ -760,6 +760,20 @@ def _total_revenue(contract_revenue: float | None, lease_income: float | None, r
     return contract_revenue + lease_income
 
 
+def _opening_instant(instants: dict[str, dict], period_end: str) -> float | None:
+    """The instant value dated 330-400 days before `period_end`, i.e. the
+    prior fiscal year-end balance, choosing the date closest to 365 days
+    when several qualify. None when there is none (GitHub #16)."""
+    end = date.fromisoformat(period_end)
+    best = None
+    for other_end, row in instants.items():
+        days = (end - date.fromisoformat(other_end)).days
+        if 330 <= days <= 400 and row.get("val") is not None:
+            if best is None or abs(days - 365) < best[0]:
+                best = (abs(days - 365), row["val"])
+    return best[1] if best else None
+
+
 def extract_annual_fundamentals(facts: dict) -> list[dict]:
     """Pull the metrics in PRD §4 out of the raw XBRL facts payload.
 
@@ -820,8 +834,6 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
             free_cash_flow = operating_cash_flow - val["capex"]
 
         equity = val["stockholders_equity"]
-        roe = net_income / equity if net_income is not None and equity else None
-
         total_debt = None
         if val["long_term_debt_noncurrent"] is not None or val["long_term_debt_current"] is not None:
             total_debt = (val["long_term_debt_noncurrent"] or 0) + (val["long_term_debt_current"] or 0)
@@ -853,7 +865,8 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
             "operating_margin": operating_margin,
             "gross_margin": gross_margin,
             "roic": roic,
-            "roe": roe,
+            "roe": None,  # filled by the second pass below: needs the prior year's equity
+            "stockholders_equity": equity,
             "free_cash_flow": free_cash_flow,
             "operating_cash_flow": operating_cash_flow,
             "capex": val["capex"],
@@ -875,6 +888,34 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
         row["quality_flags"] = ",".join(flags) or None
         rows.append(row)
 
+    # ROE on AVERAGE equity (GitHub #16, PRD_ADDENDUM §A27): net income /
+    # ((opening equity + this year-end equity) / 2). Ending equity
+    # systematically flatters companies that shrink equity through buybacks
+    # (ADBE FY2025: 61.3% on ending equity vs 55.4% on average, which is also
+    # Morningstar's figure). There is deliberately NO fallback to ending
+    # equity (§A4: unknown stays unknown): a year with no opening equity gets
+    # roe = None. A negative average is still computed, as the old
+    # ending-equity code did with negative equity; a zero average is None.
+    #
+    # Opening equity is the StockholdersEquity instant dated 330-400 days
+    # before this period end (closest to a year), NOT the row labelled
+    # fiscal_year - 1: fiscal_year is the period end's calendar year, so a
+    # 52/53-week year ending 2021-01-02 after one ending 2019-12-28 skips a
+    # label (AVY, CDNS, DPZ, JNJ; 32 such pairs in the database). Reading
+    # the equity series directly also picks up the prior-year comparative
+    # balance sheet every 10-K carries, so a company's first stored fiscal
+    # year usually still gets an ROE. Neither check_row_quality nor
+    # check_ratio_plausibility reads roe, so the flags above are unaffected.
+    equity_series = series["stockholders_equity"]
+    for r in rows:
+        equity, net_income = r["stockholders_equity"], r["net_income"]
+        opening_equity = _opening_instant(equity_series, r["period_end_date"])
+        if net_income is None or opening_equity is None or equity is None:
+            continue
+        average_equity = (opening_equity + equity) / 2
+        if average_equity:
+            r["roe"] = net_income / average_equity
+
     return rows
 
 
@@ -885,13 +926,13 @@ def persist_annual_fundamentals(ticker: str, rows: list[dict], conn) -> None:
             ticker, fiscal_year, period_end_date, revenue, eps_diluted, net_income,
             operating_income, operating_margin, gross_margin, roic, roe, free_cash_flow,
             operating_cash_flow, capex, depreciation_amortization, working_capital_change,
-            total_debt, cash_and_equiv, shares_diluted, source, confidence,
+            stockholders_equity, total_debt, cash_and_equiv, shares_diluted, source, confidence,
             accession_number, filed, quality_flags, retrieved_at
         ) VALUES (
             :ticker, :fiscal_year, :period_end_date, :revenue, :eps_diluted, :net_income,
             :operating_income, :operating_margin, :gross_margin, :roic, :roe, :free_cash_flow,
             :operating_cash_flow, :capex, :depreciation_amortization, :working_capital_change,
-            :total_debt, :cash_and_equiv, :shares_diluted, :source, :confidence,
+            :stockholders_equity, :total_debt, :cash_and_equiv, :shares_diluted, :source, :confidence,
             :accession_number, :filed, :quality_flags, :retrieved_at
         )
         ON CONFLICT(ticker, fiscal_year) DO UPDATE SET
@@ -902,6 +943,7 @@ def persist_annual_fundamentals(ticker: str, rows: list[dict], conn) -> None:
             free_cash_flow=excluded.free_cash_flow, operating_cash_flow=excluded.operating_cash_flow,
             capex=excluded.capex, depreciation_amortization=excluded.depreciation_amortization,
             working_capital_change=excluded.working_capital_change,
+            stockholders_equity=excluded.stockholders_equity,
             total_debt=excluded.total_debt,
             cash_and_equiv=excluded.cash_and_equiv, shares_diluted=excluded.shares_diluted,
             source=excluded.source, confidence=excluded.confidence,

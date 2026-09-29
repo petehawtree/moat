@@ -8,12 +8,20 @@ Covers the two bugs found while validating against real SEC data:
 """
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from moat.ingest.fundamentals_edgar import FLAG_NWC_UNAVAILABLE, extract_annual_fundamentals
+from moat.db.connection import get_connection, init_db
+from moat.ingest.fundamentals_edgar import (
+    FLAG_NWC_UNAVAILABLE,
+    extract_annual_fundamentals,
+    persist_annual_fundamentals,
+)
 
 
 def _usd_row(start, end, val, filed="2020-01-01", form="10-K"):
@@ -442,3 +450,162 @@ def test_da_negative_below_winning_tier_is_not_flagged():
     row = extract_annual_fundamentals(facts)[0]
     assert row["depreciation_amortization"] == 50
     assert "da_negative_rejected" not in (row["quality_flags"] or "")
+
+
+# --- ROE on average equity (GitHub #16, PRD_ADDENDUM §A27) --------------
+
+def _roe_facts(years, equity_by_end=None):
+    """`years`: list of (start, end, net_income). Revenue is added per period so
+    the rows are emitted. `equity_by_end`: {end: equity} instants."""
+    facts = {
+        "Revenues": {"units": {"USD": [_usd_row(s, e, 1000) for s, e, _ in years]}},
+        "NetIncomeLoss": {"units": {"USD": [_usd_row(s, e, ni) for s, e, ni in years]}},
+    }
+    if equity_by_end:
+        facts["StockholdersEquity"] = {
+            "units": {"USD": [_instant_row(e, v) for e, v in equity_by_end.items()]}
+        }
+    return {"facts": {"us-gaap": facts}}
+
+
+_ADBE_FACTS = _roe_facts(
+    [
+        ("2022-12-03", "2023-12-01", 5_428_000_000),
+        ("2023-12-02", "2024-11-29", 5_560_000_000),
+        ("2024-11-30", "2025-11-28", 7_130_000_000),
+    ],
+    {"2023-12-01": 16_518_000_000, "2024-11-29": 14_105_000_000, "2025-11-28": 11_623_000_000},
+)
+
+
+def test_roe_uses_average_equity_adbe_regression():
+    """Real SEC companyfacts values for Adobe. The old ending-equity ROE was
+    7,130 / 11,623 = 0.6134 for FY2025; Morningstar reports 55.4 / 36.3, which
+    is average equity. FY2023 is the first stored year, so it has no prior
+    equity and roe is None (no fallback to ending equity, §A4).
+    """
+    by_year = {r["fiscal_year"]: r for r in extract_annual_fundamentals(_ADBE_FACTS)}
+    # 7,130 / ((14,105 + 11,623) / 2) = 7,130 / 12,864 = 0.55426
+    assert by_year[2025]["roe"] == pytest.approx(0.5543, abs=1e-4)
+    # 5,560 / ((16,518 + 14,105) / 2) = 5,560 / 15,311.5 = 0.36313
+    assert by_year[2024]["roe"] == pytest.approx(0.3631, abs=1e-4)
+    assert by_year[2023]["roe"] is None
+    assert by_year[2023]["stockholders_equity"] == 16_518_000_000
+    assert by_year[2024]["stockholders_equity"] == 14_105_000_000
+    assert by_year[2025]["stockholders_equity"] == 11_623_000_000
+
+
+def test_roe_none_across_a_fiscal_year_gap():
+    facts = _roe_facts(
+        [("2019-01-01", "2019-12-31", 10), ("2021-01-01", "2021-12-31", 20)],
+        {"2019-12-31": 100, "2021-12-31": 120},
+    )
+    by_year = {r["fiscal_year"]: r for r in extract_annual_fundamentals(facts)}
+    assert set(by_year) == {2019, 2021}
+    assert by_year[2021]["roe"] is None
+
+
+def test_roe_none_when_prior_year_equity_missing():
+    facts = _roe_facts(
+        [("2019-01-01", "2019-12-31", 10), ("2020-01-01", "2020-12-31", 20)],
+        {"2020-12-31": 120},  # FY2019 row exists but has no StockholdersEquity
+    )
+    by_year = {r["fiscal_year"]: r for r in extract_annual_fundamentals(facts)}
+    assert set(by_year) == {2019, 2020}
+    assert by_year[2020]["roe"] is None
+
+
+def test_roe_none_when_average_equity_is_zero():
+    facts = _roe_facts(
+        [("2019-01-01", "2019-12-31", 10), ("2020-01-01", "2020-12-31", 20)],
+        {"2019-12-31": 100, "2020-12-31": -100},  # (100 + -100) / 2 = 0
+    )
+    by_year = {r["fiscal_year"]: r for r in extract_annual_fundamentals(facts)}
+    assert by_year[2020]["roe"] is None
+
+
+def test_stockholders_equity_and_roe_round_trip_through_db(tmp_path):
+    db_path = tmp_path / "moat.db"
+    init_db(db_path=db_path)
+    conn = get_connection(db_path=db_path)
+    conn.execute(
+        "INSERT INTO companies (ticker, name, sector, universe, is_active, added_date) "
+        "VALUES ('ADBE', 'Adobe', 'Tech', 'sp500', 1, '2026-01-01')"
+    )
+    persist_annual_fundamentals("ADBE", extract_annual_fundamentals(_ADBE_FACTS), conn)
+    stored = {
+        r["fiscal_year"]: r
+        for r in conn.execute("SELECT fiscal_year, stockholders_equity, roe FROM fundamentals_annual")
+    }
+    conn.close()
+    assert stored[2025]["stockholders_equity"] == 11_623_000_000
+    assert stored[2025]["roe"] == pytest.approx(0.5543, abs=1e-4)
+    assert stored[2023]["stockholders_equity"] == 16_518_000_000
+    assert stored[2023]["roe"] is None
+
+
+def test_migration_adds_stockholders_equity_to_old_fundamentals_table(tmp_path):
+    db_path = tmp_path / "old.db"
+    raw = sqlite3.connect(db_path)
+    raw.execute(
+        """CREATE TABLE fundamentals_annual (
+            ticker TEXT NOT NULL, fiscal_year INTEGER NOT NULL, roe REAL,
+            source TEXT NOT NULL, confidence TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+            PRIMARY KEY (ticker, fiscal_year))"""
+    )
+    raw.execute(
+        "INSERT INTO fundamentals_annual (ticker, fiscal_year, roe, source, confidence, retrieved_at) "
+        "VALUES ('T', 2024, 0.2, 'sec_edgar', 'high', 'x')"
+    )
+    raw.commit()
+    raw.close()
+
+    migrated = init_db(db_path=db_path)
+    assert "fundamentals_annual.stockholders_equity" in migrated
+    conn = get_connection(db_path=db_path)
+    row = conn.execute("SELECT stockholders_equity, roe FROM fundamentals_annual").fetchone()
+    conn.close()
+    assert row["stockholders_equity"] is None  # old rows stay NULL until re-ingest
+    assert row["roe"] == 0.2
+
+
+def test_roe_opening_equity_found_across_52_53_week_label_skip():
+    """AVY-shaped: year ends 2019-12-28 then 2021-01-02 (371 days apart) are
+    labelled fiscal_year 2019 and 2021, skipping 2020. Opening equity is
+    matched by date, not by fiscal_year - 1, so ROE still exists (GitHub #16).
+    100 / ((400 + 600) / 2) = 0.2.
+    """
+    facts = {"facts": {"us-gaap": {
+        "Revenues": {"units": {"USD": [
+            _usd_row("2018-12-30", "2019-12-28", 1000),
+            _usd_row("2019-12-29", "2021-01-02", 1000),
+        ]}},
+        "NetIncomeLoss": {"units": {"USD": [
+            _usd_row("2018-12-30", "2019-12-28", 80),
+            _usd_row("2019-12-29", "2021-01-02", 100),
+        ]}},
+        "StockholdersEquity": {"units": {"USD": [
+            _instant_row("2019-12-28", 400),
+            _instant_row("2021-01-02", 600),
+        ]}},
+    }}}
+    rows = {r["fiscal_year"]: r for r in extract_annual_fundamentals(facts)}
+    assert rows[2021]["roe"] == pytest.approx(0.2)
+
+
+def test_roe_first_stored_year_uses_comparative_balance_sheet():
+    """A 10-K carries the prior year-end balance sheet, so the first year with
+    revenue still has opening equity even though no row exists for the year
+    before. 50 / ((300 + 200) / 2) = 0.2.
+    """
+    facts = {"facts": {"us-gaap": {
+        "Revenues": {"units": {"USD": [_usd_row("2020-01-01", "2020-12-31", 1000)]}},
+        "NetIncomeLoss": {"units": {"USD": [_usd_row("2020-01-01", "2020-12-31", 50)]}},
+        "StockholdersEquity": {"units": {"USD": [
+            _instant_row("2019-12-31", 300),
+            _instant_row("2020-12-31", 200),
+        ]}},
+    }}}
+    rows = extract_annual_fundamentals(facts)
+    assert len(rows) == 1
+    assert rows[0]["roe"] == pytest.approx(0.2)

@@ -1882,11 +1882,14 @@ denominators, the cheaper option on the issue. Ending equity was inherited,
 not chosen. It biases the sector ranking in one direction, flattering the 83%
 of shrinking-equity companies it overstates, and a flag would leave that bias
 in the rank. Average equity needs opening equity, so `stockholders_equity` is
-persisted in `fundamentals_annual`. The cost is accepted: a company's first
-stored fiscal year, and any year whose prior year-end equity is missing, gets
-`roe = NULL` rather than falling back to ending equity (§A4, unknown stays
-unknown). The screen ranks on the latest fiscal year, which almost always
-has a prior year.
+persisted in `fundamentals_annual`. Opening equity is matched by date: the
+equity balance about a year before the year-end. It isn't the row labelled
+`fiscal_year - 1`, because 52/53-week years skip labels. Each 10-K's
+prior-year comparative balance sheet usually covers the first stored year
+too. Where no opening equity exists, `roe` is NULL rather than falling back
+to ending equity (§A4, unknown stays unknown). Measured on the cached
+filings, the cost is one company's latest-year ROE (PSKY, a new post-merger
+entity): 36 of 498 are NULL, against 35 before.
 
 **Also decided 2026-09-29: MCP and alternative multi-agent workflows leave
 Sprint 6.** §A26 bundled them with the eval. Each is a sprint in its own

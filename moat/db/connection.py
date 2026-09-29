@@ -36,6 +36,9 @@ def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
 # CREATE TABLE IF NOT EXISTS won't add these to a database created by an
 # earlier schema version, so they're applied separately — see _migrate.
 _ADDED_COLUMNS = {
+    "valuations": {
+        "price_date": "TEXT",         # GitHub #15: date of the close current_price came from; old rows stay NULL
+    },
     "quant_scores": {
         "status": "TEXT",             # A13 pass/fail/unavailable
     },

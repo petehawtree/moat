@@ -301,6 +301,7 @@ CREATE TABLE IF NOT EXISTS valuations (
     intrinsic_value_low     REAL,
     intrinsic_value_high    REAL,
     current_price           REAL,
+    price_date              TEXT,            -- date of the price_history close current_price came from (GitHub #15)
     margin_of_safety_pct    REAL,
     key_assumptions         TEXT,            -- JSON
     created_at              TEXT NOT NULL,

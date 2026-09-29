@@ -122,6 +122,12 @@ DUAL_CLASS_FILING_GAP_TICKERS = frozenset({"GOOGL"})
 # structure — a data anomaly, not a code defect. Valuation only.
 PRICE_SHARE_ANOMALY_TICKERS = frozenset({"BKNG"})
 
+# GitHub #15: valuation priced 21 of 109 companies on August closes because
+# nothing checked how old the latest close was. A close more than this many
+# weekdays behind today is stale (see moat/ingest/prices.py::is_stale).
+# Weekends never count; exchange holidays do, so three leaves room for one.
+PRICE_MAX_STALENESS_TRADING_DAYS = 3
+
 # Per-stage composition. ai_analysis/valuation's own defaults are
 # deliberately unchanged by this (Sprint 5's "Open for discussion" #1:
 # continue deferring §A17/§A18/§A20 fixes, `--exclude` stays opt-in there) —

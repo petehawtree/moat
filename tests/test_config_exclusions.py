@@ -22,7 +22,7 @@ def test_ai_analysis_exclusion_is_reits_plus_googl():
     assert config.AI_ANALYSIS_KNOWN_EXCLUDED_TICKERS == (
         config.REIT_INVALID_METRICS_TICKERS | config.DUAL_CLASS_FILING_GAP_TICKERS
     )
-    assert len(config.AI_ANALYSIS_KNOWN_EXCLUDED_TICKERS) == 4
+    assert len(config.AI_ANALYSIS_KNOWN_EXCLUDED_TICKERS) == 5
     assert "GOOGL" in config.AI_ANALYSIS_KNOWN_EXCLUDED_TICKERS
     assert "BKNG" not in config.AI_ANALYSIS_KNOWN_EXCLUDED_TICKERS
 
@@ -31,7 +31,7 @@ def test_valuation_exclusion_is_reits_plus_bkng():
     assert config.VALUATION_KNOWN_EXCLUDED_TICKERS == (
         config.REIT_INVALID_METRICS_TICKERS | config.PRICE_SHARE_ANOMALY_TICKERS
     )
-    assert len(config.VALUATION_KNOWN_EXCLUDED_TICKERS) == 4
+    assert len(config.VALUATION_KNOWN_EXCLUDED_TICKERS) == 5
     assert "BKNG" in config.VALUATION_KNOWN_EXCLUDED_TICKERS
     assert "GOOGL" not in config.VALUATION_KNOWN_EXCLUDED_TICKERS
 
@@ -40,5 +40,5 @@ def test_committee_exclusion_is_the_union_of_both_stages():
     assert config.COMMITTEE_KNOWN_EXCLUDED_TICKERS == (
         config.AI_ANALYSIS_KNOWN_EXCLUDED_TICKERS | config.VALUATION_KNOWN_EXCLUDED_TICKERS
     )
-    assert len(config.COMMITTEE_KNOWN_EXCLUDED_TICKERS) == 5  # AMT + SBAC + CCI + GOOGL + BKNG
-    assert {"GOOGL", "BKNG", "AMT", "SBAC", "CCI"} == config.COMMITTEE_KNOWN_EXCLUDED_TICKERS
+    assert len(config.COMMITTEE_KNOWN_EXCLUDED_TICKERS) == 6  # AMT + SBAC + CCI + HST + GOOGL + BKNG
+    assert {"GOOGL", "BKNG", "AMT", "SBAC", "CCI", "HST"} == config.COMMITTEE_KNOWN_EXCLUDED_TICKERS

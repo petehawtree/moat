@@ -101,7 +101,9 @@ CONFIDENCE_LOW = "low"       # yfinance-only / unverified
 # model (FFO/AFFO not yet implemented).
 # CCI (tower REIT, same model as AMT/SBAC) newly passed the
 # 20260923T122501Z screen once GitHub #9 recovered its FCF.
-REIT_INVALID_METRICS_TICKERS = frozenset({"AMT", "SBAC", "CCI"})
+# HST (hotel REIT) newly passed Sprint 6.0's screen 20260929T135425Z once
+# GitHub #1 made its debt assessable — same invalid-metric condition.
+REIT_INVALID_METRICS_TICKERS = frozenset({"AMT", "SBAC", "CCI", "HST"})
 
 # §A18 (GitHub issue #3): GOOG/GOOGL share one CIK; GOOGL's own
 # `filings.ticker` lookups return nothing even though the filing is cached

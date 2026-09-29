@@ -39,7 +39,8 @@ August closes (#15) and carries defects that move verdicts (#1, #16). Scoring
 only that run would evaluate the pipeline as it was, not as it is. So a
 narrow set of fixes lands first, and the harness scores **both** runs.
 
-**Phase 0 — decisions, no code**
+**Phase 0 — decisions, no code** (recorded 2026-09-29: §A27, and
+`known-issues.md`'s design-decisions table)
 
 - `free_cash_flow` stays operating cash flow minus capex. The 18% gap to the
   benchmark is definitional; Tier C scores it on direction and order of

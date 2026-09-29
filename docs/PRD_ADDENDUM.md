@@ -1876,6 +1876,18 @@ debt excludes leases, and `fundamentals_quarterly` stays unpopulated.
 Treating a definitional difference as an extraction defect is the mistake
 #16 was nearly filed as.
 
+ROE goes the other way: `roe` moves to net income over **average** equity
+(#16), rather than keeping ending equity and flagging near-zero
+denominators, the cheaper option on the issue. Ending equity was inherited,
+not chosen. It biases the sector ranking in one direction, flattering the 83%
+of shrinking-equity companies it overstates, and a flag would leave that bias
+in the rank. Average equity needs opening equity, so `stockholders_equity` is
+persisted in `fundamentals_annual`. The cost is accepted: a company's first
+stored fiscal year, and any year whose prior year-end equity is missing, gets
+`roe = NULL` rather than falling back to ending equity (§A4, unknown stays
+unknown). The screen ranks on the latest fiscal year, which almost always
+has a prior year.
+
 **Also decided 2026-09-29: MCP and alternative multi-agent workflows leave
 Sprint 6.** §A26 bundled them with the eval. Each is a sprint in its own
 right: MCP replaces how every committee agent gets its context, and debate or

@@ -93,8 +93,16 @@ unverified.
 Run ids alone do not reproduce fundamentals: `fundamentals_annual` is
 overwritten in place. Each run set is bound to a DB snapshot:
 
-- Baseline: `data/moat-baseline-pre-sprint6.0.db` (taken 2026-09-29 before the
-  ingest). SHA-256: not recorded here.
-- Candidate: `data/moat-candidate-sprint6.0.db`
-  - Path: TODO (a separate task is producing this snapshot)
-  - SHA-256: TODO
+Hashes were computed and independently re-checked on 2026-10-01.
+
+- **Baseline:** `data/moat-baseline-pre-sprint6.0.db`, taken 2026-09-29 before the ingest.
+  - SHA-256: `c9f7974e8732547ea3e734539bd382d559112d11a4fb2d492e767d85b42d65e9`
+  - 58,593,280 bytes; main-file mtime 2026-09-29 14:44.
+  - **Not yet sealed.** It is still in WAL journal mode (header bytes 18-19 are `02 02`) and is writable, with stale `-wal` (0 bytes) and `-shm` sidecars.
+  - Opening it read-write could checkpoint into the file and change the hash. Open it only read-only (`?mode=ro` or `immutable=1`) until it is sealed.
+- **Candidate:** `data/moat-candidate-sprint6.0.db`, taken 2026-10-01 with sqlite's `.backup` from the live DB.
+  - SHA-256: `61b9514a068b855998377f7262f55386783c2339f659370f8baea980bb7c3828`
+  - 70,959,104 bytes.
+  - Converted to a rollback journal (`02 02` → `01 01`), `chmod 444`, with no sidecars.
+  - `integrity_check` returns `ok`.
+  - Row counts match the live DB: 117 committee verdicts (`…133528Z`), 122 passers (`…135425Z`), 122 valued (`…135455Z`), 8,279 `fundamentals_annual` rows and 275,058 `price_history` rows.

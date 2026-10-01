@@ -168,7 +168,8 @@ Longer-form lessons: [three bugs in structured financial data](docs/writeups/thr
 
 ## Product artefacts
 
-- [Project_Moat_PRD_MVP.pdf](docs/Project_Moat_PRD_MVP.pdf) — original PRD
+- [Project_Moat_PRD_MVP.md](docs/Project_Moat_PRD_MVP.md) — original PRD, readable on GitHub (generated from the PDF below on 01 Oct 2026)
+- [Project_Moat_PRD_MVP.pdf](docs/Project_Moat_PRD_MVP.pdf) — original PRD as written, kept unchanged for audit
 - [PRD_ADDENDUM.md](docs/PRD_ADDENDUM.md) — every scoping decision made since, overrides the PRD where they differ
 - [docs/sprints/](docs/sprints/) — one retro per completed sprint
 - [docs/judge-reports/](docs/judge-reports/) — every independent review run, including the 14 `FAIL`s before the allowlist existed

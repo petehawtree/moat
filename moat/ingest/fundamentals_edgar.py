@@ -228,27 +228,87 @@ TAG_CANDIDATES: dict[str, tuple[list[str], str, str]] = {
         "instant",
     ),
     "stockholders_equity": (["StockholdersEquity"], "USD", "instant"),
-    "long_term_debt_noncurrent": (["LongTermDebtNoncurrent"], "USD", "instant"),
-    "long_term_debt_current": (["LongTermDebtCurrent", "DebtCurrent"], "USD", "instant"),
 }
 
-# Owner Earnings input (§A16.2): D&A tag tiers, merged the same way as
-# TAG_CANDIDATES above (whichever tag covers a given period wins, in
-# priority order) — the combined cash-flow-statement line most filers use,
-# falling back to the accretion variant. A third tier (sum of the split
-# Depreciation + AmortizationOfIntangibleAssets tags) is handled separately
-# in _depreciation_amortization, because it's a combination rule, not a
-# priority merge — summed rather than substituted.
+# total_debt (GitHub #1): borrowings, excluding leases (§A27). Filers tag debt
+# in many overlapping ways, and summing LongTermDebtNoncurrent +
+# LongTermDebtCurrent alone missed it entirely for ~126 companies and caught
+# only a fragment for others (TDG stored 124M of 29.3bn, AVGO and ORCL were
+# understated ~20x). Per period, in order:
+#   1. the LARGEST of the lease-free totals present: LongTermDebt,
+#      DebtLongtermAndShorttermCombinedAmount, and LongTermDebtNoncurrent +
+#      (LongTermDebtCurrent, else DebtCurrent). Each measures a subset of
+#      true borrowing, and filers often tag one of them partially (CSGP's
+#      LongTermDebt is 140M against 993M non-current; MCD's LongTermDebt
+#      omits the current portion), so the largest is the least incomplete.
+#      Scored against the external benchmark this lifts agreement within 25%
+#      from 50% to 61% of companies.
+#   2. a finance-lease-inclusive total, flagged FLAG_DEBT_INCLUDES_FINANCE_LEASES
+#      (AMT reports debt only this way: 37.2bn).
+#   3. an instrument-level total, flagged FLAG_DEBT_FROM_INSTRUMENT_TAG: the
+#      larger of NotesPayable (DHI, MAA, O) and convertible notes (NOW, DDOG,
+#      DXCM). Senior/secured/unsecured pieces are NOT summed: filers overlap
+#      them, so a sum can double-count.
+#   4. a current-portion-only figure, flagged FLAG_DEBT_CURRENT_ONLY. Current
+#      debt alone is a fragment wherever a fuller total exists (AMT's
+#      LongTermDebtCurrent is 3.39bn of 37.2bn), so it ranks last.
+# No debt tag at all stays NULL, never 0: F, PCAR and AES report debt only
+# in their own extension namespaces, and a zero would read as "no debt".
+# Negative values are ignored; a debt balance can't be negative.
+_DEBT_TOTAL_TAGS = ["LongTermDebt", "DebtLongtermAndShorttermCombinedAmount"]
+_DEBT_NONCURRENT_TAG = "LongTermDebtNoncurrent"
+_DEBT_CURRENT_TAGS = ["LongTermDebtCurrent", "DebtCurrent"]
+_DEBT_WITH_LEASES_TOTAL_TAG = "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities"
+_DEBT_WITH_LEASES_NONCURRENT_TAG = "LongTermDebtAndCapitalLeaseObligations"
+_DEBT_WITH_LEASES_CURRENT_TAG = "LongTermDebtAndCapitalLeaseObligationsCurrent"
+_DEBT_NOTES_PAYABLE_TAG = "NotesPayable"
+_DEBT_CONVERTIBLE_TAGS = ["ConvertibleLongTermNotesPayable", "ConvertibleNotesPayableCurrent"]
+FLAG_DEBT_INCLUDES_FINANCE_LEASES = "debt_includes_finance_leases"
+FLAG_DEBT_FROM_INSTRUMENT_TAG = "debt_from_instrument_tag"
+FLAG_DEBT_CURRENT_ONLY = "debt_current_portion_only"
+
+# Owner Earnings input (§A16.2): D&A source tiers, chosen per period as the
+# FIRST USABLE source in this order (GitHub #10 rewrote the merge):
+#   1. DepreciationDepletionAndAmortization
+#   2. DepreciationAmortizationAndAccretionNet
+#   3. split sum: Depreciation + AmortizationOfIntangibleAssets
+#   4. DepreciationAndAmortization (last resort, GitHub #9)
+# "Usable" means present and >= 0. A negative value is REJECTED, not
+# abs()'d: for financials (WRB, ALL, KKR) the accretion-net tag includes
+# bond accretion and can legitimately be net negative, so its magnitude is
+# not D&A (WRB FY2024 is -170.6M against 55M of depreciation). AES stores
+# -1,457M the same way. A rejected negative is flagged, and if nothing else
+# is usable the value is None: unknown stays unknown (§A13).
+#
+# The split sum requires Depreciation. Only a missing (or rejected-negative)
+# AmortizationOfIntangibleAssets is treated as 0, because a filer with no
+# intangibles legitimately has none; zero depreciation is not a real state,
+# so a missing Depreciation never zero-fills. Before GitHub #10 either
+# missing component was zero-filled, which stored amortization alone as D&A
+# (NEE 65M vs 6,580M; CBRE about half its true value; 583 company-years) and
+# pre-empted tier 4.
 _DA_COMBINED_TAGS = ["DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet"]
 _DA_SPLIT_TAG = "Depreciation"
 _DA_SPLIT_AMORTIZATION_TAG = "AmortizationOfIntangibleAssets"
 _DA_SPLIT_SUM_LABEL = "Depreciation+AmortizationOfIntangibleAssets"
 # Fourth tier (GitHub #9): CASY tags its cash-flow D&A only as
-# DepreciationAndAmortization. Last resort, applied only to periods no
-# earlier tier covers, so no existing figure changes: some filers use this
-# tag on the income statement, where it can exclude D&A buried in cost of
-# sales, so the cash-flow tags above stay preferred.
+# DepreciationAndAmortization. Last resort: some filers use this tag on the
+# income statement, where it can exclude D&A buried in cost of sales, so the
+# cash-flow tags above stay preferred.
 _DA_LAST_RESORT_TAG = "DepreciationAndAmortization"
+
+# D&A quality flags (GitHub #10). Names deliberately avoid the substrings
+# `share_count_unit_outlier` / `implausible_ratio`, which
+# moat/screen/quant_screen.py matches on: D&A flags must not change screen
+# results.
+FLAG_DA_NEGATIVE_REJECTED = "da_negative_rejected"
+FLAG_DA_BELOW_DA_TAG = "da_below_da_tag"
+# Cross-check: a tier 1-3 figure below this fraction of a positive
+# DepreciationAndAmortization value is flagged. Flag only, never override:
+# some filers use that tag on the income statement, or for a broader set of
+# items, so it isn't safe as a replacement; the flag makes a low figure
+# visible for review.
+_DA_CROSSCHECK_MIN_RATIO = 0.8
 
 # Summed capex tier (GitHub #9): oil-and-gas producers (EOG) split capex
 # across additions to oil-and-gas properties and additions to other PP&E,
@@ -296,33 +356,133 @@ def _merged_annual_entries(gaap: dict, names: list[str], unit_key: str, kind: st
 
 
 def _depreciation_amortization(gaap: dict) -> dict[str, dict]:
-    """Merge D&A across the combined-tag tiers, then fill any period neither
-    combined tag covers by summing the split Depreciation +
-    AmortizationOfIntangibleAssets tags (§A16.2's third tier).
+    """Per period end, the first usable D&A source (GitHub #10, §A16.2).
 
-    A period missing one of the two split tags still gets a value — a filer
-    with no amortizable intangibles legitimately reports no
-    AmortizationOfIntangibleAssets tag at all, and treating "not present" as
-    "zero" here is correct (unlike NWC's fragments, there's no risk of
-    silently missing a *different* real component: depreciation + intangible
-    amortization is, by definition, the whole of D&A).
+    Order: DepreciationDepletionAndAmortization, then
+    DepreciationAmortizationAndAccretionNet, then Depreciation +
+    AmortizationOfIntangibleAssets, then DepreciationAndAmortization. A
+    source is usable when present and >= 0; negatives are rejected (not
+    abs()'d, see the comment above _DA_COMBINED_TAGS) and flagged with
+    FLAG_DA_NEGATIVE_REJECTED.
+
+    The split sum needs Depreciation; a missing or negative amortization
+    counts as 0, but a missing Depreciation never zero-fills. If no source
+    is usable, val is None (§A13) while any rejection flag is kept. Periods
+    with no source at all are omitted.
+
+    FLAG_DA_BELOW_DA_TAG is added when a tier 1-3 figure is strictly below
+    _DA_CROSSCHECK_MIN_RATIO of a positive DepreciationAndAmortization value.
+    It never changes the value.
+
+    Returns {period_end: {"val", "_tag", "_flags"}}.
     """
-    merged = dict(_merged_annual_entries(gaap, _DA_COMBINED_TAGS, "USD", "duration"))
+    def entries(tag):
+        return _annual_entries(gaap.get(tag), "USD", "duration")
 
-    depreciation = _annual_entries(gaap.get(_DA_SPLIT_TAG), "USD", "duration")
-    amortization = _annual_entries(gaap.get(_DA_SPLIT_AMORTIZATION_TAG), "USD", "duration")
-    for end in set(depreciation) | set(amortization):
-        if end in merged:
-            continue  # a combined tag already covers this period; don't override it
+    combined = [(t, entries(t)) for t in _DA_COMBINED_TAGS]
+    depreciation = entries(_DA_SPLIT_TAG)
+    amortization = entries(_DA_SPLIT_AMORTIZATION_TAG)
+    last_resort = entries(_DA_LAST_RESORT_TAG)
+
+    ends = set(depreciation) | set(amortization) | set(last_resort)
+    for _, e in combined:
+        ends |= set(e)
+
+    result: dict[str, dict] = {}
+    for end in sorted(ends):
         d = depreciation.get(end, {}).get("val")
         a = amortization.get(end, {}).get("val")
-        if d is None and a is None:
-            continue
-        merged[end] = {"val": (d or 0) + (a or 0), "_tag": _DA_SPLIT_SUM_LABEL}
+        amortization_rejected = a is not None and a < 0  # treated as absent
+        # The split sum exists only when Depreciation does; a negative
+        # Depreciation stays negative so the loop below rejects it.
+        split = None
+        if d is not None:
+            split = d if d < 0 else d + (0 if a is None or amortization_rejected else a)
 
-    for end, row in _annual_entries(gaap.get(_DA_LAST_RESORT_TAG), "USD", "duration").items():
-        merged.setdefault(end, {**row, "_tag": _DA_LAST_RESORT_TAG})
-    return merged
+        candidates = [(e.get(end, {}).get("val"), name) for name, e in combined]
+        candidates.append((split, _DA_SPLIT_SUM_LABEL))
+        candidates.append((last_resort.get(end, {}).get("val"), _DA_LAST_RESORT_TAG))
+
+        # First usable source wins. A negative skipped on the way is flagged;
+        # one below the winning tier was never in play, so it isn't.
+        flags: list[str] = []
+        val = tag = None
+        for v, name in candidates:
+            if v is None:
+                continue
+            if v < 0:
+                if FLAG_DA_NEGATIVE_REJECTED not in flags:
+                    flags.append(FLAG_DA_NEGATIVE_REJECTED)
+                continue
+            val, tag = v, name
+            if name == _DA_SPLIT_SUM_LABEL and amortization_rejected and FLAG_DA_NEGATIVE_REJECTED not in flags:
+                flags.append(FLAG_DA_NEGATIVE_REJECTED)
+            break
+
+        lr = last_resort.get(end, {}).get("val")
+        if val is not None and tag != _DA_LAST_RESORT_TAG and lr and lr > 0 and val < _DA_CROSSCHECK_MIN_RATIO * lr:
+            flags.append(FLAG_DA_BELOW_DA_TAG)
+
+        if val is None and not flags:
+            continue  # no source existed at all
+        result[end] = {"val": val, "_tag": tag, "_flags": flags}
+    return result
+
+
+def _total_debt(gaap: dict) -> dict[str, dict]:
+    """total_debt per period end, by the tiers above _DEBT_TOTAL_TAGS
+    (GitHub #1). Returns {period_end: {"val", "_flags"}}."""
+    def entries(tag):
+        return {
+            end: row["val"]
+            for end, row in _annual_entries(gaap.get(tag), "USD", "instant").items()
+            if row.get("val") is not None and row["val"] >= 0
+        }
+
+    def sum_present(*values):
+        present = [v for v in values if v is not None]
+        return sum(present) if present else None
+
+    totals = [entries(t) for t in _DEBT_TOTAL_TAGS]
+    noncurrent = entries(_DEBT_NONCURRENT_TAG)
+    current_by_tag = [entries(t) for t in _DEBT_CURRENT_TAGS]
+    with_leases_total = entries(_DEBT_WITH_LEASES_TOTAL_TAG)
+    with_leases_noncurrent = entries(_DEBT_WITH_LEASES_NONCURRENT_TAG)
+    with_leases_current = entries(_DEBT_WITH_LEASES_CURRENT_TAG)
+    notes_payable = entries(_DEBT_NOTES_PAYABLE_TAG)
+    convertible = [entries(t) for t in _DEBT_CONVERTIBLE_TAGS]
+
+    sources = totals + [noncurrent, with_leases_total, with_leases_noncurrent,
+                        with_leases_current, notes_payable] + current_by_tag + convertible
+    ends = set().union(*sources)
+
+    result: dict[str, dict] = {}
+    for end in ends:
+        current = next((c[end] for c in current_by_tag if end in c), None)
+
+        lease_free = [t[end] for t in totals if end in t]
+        if end in noncurrent:
+            lease_free.append(noncurrent[end] + (current or 0))
+        if lease_free:
+            result[end] = {"val": max(lease_free), "_flags": []}
+            continue
+
+        with_leases = with_leases_total.get(end)
+        if with_leases is None:
+            with_leases = sum_present(with_leases_noncurrent.get(end), with_leases_current.get(end))
+        if with_leases is not None:
+            result[end] = {"val": with_leases, "_flags": [FLAG_DEBT_INCLUDES_FINANCE_LEASES]}
+            continue
+
+        instruments = [v for v in (notes_payable.get(end),
+                                   sum_present(*(c.get(end) for c in convertible))) if v is not None]
+        if instruments:
+            result[end] = {"val": max(instruments), "_flags": [FLAG_DEBT_FROM_INSTRUMENT_TAG]}
+            continue
+
+        if current is not None:
+            result[end] = {"val": current, "_flags": [FLAG_DEBT_CURRENT_ONLY]}
+    return result
 
 
 def _capex(gaap: dict) -> dict[str, dict]:
@@ -691,6 +851,20 @@ def _total_revenue(contract_revenue: float | None, lease_income: float | None, r
     return contract_revenue + lease_income
 
 
+def _opening_instant(instants: dict[str, dict], period_end: str) -> float | None:
+    """The instant value dated 330-400 days before `period_end`, i.e. the
+    prior fiscal year-end balance, choosing the date closest to 365 days
+    when several qualify. None when there is none (GitHub #16)."""
+    end = date.fromisoformat(period_end)
+    best = None
+    for other_end, row in instants.items():
+        days = (end - date.fromisoformat(other_end)).days
+        if 330 <= days <= 400 and row.get("val") is not None:
+            if best is None or abs(days - 365) < best[0]:
+                best = (abs(days - 365), row["val"])
+    return best[1] if best else None
+
+
 def extract_annual_fundamentals(facts: dict) -> list[dict]:
     """Pull the metrics in PRD §4 out of the raw XBRL facts payload.
 
@@ -709,6 +883,7 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
     }
     series["capex"] = _capex(gaap)
     da_series = _depreciation_amortization(gaap)
+    debt_series = _total_debt(gaap)
     nwc_series = _annual_entries(gaap.get(_NWC_TAG), "USD", "duration")
 
     period_ends = set(series["revenue"]) | set(series["net_income"])
@@ -751,11 +926,8 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
             free_cash_flow = operating_cash_flow - val["capex"]
 
         equity = val["stockholders_equity"]
-        roe = net_income / equity if net_income is not None and equity else None
-
-        total_debt = None
-        if val["long_term_debt_noncurrent"] is not None or val["long_term_debt_current"] is not None:
-            total_debt = (val["long_term_debt_noncurrent"] or 0) + (val["long_term_debt_current"] or 0)
+        debt_entry = debt_series.get(end, {})
+        total_debt = debt_entry.get("val")
 
         roic = None
         if operating_income is not None and equity is not None and total_debt is not None:
@@ -784,7 +956,8 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
             "operating_margin": operating_margin,
             "gross_margin": gross_margin,
             "roic": roic,
-            "roe": roe,
+            "roe": None,  # filled by the second pass below: needs the prior year's equity
+            "stockholders_equity": equity,
             "free_cash_flow": free_cash_flow,
             "operating_cash_flow": operating_cash_flow,
             "capex": val["capex"],
@@ -802,8 +975,38 @@ def extract_annual_fundamentals(facts: dict) -> list[dict]:
         flags = check_row_quality(row) + check_ratio_plausibility(row)
         if working_capital_change is None:
             flags.append(FLAG_NWC_UNAVAILABLE)
+        flags.extend(da_series.get(end, {}).get("_flags", []))  # GitHub #10
+        flags.extend(debt_series.get(end, {}).get("_flags", []))  # GitHub #1
         row["quality_flags"] = ",".join(flags) or None
         rows.append(row)
+
+    # ROE on AVERAGE equity (GitHub #16, PRD_ADDENDUM §A27): net income /
+    # ((opening equity + this year-end equity) / 2). Ending equity
+    # systematically flatters companies that shrink equity through buybacks
+    # (ADBE FY2025: 61.3% on ending equity vs 55.4% on average, which is also
+    # Morningstar's figure). There is deliberately NO fallback to ending
+    # equity (§A4: unknown stays unknown): a year with no opening equity gets
+    # roe = None. A negative average is still computed, as the old
+    # ending-equity code did with negative equity; a zero average is None.
+    #
+    # Opening equity is the StockholdersEquity instant dated 330-400 days
+    # before this period end (closest to a year), NOT the row labelled
+    # fiscal_year - 1: fiscal_year is the period end's calendar year, so a
+    # 52/53-week year ending 2021-01-02 after one ending 2019-12-28 skips a
+    # label (AVY, CDNS, DPZ, JNJ; 32 such pairs in the database). Reading
+    # the equity series directly also picks up the prior-year comparative
+    # balance sheet every 10-K carries, so a company's first stored fiscal
+    # year usually still gets an ROE. Neither check_row_quality nor
+    # check_ratio_plausibility reads roe, so the flags above are unaffected.
+    equity_series = series["stockholders_equity"]
+    for r in rows:
+        equity, net_income = r["stockholders_equity"], r["net_income"]
+        opening_equity = _opening_instant(equity_series, r["period_end_date"])
+        if net_income is None or opening_equity is None or equity is None:
+            continue
+        average_equity = (opening_equity + equity) / 2
+        if average_equity:
+            r["roe"] = net_income / average_equity
 
     return rows
 
@@ -815,13 +1018,13 @@ def persist_annual_fundamentals(ticker: str, rows: list[dict], conn) -> None:
             ticker, fiscal_year, period_end_date, revenue, eps_diluted, net_income,
             operating_income, operating_margin, gross_margin, roic, roe, free_cash_flow,
             operating_cash_flow, capex, depreciation_amortization, working_capital_change,
-            total_debt, cash_and_equiv, shares_diluted, source, confidence,
+            stockholders_equity, total_debt, cash_and_equiv, shares_diluted, source, confidence,
             accession_number, filed, quality_flags, retrieved_at
         ) VALUES (
             :ticker, :fiscal_year, :period_end_date, :revenue, :eps_diluted, :net_income,
             :operating_income, :operating_margin, :gross_margin, :roic, :roe, :free_cash_flow,
             :operating_cash_flow, :capex, :depreciation_amortization, :working_capital_change,
-            :total_debt, :cash_and_equiv, :shares_diluted, :source, :confidence,
+            :stockholders_equity, :total_debt, :cash_and_equiv, :shares_diluted, :source, :confidence,
             :accession_number, :filed, :quality_flags, :retrieved_at
         )
         ON CONFLICT(ticker, fiscal_year) DO UPDATE SET
@@ -832,6 +1035,7 @@ def persist_annual_fundamentals(ticker: str, rows: list[dict], conn) -> None:
             free_cash_flow=excluded.free_cash_flow, operating_cash_flow=excluded.operating_cash_flow,
             capex=excluded.capex, depreciation_amortization=excluded.depreciation_amortization,
             working_capital_change=excluded.working_capital_change,
+            stockholders_equity=excluded.stockholders_equity,
             total_debt=excluded.total_debt,
             cash_and_equiv=excluded.cash_and_equiv, shares_diluted=excluded.shares_diluted,
             source=excluded.source, confidence=excluded.confidence,

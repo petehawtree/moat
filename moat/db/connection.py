@@ -36,6 +36,9 @@ def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
 # CREATE TABLE IF NOT EXISTS won't add these to a database created by an
 # earlier schema version, so they're applied separately — see _migrate.
 _ADDED_COLUMNS = {
+    "valuations": {
+        "price_date": "TEXT",         # GitHub #15: date of the close current_price came from; old rows stay NULL
+    },
     "quant_scores": {
         "status": "TEXT",             # A13 pass/fail/unavailable
     },
@@ -53,6 +56,7 @@ _ADDED_COLUMNS = {
         "operating_cash_flow": "REAL",  # A13: FCF is no longer substituted with OCF
         "depreciation_amortization": "REAL",  # A16.2 Owner Earnings input
         "working_capital_change": "REAL",     # A16.2 Owner Earnings input; NULL means unavailable, not zero
+        "stockholders_equity": "REAL",        # GitHub #16 / A27: year-end equity for average-equity ROE; old rows stay NULL until re-ingest
     },
     "filings": {
         # W1 (Sprint 3): document_url is the EDGAR index page (already present);

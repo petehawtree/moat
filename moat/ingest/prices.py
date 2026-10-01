@@ -5,9 +5,12 @@ FX handling needed yet.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
+import numpy as np
 import yfinance as yf
+
+from moat.config import PRICE_MAX_STALENESS_TRADING_DAYS
 
 
 def fetch_price_history(ticker: str, start: str | None = None, period: str = "10y") -> list[dict]:
@@ -70,15 +73,51 @@ def persist_prices(ticker: str, rows: list[dict], conn) -> None:
     conn.commit()
 
 
+def trading_days_behind(last_close: str, as_of: date) -> int:
+    """Weekdays strictly after `last_close` (ISO date) and strictly before `as_of`.
+
+    `as_of` itself doesn't count: today's close may not exist yet, so a
+    ticker whose last close is yesterday's is not behind. Exchange holidays
+    are ignored (weekdays only) — a deliberate small slack that can only make
+    a ticker look slightly more behind than it is, which
+    PRICE_MAX_STALENESS_TRADING_DAYS absorbs. Clamped at 0. GitHub #15.
+    """
+    start = date.fromisoformat(last_close) + timedelta(days=1)
+    return max(0, int(np.busday_count(start, as_of)))
+
+
+def is_stale(
+    last_close: str | None,
+    as_of: date,
+    max_days: int = PRICE_MAX_STALENESS_TRADING_DAYS,
+) -> bool:
+    """True when there is no price at all or the latest close is more than
+    `max_days` trading days behind `as_of` (GitHub #15)."""
+    return last_close is None or trading_days_behind(last_close, as_of) > max_days
+
+
 def run_for_ticker(ticker: str, conn) -> tuple[int, str | None]:
-    """Incremental refresh: only pull rows newer than what's already stored."""
+    """Incremental refresh: only pull rows newer than what's already stored.
+
+    An *empty* response is an error, not "up to date" (GitHub #15). yfinance's
+    `start=` is inclusive, so a ticker that is genuinely current still gets
+    back at least its last stored day; zero rows therefore always means
+    something went wrong (throttling, delisting, a bad symbol), whether or
+    not the ticker already has stored rows. That is distinct from a
+    non-empty response whose rows are all <= the stored latest date, which
+    is the normal already-up-to-date case and returns (0, None). No retries
+    here: throttling is unconfirmed, and surfacing it as failures is the point.
+    """
     latest = _latest_price_date(ticker, conn)
     try:
         rows = fetch_price_history(ticker, start=latest)
     except Exception as exc:  # yfinance raises a variety of exception types on bad tickers
         return 0, str(exc)
 
-    if latest is not None and rows:
+    if not rows:
+        return 0, f"empty yfinance response (start={latest})"
+
+    if latest is not None:
         # yfinance's `start` is inclusive; drop the day we already have.
         rows = [r for r in rows if r["date"] > latest]
 

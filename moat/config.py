@@ -90,26 +90,20 @@ CONFIDENCE_LOW = "low"       # yfinance-only / unverified
 # still be overridden via --exclude/--include-excluded for a specific run.
 # ---------------------------------------------------------------------
 
-# §A17 (GitHub issue #1): confirmed `total_debt IS NULL` extraction gap —
-# not a reliable "no debt" signal for these tickers. Feeds the quant
-# screen's debt metric, ev_ebit()'s enterprise-value debt add-back, and
-# (Sprint 5) financial_strength/valuation persona input alike. The second
-# row newly passed the 20260923T122501Z screen once GitHub #9 recovered
-# their FCF metrics — same NULL-debt condition, so same exclusion (SYY and
-# MELI clearly carry debt; the rest may be near debt-free, but the screen
-# can't tell "no debt" from "debt not extracted").
-DEBT_TAG_GAP_TICKERS = frozenset({
-    "A", "ADSK", "ALAB", "ALNY", "DDOG", "DECK", "DXCM", "GRMN", "LULU",
-    "MNST", "NOW", "PLTR", "PM", "RMD", "ROL", "SHOP", "VRTX", "WSM",
-    "ANET", "EXPD", "ISRG", "MELI", "PANW", "SYY",
-})
+# GitHub #1's DEBT_TAG_GAP_TICKERS (24 tickers) was removed in Sprint 6.0:
+# total_debt now comes from a tiered tag hierarchy universe-wide
+# (moat/ingest/fundamentals_edgar.py::_total_debt), so the exclusion no
+# longer stands in for a fix. A company with no debt tag at all still stores
+# NULL, which the screen reports as unavailable, not as "no debt".
 
 # §A17 (GitHub issue #2): REITs scored on gross_margin/free_cash_flow/debt —
 # metrics the addendum already documented as invalid for this business
 # model (FFO/AFFO not yet implemented).
 # CCI (tower REIT, same model as AMT/SBAC) newly passed the
 # 20260923T122501Z screen once GitHub #9 recovered its FCF.
-REIT_INVALID_METRICS_TICKERS = frozenset({"AMT", "SBAC", "CCI"})
+# HST (hotel REIT) newly passed Sprint 6.0's screen 20260929T135425Z once
+# GitHub #1 made its debt assessable — same invalid-metric condition.
+REIT_INVALID_METRICS_TICKERS = frozenset({"AMT", "SBAC", "CCI", "HST"})
 
 # §A18 (GitHub issue #3): GOOG/GOOGL share one CIK; GOOGL's own
 # `filings.ticker` lookups return nothing even though the filing is cached
@@ -122,16 +116,22 @@ DUAL_CLASS_FILING_GAP_TICKERS = frozenset({"GOOGL"})
 # structure — a data anomaly, not a code defect. Valuation only.
 PRICE_SHARE_ANOMALY_TICKERS = frozenset({"BKNG"})
 
+# GitHub #15: valuation priced 21 of 109 companies on August closes because
+# nothing checked how old the latest close was. A close more than this many
+# weekdays behind today is stale (see moat/ingest/prices.py::is_stale).
+# Weekends never count; exchange holidays do, so three leaves room for one.
+PRICE_MAX_STALENESS_TRADING_DAYS = 3
+
 # Per-stage composition. ai_analysis/valuation's own defaults are
 # deliberately unchanged by this (Sprint 5's "Open for discussion" #1:
 # continue deferring §A17/§A18/§A20 fixes, `--exclude` stays opt-in there) —
 # these constants exist so a caller who *does* want the known-current list
 # doesn't have to retype it, not to silently change prior sprints' behavior.
 AI_ANALYSIS_KNOWN_EXCLUDED_TICKERS = (
-    DEBT_TAG_GAP_TICKERS | REIT_INVALID_METRICS_TICKERS | DUAL_CLASS_FILING_GAP_TICKERS
+    REIT_INVALID_METRICS_TICKERS | DUAL_CLASS_FILING_GAP_TICKERS
 )
 VALUATION_KNOWN_EXCLUDED_TICKERS = (
-    DEBT_TAG_GAP_TICKERS | REIT_INVALID_METRICS_TICKERS | PRICE_SHARE_ANOMALY_TICKERS
+    REIT_INVALID_METRICS_TICKERS | PRICE_SHARE_ANOMALY_TICKERS
 )
 # Sprint 5 C8: the committee stage defaults to excluding this union, since a
 # committee verdict needs *both* upstream stages clean — the highest-stakes

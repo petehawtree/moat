@@ -448,10 +448,10 @@ def _replace_valuations(conn, run_id: str, ticker: str, rows: list[dict]) -> Non
         """
         INSERT INTO valuations (
             run_id, ticker, method, scenario, intrinsic_value_low, intrinsic_value_high,
-            current_price, margin_of_safety_pct, key_assumptions, created_at
+            current_price, price_date, margin_of_safety_pct, key_assumptions, created_at
         ) VALUES (
             :run_id, :ticker, :method, :scenario, :intrinsic_value_low, :intrinsic_value_high,
-            :current_price, :margin_of_safety_pct, :key_assumptions, :created_at
+            :current_price, :price_date, :margin_of_safety_pct, :key_assumptions, :created_at
         )
         """,
         rows,
@@ -495,6 +495,7 @@ def run_valuation(ticker: str, run_id: str, conn) -> tuple[int, str | None]:
     if not prices:
         return 0, "no price_history data"
     current_price = prices[-1]["close"]
+    price_date = prices[-1]["date"]  # GitHub #15: record which close this price is
 
     latest = fundamentals_rows[-1]
     shares = latest.get("shares_diluted")
@@ -519,6 +520,7 @@ def run_valuation(ticker: str, run_id: str, conn) -> tuple[int, str | None]:
             "intrinsic_value_low": None,
             "intrinsic_value_high": None,
             "current_price": current_price,
+            "price_date": price_date,
             "margin_of_safety_pct": None,
             "key_assumptions": "{}",
             "created_at": now_iso,

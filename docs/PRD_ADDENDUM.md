@@ -1876,6 +1876,32 @@ debt excludes leases, and `fundamentals_quarterly` stays unpopulated.
 Treating a definitional difference as an extraction defect is the mistake
 #16 was nearly filed as.
 
+A fourth difference is settled the same way: `operating_income` stays GAAP as
+reported. The benchmark adjusts out one-off items (ADBE FY2024 differs by
+exactly the $1.0bn Figma termination fee), so Tier C scores operating margin
+within a tolerance.
+
+**Scope exception, #13.** Sprint 6's "Out" list excludes #11–#14, but #13
+(committee cache key omits sector fields) is fixed in 6.0. Its only cost was
+invalidating every cached verdict once, and the 6.0 re-run does that anyway,
+so fixing it now is free and fixing it later is a full re-score. #11 stays
+out: it changes valuation methodology, which the eval measures first.
+
+ROE goes the other way: `roe` moves to net income over **average** equity
+(#16), rather than keeping ending equity and flagging near-zero
+denominators, the cheaper option on the issue. Ending equity was inherited,
+not chosen. It biases the sector ranking in one direction, flattering the 83%
+of shrinking-equity companies it overstates, and a flag would leave that bias
+in the rank. Average equity needs opening equity, so `stockholders_equity` is
+persisted in `fundamentals_annual`. Opening equity is matched by date: the
+equity balance about a year before the year-end. It isn't the row labelled
+`fiscal_year - 1`, because 52/53-week years skip labels. Each 10-K's
+prior-year comparative balance sheet usually covers the first stored year
+too. Where no opening equity exists, `roe` is NULL rather than falling back
+to ending equity (§A4, unknown stays unknown). Measured on the cached
+filings, the cost is one company's latest-year ROE (PSKY, a new post-merger
+entity): 36 of 498 are NULL, against 35 before.
+
 **Also decided 2026-09-29: MCP and alternative multi-agent workflows leave
 Sprint 6.** §A26 bundled them with the eval. Each is a sprint in its own
 right: MCP replaces how every committee agent gets its context, and debate or

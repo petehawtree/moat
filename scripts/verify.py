@@ -38,9 +38,9 @@ DERIVED = {
     "operating_margin": "operating_income / revenue",
     "gross_margin": "gross_profit / revenue (or (revenue - cost_of_revenue) / revenue)",
     "roic": "operating_income * (1 - ASSUMED_TAX_RATE) / (total_debt + equity - cash)",
-    "roe": "net_income / stockholders_equity",
+    "roe": "net_income / average(opening, ending stockholders_equity)  (GitHub #16)",
     "free_cash_flow": "operating_cash_flow - capex",
-    "total_debt": "long_term_debt_noncurrent + long_term_debt_current",
+    "total_debt": "tiered, see fundamentals_edgar._total_debt  (GitHub #1)",
 }
 
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -104,6 +104,7 @@ def run_ingest_stage(conn, tickers: list[str], limit: int | None) -> None:
             print(f"  ingest: {i}/{len(tickers)} tickers processed ({elapsed:.0f}s elapsed)")
 
     thin_history = [t for t, years in fundamentals_ok if years < 3]
+    stale_after = _stale_price_tickers(conn, tickers, date.today())
 
     print("\n--- Sprint 1 ingest report ---")
     print(f"Fundamentals: {len(fundamentals_ok)} ok, {len(fundamentals_failed)} failed")
@@ -111,6 +112,12 @@ def run_ingest_stage(conn, tickers: list[str], limit: int | None) -> None:
     print(f"  Failures (first 15): {fundamentals_failed[:15]}")
     print(f"Prices: {len(prices_ok)} ok, {len(prices_failed)} failed")
     print(f"  Failures (first 15): {prices_failed[:15]}")
+    # GitHub #15: report only — the hard gate is run_valuation_stage's.
+    if stale_after:
+        print(
+            f"Prices: STALE after ingest: {len(stale_after)} tickers more than "
+            f"{config.PRICE_MAX_STALENESS_TRADING_DAYS} trading days behind (first 15): {stale_after[:15]}"
+        )
 
     # Sprint 2.1 provenance/validation (docs/PRD_ADDENDUM.md §A10, §A11)
     basis = conn.execute(
@@ -147,6 +154,18 @@ def run_ingest_stage(conn, tickers: list[str], limit: int | None) -> None:
         )
 
 
+def _stale_price_tickers(conn, tickers: list[str], as_of: date) -> list[tuple[str, str | None]]:
+    """(ticker, last_close) for each ticker whose latest price_history close is
+    stale per prices.is_stale (GitHub #15). last_close is None when a ticker
+    has no prices at all."""
+    stale = []
+    for ticker in tickers:
+        last_close = prices._latest_price_date(ticker, conn)
+        if prices.is_stale(last_close, as_of):
+            stale.append((ticker, last_close))
+    return stale
+
+
 def _basis_summary(rows) -> str:
     return ", ".join(f"{r['n']} {r['change_type']}" for r in rows) or "none"
 
@@ -170,7 +189,13 @@ def run_quality_stage(conn, run_id: str) -> None:
     )
 
 
-def run_valuation_stage(conn, run_id: str, exclude_tickers: set[str] | None = None) -> None:
+def run_valuation_stage(
+    conn,
+    run_id: str,
+    exclude_tickers: set[str] | None = None,
+    allow_stale_prices: bool = False,
+    as_of: date | None = None,
+) -> None:
     """Owner Earnings DCF + supporting methods (PRD §6, Sprint 4 V5) for
     every company in the *latest* quality_scores run's passed_screen set —
     same "read whichever quality run is current, not this run_id" pattern
@@ -183,6 +208,13 @@ def run_valuation_stage(conn, run_id: str, exclude_tickers: set[str] | None = No
     same way they feed the quant screen's debt metric, so a ticker with
     the known debt-tag gap or invalid REIT metrics produces an equally
     unreliable valuation, not just an unreliable screen result.
+
+    allow_stale_prices / as_of (GitHub #15): before any valuation is
+    computed, every ticker's latest close is checked for staleness. Run
+    20260923T122513Z priced 21 of 109 companies on August closes because
+    run_valuation takes prices[-1] with no freshness check. Stale prices
+    raise unless allow_stale_prices is set (then they only warn). `as_of`
+    defaults to today; it exists so tests can pin the date.
     """
     from moat.valuation.engine import run_valuation
 
@@ -205,6 +237,19 @@ def run_valuation_stage(conn, run_id: str, exclude_tickers: set[str] | None = No
         if excluded_here:
             print(f"  valuation: excluding {len(excluded_here)} tickers (--exclude): {excluded_here}")
     print(f"  valuation: {len(tickers)} tickers from quality run {quality_run}")
+
+    stale = _stale_price_tickers(conn, tickers, as_of or date.today())
+    if stale:
+        detail = (
+            f"{len(stale)} tickers have prices more than {config.PRICE_MAX_STALENESS_TRADING_DAYS} "
+            f"trading days behind (first 15): {stale[:15]}"
+        )
+        if not allow_stale_prices:
+            raise RuntimeError(
+                f"Stale prices (GitHub #15): {detail}. Re-run the ingest stage to refresh "
+                "them, or pass --allow-stale-prices to value them anyway."
+            )
+        print(f"  valuation: WARNING (--allow-stale-prices): {detail}")
 
     ok, failed = [], []
     for ticker in tickers:
@@ -742,6 +787,10 @@ def main() -> None:
                         help="ai_analysis/valuation/committee: skip these tickers even though "
                              "they passed_screen=1 (operational exclusion for a known-bad screen "
                              "result; see PRD_ADDENDUM.md §A17)")
+    parser.add_argument("--allow-stale-prices", action="store_true",
+                        help="valuation: proceed (with a warning) even when some tickers' latest "
+                             "close is more than PRICE_MAX_STALENESS_TRADING_DAYS trading days old "
+                             "(GitHub #15); default is to refuse")
     # committee stage flags
     parser.add_argument("--committee-cost-cap", type=float, default=None, metavar="USD",
                         help="committee: halt when accumulated cost exceeds this "
@@ -800,7 +849,11 @@ def main() -> None:
                 )
             elif stage == "valuation":
                 print("-> stage 'valuation'")
-                run_valuation_stage(conn, run_id, exclude_tickers=set(args.exclude) if args.exclude else None)
+                run_valuation_stage(
+                    conn, run_id,
+                    exclude_tickers=set(args.exclude) if args.exclude else None,
+                    allow_stale_prices=args.allow_stale_prices,
+                )
             elif stage == "committee":
                 print("-> stage 'committee'")
                 run_committee_stage(

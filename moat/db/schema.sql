@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS fundamentals_annual (
     capex               REAL,
     depreciation_amortization REAL,           -- Owner Earnings input (A16.2); merge-across-candidates, same tiers as revenue
     working_capital_change    REAL,           -- Owner Earnings input (A16.2); summary tag only, NULL + quality_flags otherwise — never summed from fragments
+    stockholders_equity REAL,                 -- year-end equity, persisted so ROE can use average equity (GitHub #16, A27); NULL until re-ingest
     total_debt          REAL,
     cash_and_equiv      REAL,
     shares_diluted      REAL,
@@ -301,6 +302,7 @@ CREATE TABLE IF NOT EXISTS valuations (
     intrinsic_value_low     REAL,
     intrinsic_value_high    REAL,
     current_price           REAL,
+    price_date              TEXT,            -- date of the price_history close current_price came from (GitHub #15)
     margin_of_safety_pct    REAL,
     key_assumptions         TEXT,            -- JSON
     created_at              TEXT NOT NULL,

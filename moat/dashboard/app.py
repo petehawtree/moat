@@ -305,8 +305,9 @@ else:
     )["sector"]
     # 15 NASDAQ-100-only companies have no GICS sector at all (docs/PRD_ADDENDUM.md
     # §A9's floor-only fallback) — surfaced as its own filterable option rather
-    # than silently dropped from the grids.
-    sector_options = sorted(s for s in sectors_raw if s is not None)
+    # than silently dropped from the grids. dropna(), not `is not None`: pandas 3
+    # reads a NULL in a string column as NaN, which `is not None` lets through.
+    sector_options = sorted(sectors_raw.dropna())
     if sectors_raw.isnull().any():
         sector_options.append("(no sector)")
 
@@ -639,7 +640,7 @@ else:
             if pick_val:
                 detail_rows = val[val["ticker"] == pick_val][["method", "scenario", "key_assumptions"]]
                 for _, r in detail_rows.iterrows():
-                    label = r["method"] if r["scenario"] is None else f"{r['method']} ({r['scenario']})"
+                    label = r["method"] if pd.isna(r["scenario"]) else f"{r['method']} ({r['scenario']})"
                     st.markdown(f"`{label}`")
                     st.json(json.loads(r["key_assumptions"]))
 

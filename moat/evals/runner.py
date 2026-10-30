@@ -83,6 +83,7 @@ def run_evaluation(
                 committee_run_id=config["runs"]["committee"],
                 benchmark_records=benchmark,
                 primary=name == "candidate",
+                invalid_tickers=committee_invalid,
             )
         tier_a_records[name], tier_a_summaries[name], exclusions[name] = a_records, a_summary, a_exclusions
         tier_c_records[name], tier_c_summaries[name] = c_records, c_summary

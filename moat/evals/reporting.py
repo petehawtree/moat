@@ -149,6 +149,7 @@ def public_persona(summary: dict) -> dict:
         "role": summary["role"],
         "valid_verdict_count": summary["valid_verdict_count"],
         "invalid_or_missing_numeric_count": summary["invalid_or_missing_numeric_count"],
+        "preflight_invalid_abstention_count": summary["preflight_invalid_abstention_count"],
         "component_medians": summary["component_medians"],
         "median_cohort": summary["median_cohort"],
         "score_distribution": summary["score_distribution"],

@@ -540,3 +540,38 @@ def test_synthetic_end_to_end_writes_private_details_and_public_aggregates(synth
     assert "AAA" not in public.read_text()
     assert public_data["paired_baseline_candidate"]["tier_a"]["claim_boundary"].startswith("combined Phase 1 effect")
     assert public_data["persona_influence_and_external_alignment"]["candidate"]["external_alignment"]["Quality_vs_economic_moat"]["denominator"] == "suppressed_lt_5"
+
+
+def _insert_verdict(path: Path, run_id: str, ticker: str, scores: tuple, *, status: str, severity: str,
+                    cache_key: str = "synthetic-key", profile_name: str = "candidate") -> None:
+    path.chmod(0o644)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO committee_verdicts (run_id,ticker,status,bear_case_severity,cache_key,valuation_run_id,quality_run_id,created_at,business_quality_score,competitive_moat_score,financial_strength_score,management_score,valuation_score,risk_score,overall_score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (run_id, ticker, status, severity, cache_key, RUN_IDS[profile_name]["valuation"], RUN_IDS[profile_name]["screen"], "2026-01-02", *scores),
+    )
+    conn.commit()
+    conn.close()
+    path.chmod(0o444)
+
+
+def test_persona_excludes_preflight_invalid_verdicts_from_medians_and_counterfactuals(synthetic_inputs):
+    _, candidate, _, records = synthetic_inputs
+    # Numerically valid, but preflight flagged it (e.g. lineage or cache-key failure).
+    _insert_verdict(
+        candidate, RUN_IDS["candidate"]["committee"], "BBB",
+        (10.0, 10.0, 10.0, 10.0, 10.0, 90.0, 9.0), status="Reject", severity="low",
+    )
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        persona_records, summary = evaluate_persona_influence(
+            db,
+            committee_run_id=RUN_IDS["candidate"]["committee"],
+            benchmark_records=records,
+            primary=True,
+            invalid_tickers={"BBB"},
+        )
+    assert [row["ticker"] for row in persona_records] == ["AAA"]
+    assert summary["valid_verdict_count"] == 1
+    assert summary["preflight_invalid_abstention_count"] == 1
+    assert summary["invalid_or_missing_numeric_count"] == 0
+    assert summary["component_medians"]["business_quality_score"] == 80.0

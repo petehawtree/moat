@@ -158,8 +158,8 @@ def _summary(records: list[dict], *, cohort: str, view: str) -> dict:
             "value": point_agreement / len(point_rows) if point_rows else None,
             "kind": "secondary_diagnostic",
         },
-        "benchmark_class_distribution": dict(Counter(row["benchmark_class"] for row in eligible)),
-        "moat_class_distribution": dict(Counter(row["moat_class"] for row in eligible)),
+        "benchmark_class_distribution": {name: sum(row["benchmark_class"] == name for row in eligible) for name in VALUATION_CLASSES},
+        "moat_class_distribution": {name: sum(row["moat_class"] == name for row in eligible) for name in VALUATION_CLASSES},
     }
 
 

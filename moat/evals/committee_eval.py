@@ -83,7 +83,7 @@ def evaluate_committee(
             "supported_numerator": supported,
             "denominator": len(rows),
             "supported_rate": supported / len(rows) if rows else None,
-            "composition": dict(Counter(row["external_support"] for row in rows)),
+            "composition": {category: sum(row["external_support"] == category for row in rows) for category in _SUPPORT_ORDINAL},
         }
     watch = [row for row in scored if row["committee_outcome"] == "Watch" and row["external_support"] in _SUPPORT_ORDINAL and row["overall_score"] is not None]
     ranking = [row for row in scored if row["external_support"] in _SUPPORT_ORDINAL]
@@ -93,7 +93,7 @@ def evaluate_committee(
         "committee_scored_count": len(scored),
         "committee_abstention_count": len(details) - len(scored),
         "committee_coverage_rate": len(scored) / len(details) if details else None,
-        "investigate_support_composition": dict(Counter(row["external_support"] for row in investigates)),
+        "investigate_support_composition": {category: sum(row["external_support"] == category for row in investigates) for category in SUPPORT_CATEGORIES},
         "investigate_contradiction_rate": {
             "numerator": contradicted,
             "denominator": len(investigates),

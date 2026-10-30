@@ -383,7 +383,9 @@ def test_committee_support_and_persona_cap_counterfactuals(synthetic_inputs):
     aaa = next(row for row in details if row["ticker"] == "AAA")
     assert aaa["committee_outcome"] == "Investigate"
     assert aaa["external_support"] == "strong"
-    assert summary["investigate_support_composition"] == {"strong": 1}
+    assert summary["investigate_support_composition"] == {
+        "strong": 1, "weak": 0, "ambiguous": 0, "contradicted": 0, "abstain": 0,
+    }
 
     with ImmutableDatabase(candidate, "candidate-v1") as db:
         persona_records, persona_summary = evaluate_persona_influence(
@@ -631,3 +633,26 @@ def test_noise_floor_does_not_pair_preflight_invalid_stored_verdicts(synthetic_i
     assert [row["ticker"] for row in records] == ["AAA"]
     assert summary["stored_preflight_invalid_abstention_count"] == 1
     assert summary["status_flip_count"] == 0
+
+
+def test_public_category_cells_have_fixed_keys_so_zero_and_small_cells_look_alike(synthetic_inputs):
+    from moat.evals.reporting import public_committee, public_valuation
+
+    baseline, _, _, records = synthetic_inputs
+    with ImmutableDatabase(baseline, "baseline-v1") as db:
+        _, committee = evaluate_committee(
+            db,
+            committee_run_id=RUN_IDS["baseline"]["committee"],
+            screen_run_id=RUN_IDS["baseline"]["screen"],
+            benchmark_records=records,
+        )
+        _, valuation = evaluate_valuation(db, run_id=RUN_IDS["baseline"]["valuation"], benchmark_records=records)
+    public_c = public_committee(committee)
+    composition = public_c["investigate_support_composition"]
+    assert set(composition) == {"strong", "weak", "ambiguous", "contradicted", "abstain"}
+    assert set(composition.values()) == {"suppressed_lt_5"}
+    for values in public_c["research_priority_enrichment"].values():
+        assert set(values["composition"]) == {"strong", "weak", "ambiguous", "contradicted"}
+    for summary in public_valuation(valuation).values():
+        assert set(summary["benchmark_class_distribution"]) == {"Cheap", "Fair", "Expensive", "Abstain"}
+        assert set(summary["moat_class_distribution"]) == {"Cheap", "Fair", "Expensive", "Abstain"}

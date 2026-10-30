@@ -56,7 +56,8 @@ def _normalise_benchmark(field: str, value):
         return normalized, "benchmark_millions_to_currency_units; capex_absolute_outflow" if field == "capex" else "benchmark_millions_to_currency_units"
     if field == "shares_outstanding":
         return numeric * 1_000_000.0, "benchmark_millions_to_shares"
-    return numeric, "ratio_fraction"
+    # The benchmark states margins and returns in percent; Moat stores fractions.
+    return numeric / 100.0, "benchmark_percent_to_fraction"
 
 
 def _diagnostics(x: float, y: float, near_zero: float) -> dict:
@@ -228,7 +229,7 @@ def evaluate_tier_c(db: ImmutableDatabase, *, benchmark_records: list[dict]) -> 
             "monetary_and_shares_tolerance": "2% symmetric relative difference when comparable",
             "ratio_tolerance": "1 percentage point absolute difference",
             "near_zero_ratio_rule": "abs(value) <= 0.0001 uses sign-aware absolute difference",
-            "normalization": "benchmark monetary/share values in millions multiplied by 1,000,000; ratios remain fractions; capex uses absolute outflow",
+            "normalization": "benchmark monetary/share values in millions multiplied by 1,000,000; benchmark percent ratios divided by 100 to fractions; capex uses absolute outflow",
         },
     }
     return details, summary

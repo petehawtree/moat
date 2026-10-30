@@ -135,10 +135,11 @@ def _benchmark_record(ticker: str, label: str | None, *, ratio_shift: float = 0.
         "cash_and_equiv": 6.0,
         "total_equity": 55.0,
         "shares_outstanding": 10.0,
-        "gross_margin": 0.40 + ratio_shift,
-        "operating_margin": 0.20,
-        "roic": 0.15,
-        "roe": 0.10,
+        # Percent, as in the real benchmark; the fixture DB stores fractions.
+        "gross_margin": 40.0 + ratio_shift,
+        "operating_margin": 20.0,
+        "roic": 15.0,
+        "roe": 10.0,
     }
 
 
@@ -153,7 +154,7 @@ def synthetic_inputs(tmp_path):
     records = [
         _benchmark_record("AAA", "Wide"),
         _benchmark_record("BBB", "Narrow"),
-        _benchmark_record("CCC", "None", ratio_shift=0.03),
+        _benchmark_record("CCC", "None", ratio_shift=3.0),
         _benchmark_record("DDD", "Wide"),
         _benchmark_record("EEE", "Wide"),
         _benchmark_record("FFF", "None"),
@@ -284,6 +285,8 @@ def test_tier_c_taxonomy_period_rules_and_roe_hypothesis(synthetic_inputs):
     assert aaa[("free_cash_flow", "AAA")]["outcome"] == "Definitional difference"
     assert aaa[("total_debt", "AAA")]["outcome"] == "Definitional difference"
     assert aaa[("gross_margin", "AAA")]["outcome"] == "Match"
+    assert aaa[("gross_margin", "AAA")]["benchmark_normalized_value"] == pytest.approx(0.40)
+    assert aaa[("gross_margin", "AAA")]["normalization_formula"] == "benchmark_percent_to_fraction"
     assert aaa[("operating_margin", "AAA")]["outcome"] == "Definitional difference"
     assert aaa[("gross_margin", "CCC")]["outcome"] == "Probable defect"
     assert aaa[("depreciation_amortization", "AAA")]["outcome"] == "Unavailable"

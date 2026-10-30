@@ -84,6 +84,9 @@ def _average_equity_roe(history: list[dict]) -> float | None:
     if len(history) < 2:
         return None
     current, previous = history[-1], history[-2]
+    # Opening equity must be the prior fiscal year's close, not an older gap year.
+    if current.get("fiscal_year") is None or previous.get("fiscal_year") != current["fiscal_year"] - 1:
+        return None
     equity_now = current.get("stockholders_equity")
     equity_before = previous.get("stockholders_equity")
     net_income = current.get("net_income")

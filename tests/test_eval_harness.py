@@ -314,6 +314,26 @@ def test_tier_c_debt_definition_is_row_specific_for_flagged_lease_fallback(synth
     assert debt["rule"] == "ttm_vs_fiscal_year_without_exact_reconciliation"
 
 
+def test_tier_c_average_equity_roe_requires_consecutive_fiscal_years(synthetic_inputs):
+    _, candidate, _, records = synthetic_inputs
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        details, _ = evaluate_tier_c(db, benchmark_records=records)
+    roe = {row["ticker"]: row for row in details if row["field"] == "roe_average_equity_hypothesis"}
+    assert roe["AAA"]["moat_normalized_value"] == pytest.approx(5_000_000.0 / 50_000_000.0)
+
+    candidate.chmod(0o644)
+    conn = sqlite3.connect(candidate)
+    conn.execute("UPDATE fundamentals_annual SET fiscal_year=2023 WHERE ticker='AAA' AND fiscal_year=2024")
+    conn.commit()
+    conn.close()
+    candidate.chmod(0o444)
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        details, _ = evaluate_tier_c(db, benchmark_records=records)
+    gap = next(row for row in details if row["ticker"] == "AAA" and row["field"] == "roe_average_equity_hypothesis")
+    assert gap["moat_normalized_value"] is None
+    assert gap["outcome"] == "Unavailable"
+
+
 def test_public_allowlist_suppresses_small_cells_and_contains_no_records(synthetic_inputs):
     baseline, _, _, records = synthetic_inputs
     with ImmutableDatabase(baseline, "baseline-v1") as db:

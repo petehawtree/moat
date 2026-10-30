@@ -25,6 +25,8 @@ def main() -> int:
     parser.add_argument("--private-output-dir", required=True, type=Path)
     parser.add_argument("--public-output", required=True, type=Path)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--noise-floor-run-id", help="Optional unchanged-input committee replicate run ID")
+    parser.add_argument("--per-fix-replay-input", type=Path, help="Optional private deterministic replay JSONL")
     args = parser.parse_args()
     try:
         result = run_evaluation(
@@ -36,6 +38,8 @@ def main() -> int:
             private_output_dir=args.private_output_dir,
             public_output=args.public_output,
             preflight_only=args.preflight_only,
+            noise_floor_run_id=args.noise_floor_run_id,
+            per_fix_replay_input=args.per_fix_replay_input,
         )
     except EvalHarnessError as exc:
         print(f"eval harness failed: {exc}", file=sys.stderr)

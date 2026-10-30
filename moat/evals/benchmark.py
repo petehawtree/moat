@@ -15,6 +15,9 @@ from .errors import PreflightError
 from .util import is_finite_number
 
 _TICKER = re.compile(r"^[A-Z0-9][A-Z0-9.-]{0,14}$")
+_UNCERTAINTY = {"Low", "Medium", "High", "Very High", "Extreme"}
+_MOAT_TRENDS = {"Positive", "Stable", "Negative"}
+_CAPITAL_ALLOCATION = {"Exemplary", "Standard", "Poor"}
 
 
 def canonical_ticker(value: str) -> str:
@@ -25,6 +28,24 @@ def canonical_ticker(value: str) -> str:
     if not _TICKER.fullmatch(ticker):
         raise PreflightError("benchmark contains an unmapped identifier shape")
     return ticker
+
+
+def star_rating_value(value) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and int(value) == value and 1 <= int(value) <= 5:
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        first = stripped.split()[0] if stripped else ""
+        if first.isdigit() and 1 <= int(first) <= 5:
+            return int(first)
+        if stripped and set(stripped) <= {"★", "☆"}:
+            filled = stripped.count("★")
+            return filled if 1 <= filled <= 5 else None
+    return None
 
 
 def load_benchmark(path: Path) -> list[dict]:
@@ -61,6 +82,14 @@ def load_benchmark(path: Path) -> list[dict]:
                 raise PreflightError("tier-a benchmark contains an unknown coverage tier")
             if record["stratum"] not in CAPTURE_STRATA:
                 raise PreflightError("tier-a benchmark contains an unknown capture stratum")
+            if record.get("uncertainty") is not None and record["uncertainty"] not in _UNCERTAINTY:
+                raise PreflightError("tier-a benchmark contains an unknown uncertainty category")
+            if record.get("moat_trend") is not None and record["moat_trend"] not in _MOAT_TRENDS:
+                raise PreflightError("tier-a benchmark contains an unknown moat-trend category")
+            if record.get("capital_allocation") is not None and record["capital_allocation"] not in _CAPITAL_ALLOCATION:
+                raise PreflightError("tier-a benchmark contains an unknown capital-allocation category")
+            if record.get("star_rating") is not None and star_rating_value(record["star_rating"]) is None:
+                raise PreflightError("tier-a benchmark contains an unknown star-rating category")
             try:
                 date.fromisoformat(record["snapshot_date"])
             except (TypeError, ValueError) as exc:

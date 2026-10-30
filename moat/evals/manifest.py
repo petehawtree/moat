@@ -27,7 +27,7 @@ from .util import sha256_file
 
 ROOT_KEYS = {
     "manifest_version", "evaluation_mode", "eval_spec", "harness", "run_sets",
-    "benchmark", "judging", "seeds", "bootstrap_replicates", "execution",
+    "benchmark", "judging", "experiments", "seeds", "bootstrap_replicates", "execution",
 }
 
 
@@ -131,6 +131,26 @@ def validate_manifest(data: dict) -> None:
     if any(judging[k] is not None for k in ("rubric_sha256", "model", "prompt_sha256", "cohort_sha256")):
         raise ManifestError("Tier B judge fields must be null while judging is not run")
 
+    experiments = _require_object(data["experiments"], "experiments")
+    _exact_keys(experiments, {"noise_floor_run_id", "noise_floor_runtime_provenance", "per_fix_replay"}, "experiments")
+    if experiments["noise_floor_run_id"] is not None and not (
+        isinstance(experiments["noise_floor_run_id"], str) and experiments["noise_floor_run_id"]
+    ):
+        raise ManifestError("noise-floor run id must be null or a non-empty string")
+    runtime_provenance = experiments["noise_floor_runtime_provenance"]
+    if (experiments["noise_floor_run_id"] is None) != (runtime_provenance is None):
+        raise ManifestError("noise-floor run id and runtime provenance must both be null or both populated")
+    if runtime_provenance is not None and not (
+        isinstance(runtime_provenance, str) and runtime_provenance.strip()
+    ):
+        raise ManifestError("noise-floor runtime provenance must be a non-empty string")
+    replay = _require_object(experiments["per_fix_replay"], "experiments.per_fix_replay")
+    _exact_keys(replay, {"path", "sha256"}, "experiments.per_fix_replay")
+    if (replay["path"] is None) != (replay["sha256"] is None):
+        raise ManifestError("per-fix replay path and hash must both be null or both populated")
+    if replay["path"] is not None and (not isinstance(replay["path"], str) or not _is_sha256(replay["sha256"])):
+        raise ManifestError("per-fix replay path/hash is invalid")
+
     seeds = _require_object(data["seeds"], "seeds")
     _exact_keys(seeds, {"bootstrap", "sampling"}, "seeds")
     if not all(isinstance(v, int) and not isinstance(v, bool) for v in seeds.values()):
@@ -175,13 +195,19 @@ def build_manifest(
     *, repo_root: Path, baseline_db: Path, candidate_db: Path, benchmark_dir: Path,
     mode: str = "development", bootstrap_seed: int = DEFAULT_BOOTSTRAP_SEED,
     sampling_seed: int = DEFAULT_SAMPLING_SEED,
+    noise_floor_run_id: str | None = None,
+    noise_floor_runtime_provenance: str | None = None,
+    per_fix_replay_input: Path | None = None,
 ) -> dict:
     """Build a pre-scoring manifest for the fixed v1 run sets.
 
     This hashes inputs only; it never opens databases or scores benchmark rows.
     """
     tier_a = benchmark_dir / "tier-a-screener.jsonl"
-    for path in (baseline_db, candidate_db, tier_a):
+    inputs = [baseline_db, candidate_db, tier_a]
+    if per_fix_replay_input is not None:
+        inputs.append(per_fix_replay_input)
+    for path in inputs:
         if not path.is_file():
             raise ManifestError("one or more manifest inputs do not exist")
     commit, dirty = _git_state(repo_root)
@@ -218,6 +244,14 @@ def build_manifest(
         },
         "benchmark": {"directory": str(benchmark_dir.resolve()), "version": "morningstar-benchmark-v1", "files": {"tier_a_screener": {"path": "tier-a-screener.jsonl", "sha256": sha256_file(tier_a)}}},
         "judging": {"status": "not_run", "rubric_sha256": None, "model": None, "prompt_sha256": None, "cohort_sha256": None},
+        "experiments": {
+            "noise_floor_run_id": noise_floor_run_id,
+            "noise_floor_runtime_provenance": noise_floor_runtime_provenance,
+            "per_fix_replay": {
+                "path": str(per_fix_replay_input.resolve()) if per_fix_replay_input else None,
+                "sha256": sha256_file(per_fix_replay_input) if per_fix_replay_input else None,
+            },
+        },
         "seeds": {"bootstrap": bootstrap_seed, "sampling": sampling_seed},
         "bootstrap_replicates": DEFAULT_BOOTSTRAP_REPLICATES,
         "execution": {

@@ -121,6 +121,14 @@ KNOWN_QUANT_METRICS = {
     "debt", "share_dilution", "gross_margin",
 }
 KNOWN_QUANT_STATUSES = {"pass", "fail", "unavailable", "not_applicable"}
+KNOWN_VALUATION_SHAPES = {
+    ("owner_earnings_dcf", "bear"),
+    ("owner_earnings_dcf", "base"),
+    ("owner_earnings_dcf", "bull"),
+    ("fcf_yield", None),
+    ("ev_ebit", None),
+    ("pe_historical", None),
+}
 
 BENCHMARK_FIELDS = {
     "ticker", "company_name", "ms_sector", "ms_industry_group", "ms_industry",
@@ -142,3 +150,20 @@ REQUIRED_BENCHMARK_FIELDS = {
 }
 
 PUBLIC_DISCLOSURE_MIN_CELL = 5
+
+COMPONENT_WEIGHTS = {
+    "business_quality_score": 0.25,
+    "competitive_moat_score": 0.20,
+    "financial_strength_score": 0.15,
+    "management_score": 0.10,
+    "valuation_score": 0.25,
+    "risk_score": 0.05,
+}
+PERSONA_COMPONENTS = {
+    "Quality": ("business_quality_score", "competitive_moat_score", "management_score"),
+    "Valuation": ("financial_strength_score", "valuation_score"),
+    "Bear": ("risk_score",),
+}
+STATUS_ORDINAL = {"Reject": 0.0, "Watch": 1.0, "Investigate": 2.0}
+VALUATION_ORDINAL = {"Expensive": 0.0, "Fair": 1.0, "Cheap": 2.0}
+UNCERTAINTY_ORDINAL = {"Low": 0.0, "Medium": 1.0, "High": 2.0, "Very High": 3.0, "Extreme": 4.0}

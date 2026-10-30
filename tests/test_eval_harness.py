@@ -9,15 +9,20 @@ from pathlib import Path
 import pytest
 
 from moat.evals.benchmark import load_benchmark
+from moat.evals.committee_eval import evaluate_committee
 from moat.evals.constants import PROFILE_COLUMNS, RUN_IDS
 from moat.evals.database import ImmutableDatabase
 from moat.evals.errors import ManifestError, PreflightError
 from moat.evals.manifest import build_manifest, validate_manifest
+from moat.evals.noise_floor import evaluate_noise_floor
+from moat.evals.persona import evaluate_persona_influence
 from moat.evals.preflight import validate_paths
 from moat.evals.reporting import public_tier_a, public_tier_c
 from moat.evals.runner import run_evaluation
+from moat.evals.replay import evaluate_replays
 from moat.evals.tier_a import evaluate_tier_a
 from moat.evals.tier_c import evaluate_tier_c, symmetric_relative_difference
+from moat.evals.valuation import classify_moat_valuation, evaluate_valuation
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -81,13 +86,21 @@ def _create_profile_db(path: Path, profile: str, *, candidate_values: bool = Fal
             "INSERT INTO quant_scores (run_id,ticker,metric,value,overall_pass,status) VALUES (?,?,?,?,?,?)",
             (runs["screen"], ticker, "roic", 0.15, values[0], "pass" if values[0] else "fail"),
         )
+    for scenario, value in (("bear", 80.0), ("base", 100.0), ("bull", 120.0)):
+        columns = "run_id,ticker,method,scenario,intrinsic_value_low,intrinsic_value_high,current_price,margin_of_safety_pct,created_at"
+        values = [runs["valuation"], "AAA", "owner_earnings_dcf", scenario, value, value, 70.0, (value - 70.0) / value, "2026-01-01T00:01:00Z"]
+        if profile == "candidate-v1":
+            columns += ",price_date"
+            values.append("2026-01-01")
+        conn.execute(
+            f"INSERT INTO valuations ({columns}) VALUES ({','.join('?' for _ in values)})",
+            values,
+        )
+    severity = "high" if candidate_values else "medium"
+    status = "Watch" if severity == "high" else "Investigate"
     conn.execute(
-        "INSERT INTO valuations (run_id,ticker,method,scenario,intrinsic_value_low,intrinsic_value_high,current_price,created_at) VALUES (?,?,?,?,?,?,?,?)",
-        (runs["valuation"], "AAA", "owner_earnings_dcf", "base", 10.0, 10.0, 8.0, "2026-01-01T00:01:00Z"),
-    )
-    conn.execute(
-        "INSERT INTO committee_verdicts (run_id,ticker,status,bear_case_severity,cache_key,valuation_run_id,quality_run_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
-        (runs["committee"], "AAA", "Watch", "medium", "synthetic-key", runs["valuation"], runs["screen"], "2026-01-01T00:02:00Z"),
+        "INSERT INTO committee_verdicts (run_id,ticker,status,bear_case_severity,cache_key,valuation_run_id,quality_run_id,created_at,business_quality_score,competitive_moat_score,financial_strength_score,management_score,valuation_score,risk_score,overall_score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (runs["committee"], "AAA", status, severity, "synthetic-key", runs["valuation"], runs["screen"], "2026-01-01T00:02:00Z", 80.0, 80.0, 70.0, 60.0, 75.0, 30.0, 74.75),
     )
     for ticker in ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF"):
         rows = [
@@ -126,6 +139,12 @@ def _benchmark_record(ticker: str, label: str | None, *, ratio_shift: float = 0.
         "stratum": "pass",
         "snapshot_date": "2026-01-15",
         "source": "synthetic",
+        "fair_value": 100.0,
+        "last_price": 70.0,
+        "five_star_price": 75.0,
+        "one_star_price": 125.0,
+        "uncertainty": "Medium",
+        "star_rating": 5,
         "revenue": 100.0,
         "net_income": 5.0,
         "operating_cash_flow": 22.0,
@@ -233,6 +252,14 @@ def test_manifest_is_strict_and_records_tier_b_not_run(synthetic_inputs, tmp_pat
     broken["unexpected"] = True
     with pytest.raises(ManifestError, match="unknown key"):
         validate_manifest(broken)
+    with pytest.raises(ManifestError, match="runtime provenance"):
+        build_manifest(
+            repo_root=REPO_ROOT,
+            baseline_db=baseline,
+            candidate_db=candidate,
+            benchmark_dir=benchmark_dir,
+            noise_floor_run_id="future-replicate",
+        )
 
 
 def test_private_paths_inside_repository_are_rejected(synthetic_inputs, tmp_path):
@@ -314,6 +341,139 @@ def test_tier_c_debt_definition_is_row_specific_for_flagged_lease_fallback(synth
     assert debt["rule"] == "ttm_vs_fiscal_year_without_exact_reconciliation"
 
 
+def test_valuation_joins_frozen_run_rows_and_keeps_price_views_separate(synthetic_inputs):
+    _, candidate, _, records = synthetic_inputs
+    changed = [dict(record) for record in records]
+    changed[0]["last_price"] = 130.0
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        details, summaries = evaluate_valuation(
+            db,
+            run_id=RUN_IDS["candidate"]["valuation"],
+            benchmark_records=changed,
+        )
+    aaa = {row["view"]: row for row in details if row["ticker"] == "AAA"}
+    assert aaa["as_run"]["moat_classification"] == "Cheap"
+    assert aaa["as_run"]["moat_comparison_price"] == 70.0
+    assert aaa["price_normalised"]["moat_classification"] == "Expensive"
+    assert aaa["price_normalised"]["moat_comparison_price"] == 130.0
+    assert aaa["as_run"]["benchmark_class"] == "Expensive"
+    assert summaries["as_run_analyst"]["scored_count"] == 1
+
+
+def test_valuation_unknown_within_row_shape_abstains():
+    rows = [
+        {"method": "owner_earnings_dcf", "scenario": scenario, "intrinsic_value_low": value, "intrinsic_value_high": value}
+        for scenario, value in (("bear", 80.0), ("base", 100.0), ("bull", 120.0))
+    ]
+    rows[1]["intrinsic_value_high"] = 101.0
+    result = classify_moat_valuation(rows, 90.0)
+    assert result["classification"] == "Abstain"
+    assert result["rule"] == "material_within_row_intrinsic_range"
+
+
+def test_committee_support_and_persona_cap_counterfactuals(synthetic_inputs):
+    baseline, candidate, _, records = synthetic_inputs
+    with ImmutableDatabase(baseline, "baseline-v1") as db:
+        details, summary = evaluate_committee(
+            db,
+            committee_run_id=RUN_IDS["baseline"]["committee"],
+            screen_run_id=RUN_IDS["baseline"]["screen"],
+            benchmark_records=records,
+        )
+    aaa = next(row for row in details if row["ticker"] == "AAA")
+    assert aaa["committee_outcome"] == "Investigate"
+    assert aaa["external_support"] == "strong"
+    assert summary["investigate_support_composition"] == {"strong": 1}
+
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        persona_records, persona_summary = evaluate_persona_influence(
+            db,
+            committee_run_id=RUN_IDS["candidate"]["committee"],
+            benchmark_records=records,
+            primary=True,
+        )
+    assert persona_summary["weighted_score_point_contributions"]["Quality"]["designed_weight"] == pytest.approx(0.55)
+    assert persona_summary["weighted_score_point_contributions"]["Valuation"]["designed_weight"] == pytest.approx(0.40)
+    assert persona_summary["weighted_score_point_contributions"]["Bear"]["designed_weight"] == pytest.approx(0.05)
+    aaa_persona = next(row for row in persona_records if row["ticker"] == "AAA")
+    assert aaa_persona["counterfactuals"]["Bear_cap_disabled"]["status"] == "Investigate"
+
+
+def test_noise_floor_optional_and_exact_lineage(synthetic_inputs):
+    _, candidate, _, _ = synthetic_inputs
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        records, summary = evaluate_noise_floor(
+            db,
+            stored_run_id=RUN_IDS["candidate"]["committee"],
+            replicate_run_id=None,
+            candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
+            candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            runtime_provenance=None,
+        )
+    assert records == []
+    assert summary["status"] == "unavailable"
+    assert summary["reason"] == "replicate_run_id_not_supplied"
+
+    candidate.chmod(0o644)
+    conn = sqlite3.connect(candidate)
+    conn.execute(
+        "INSERT INTO pipeline_runs (run_id,started_at,stage_reached,status) VALUES ('noise-run','2026-01-02','committee','partial')"
+    )
+    conn.execute(
+        "INSERT INTO committee_verdicts (run_id,ticker,status,bear_case_severity,cache_key,valuation_run_id,quality_run_id,created_at,business_quality_score,competitive_moat_score,financial_strength_score,management_score,valuation_score,risk_score,overall_score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("noise-run", "AAA", "Watch", "medium", "synthetic-key", RUN_IDS["candidate"]["valuation"], RUN_IDS["candidate"]["screen"], "2026-01-02", 81.0, 79.0, 71.0, 61.0, 74.0, 31.0, 74.8),
+    )
+    conn.commit()
+    conn.close()
+    candidate.chmod(0o444)
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        noise_records, noise_summary = evaluate_noise_floor(
+            db,
+            stored_run_id=RUN_IDS["candidate"]["committee"],
+            replicate_run_id="noise-run",
+            candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
+            candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            runtime_provenance="synthetic equivalent runtime",
+        )
+    assert noise_summary["status"] == "available"
+    assert noise_summary["paired_company_count"] == 1
+    assert noise_records[0]["component_score_deltas"]["business_quality_score"] == 1.0
+
+
+def test_per_fix_replay_recomputes_screen_and_valuation_transitions():
+    metrics = {metric: "fail" for metric in {
+        "roic", "roe", "free_cash_flow", "revenue_eps_growth", "operating_margin",
+        "debt", "share_dilution", "gross_margin",
+    }}
+    for metric in ("roic", "roe", "gross_margin"):
+        metrics[metric] = "pass"
+    counterfactual = dict(metrics)
+    counterfactual["debt"] = "pass"
+    traces, summary = evaluate_replays([
+        {
+            "fix_id": "synthetic-screen-fix",
+            "ticker": "AAA",
+            "stage": "screen",
+            "before": {"metric_statuses": metrics},
+            "counterfactual": {"metric_statuses": counterfactual},
+            "evidence": "synthetic isolated metric change",
+            "other_inputs_held_constant": True,
+        },
+        {
+            "fix_id": "synthetic-valuation-fix",
+            "ticker": "BBB",
+            "stage": "valuation",
+            "before": {"bear": 50.0, "base": 75.0, "bull": 100.0, "price": 110.0},
+            "counterfactual": {"bear": 120.0, "base": 140.0, "bull": 160.0, "price": 110.0},
+            "evidence": "synthetic isolated DCF change",
+            "other_inputs_held_constant": True,
+        },
+    ])
+    assert summary["status"] == "available"
+    assert traces[0]["final_transition"] == "fail_to_pass"
+    assert traces[1]["final_transition"] == "Expensive_to_Cheap"
+
+
 def test_tier_c_average_equity_roe_requires_consecutive_fiscal_years(synthetic_inputs):
     _, candidate, _, records = synthetic_inputs
     with ImmutableDatabase(candidate, "candidate-v1") as db:
@@ -369,7 +529,7 @@ def test_synthetic_end_to_end_writes_private_details_and_public_aggregates(synth
         public_output=public,
         verify_git=False,
     )
-    assert result["status"] == "mechanical_tier_a_c_complete"
+    assert result["status"] == "mechanical_eval_v1_without_tier_b_complete"
     assert result["tier_b"] == "not_run"
     assert (private / "tier-a-baseline-records.jsonl").is_file()
     assert (private / "tier-c-candidate-records.jsonl").is_file()
@@ -378,4 +538,5 @@ def test_synthetic_end_to_end_writes_private_details_and_public_aggregates(synth
     public_data = json.loads(public.read_text())
     assert public_data["tier_b"]["status"] == "not_run"
     assert "AAA" not in public.read_text()
-    assert public_data["paired_baseline_candidate"]["claim_boundary"].startswith("combined Phase 1 effect")
+    assert public_data["paired_baseline_candidate"]["tier_a"]["claim_boundary"].startswith("combined Phase 1 effect")
+    assert public_data["persona_influence_and_external_alignment"]["candidate"]["external_alignment"]["Quality_vs_economic_moat"]["denominator"] == "suppressed_lt_5"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import math
 import sqlite3
 import subprocess
 from dataclasses import dataclass, field
@@ -10,7 +11,8 @@ from pathlib import Path
 
 from .benchmark import canonical_ticker, load_benchmark
 from .constants import (
-    FROZEN_SPEC_SHA256, KNOWN_QUANT_METRICS, KNOWN_QUANT_STATUSES, RUN_IDS, SNAPSHOT_BYTES,
+    COMPONENT_WEIGHTS, FROZEN_SPEC_SHA256, KNOWN_QUANT_METRICS, KNOWN_QUANT_STATUSES,
+    KNOWN_VALUATION_SHAPES, RUN_IDS, SNAPSHOT_BYTES,
     SPEC_HASH_RELATIVE_PATH, SPEC_RELATIVE_PATH,
 )
 from .database import ImmutableDatabase
@@ -66,6 +68,17 @@ def validate_paths(
         raise PreflightError("explicit benchmark directory does not match manifest")
     if private_output_dir.resolve() == public_output.resolve():
         raise PreflightError("private and public output targets must be distinct")
+    replay = manifest["experiments"]["per_fix_replay"]
+    if replay["path"] is not None:
+        replay_path = _resolved_manifest_path(replay["path"], manifest_path)
+        if path_is_within(replay_path, repo_root):
+            raise PreflightError("per-fix replay input must be outside the repository")
+        try:
+            replay_hash = sha256_file(replay_path)
+        except OSError as exc:
+            raise PreflightError("per-fix replay input is missing or unreadable") from exc
+        if replay_hash != replay["sha256"]:
+            raise PreflightError("per-fix replay input hash mismatch")
 
 
 def _verify_spec(repo_root: Path, manifest: dict) -> None:
@@ -133,9 +146,12 @@ def _validate_db_records(db: ImmutableDatabase, name: str, report: PreflightRepo
     for row in quant:
         if row["metric"] not in KNOWN_QUANT_METRICS or row["status"] not in KNOWN_QUANT_STATUSES:
             raise PreflightError("quant rows contain an unknown metric or status category")
-    if db.valuation_count(runs["valuation"]) == 0:
+    valuation_rows = db.valuation_rows(runs["valuation"])
+    if not valuation_rows:
         raise PreflightError("required valuation run contains no rows")
-    committee = db.committee_rows(runs["committee"])
+    if any((row["method"], row["scenario"]) not in KNOWN_VALUATION_SHAPES for row in valuation_rows):
+        raise PreflightError("valuation rows contain an unknown method/scenario shape")
+    committee = db.committee_full_rows(runs["committee"])
     if not committee:
         raise PreflightError("required committee run contains no rows")
     valid_tickers: set[str] = set()
@@ -148,6 +164,33 @@ def _validate_db_records(db: ImmutableDatabase, name: str, report: PreflightRepo
         if row["bear_case_severity"] not in {"low", "medium", "high"}:
             report.add_record_issue(name, ticker, "committee_unknown_severity")
             valid = False
+        numeric_valid = all(
+            isinstance(row.get(component), (int, float))
+            and not isinstance(row.get(component), bool)
+            and math.isfinite(row[component])
+            and 0 <= row[component] <= 100
+            for component in COMPONENT_WEIGHTS
+        ) and isinstance(row.get("overall_score"), (int, float)) and not isinstance(row.get("overall_score"), bool) and math.isfinite(row["overall_score"])
+        if not numeric_valid:
+            report.add_record_issue(name, ticker, "committee_invalid_numeric_scores")
+            valid = False
+        else:
+            recomputed_score = sum(
+                ((100.0 - row[component]) if component == "risk_score" else row[component]) * weight
+                for component, weight in COMPONENT_WEIGHTS.items()
+            )
+            expected_status = (
+                "Watch" if recomputed_score >= 70 and row["bear_case_severity"] == "high"
+                else "Investigate" if recomputed_score >= 70
+                else "Watch" if recomputed_score >= 50
+                else "Reject"
+            )
+            if not math.isclose(recomputed_score, row["overall_score"], rel_tol=1e-9, abs_tol=1e-9):
+                report.add_record_issue(name, ticker, "committee_overall_score_mismatch")
+                valid = False
+            if row["status"] != expected_status:
+                report.add_record_issue(name, ticker, "committee_status_formula_mismatch")
+                valid = False
         if row["valuation_run_id"] != runs["valuation"] or row["quality_run_id"] != runs["screen"]:
             report.add_record_issue(name, ticker, "committee_lineage_mismatch")
             valid = False

@@ -91,10 +91,43 @@ class ImmutableDatabase:
     def valuation_count(self, run_id: str) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM valuations WHERE run_id = ?", (run_id,)).fetchone()[0]
 
+    def valuation_rows(self, run_id: str) -> list[dict]:
+        columns = (
+            "run_id, ticker, method, scenario, intrinsic_value_low, intrinsic_value_high, "
+            "current_price, margin_of_safety_pct, key_assumptions, created_at"
+        )
+        if self.profile == "candidate-v1":
+            columns += ", price_date"
+        return [dict(row) for row in self.conn.execute(
+            f"SELECT {columns} FROM valuations WHERE run_id = ? ORDER BY ticker, method, scenario",
+            (run_id,),
+        )]
+
+    def reconstruct_price_date(self, ticker: str, price: float) -> dict:
+        rows = self.conn.execute(
+            "SELECT date FROM price_history WHERE ticker = ? AND ABS(close - ?) <= ? ORDER BY date",
+            (ticker, price, max(1e-9, abs(price) * 1e-12)),
+        ).fetchall()
+        return {
+            "price_date": rows[0]["date"] if len(rows) == 1 else None,
+            "status": "reconstructed_unverified" if len(rows) == 1 else "unavailable",
+            "match_count": len(rows),
+        }
+
     def committee_rows(self, run_id: str) -> list[dict]:
         return [dict(row) for row in self.conn.execute(
             "SELECT ticker, status, bear_case_severity, cache_key, reused_from_run_id, "
             "valuation_run_id, quality_run_id FROM committee_verdicts WHERE run_id = ? ORDER BY ticker",
+            (run_id,),
+        )]
+
+    def committee_full_rows(self, run_id: str) -> list[dict]:
+        return [dict(row) for row in self.conn.execute(
+            "SELECT run_id, ticker, bear_case_severity, cache_key, reused_from_run_id, "
+            "business_quality_score, competitive_moat_score, financial_strength_score, "
+            "management_score, valuation_score, risk_score, overall_score, status, "
+            "data_confidence, valuation_run_id, quality_run_id, created_at "
+            "FROM committee_verdicts WHERE run_id = ? ORDER BY ticker",
             (run_id,),
         )]
 

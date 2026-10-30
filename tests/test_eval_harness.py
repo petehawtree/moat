@@ -135,10 +135,11 @@ def _benchmark_record(ticker: str, label: str | None, *, ratio_shift: float = 0.
         "cash_and_equiv": 6.0,
         "total_equity": 55.0,
         "shares_outstanding": 10.0,
-        "gross_margin": 0.40 + ratio_shift,
-        "operating_margin": 0.20,
-        "roic": 0.15,
-        "roe": 0.10,
+        # Percent, as in the real benchmark; the fixture DB stores fractions.
+        "gross_margin": 40.0 + ratio_shift,
+        "operating_margin": 20.0,
+        "roic": 15.0,
+        "roe": 10.0,
     }
 
 
@@ -153,7 +154,7 @@ def synthetic_inputs(tmp_path):
     records = [
         _benchmark_record("AAA", "Wide"),
         _benchmark_record("BBB", "Narrow"),
-        _benchmark_record("CCC", "None", ratio_shift=0.03),
+        _benchmark_record("CCC", "None", ratio_shift=3.0),
         _benchmark_record("DDD", "Wide"),
         _benchmark_record("EEE", "Wide"),
         _benchmark_record("FFF", "None"),
@@ -284,6 +285,8 @@ def test_tier_c_taxonomy_period_rules_and_roe_hypothesis(synthetic_inputs):
     assert aaa[("free_cash_flow", "AAA")]["outcome"] == "Definitional difference"
     assert aaa[("total_debt", "AAA")]["outcome"] == "Definitional difference"
     assert aaa[("gross_margin", "AAA")]["outcome"] == "Match"
+    assert aaa[("gross_margin", "AAA")]["benchmark_normalized_value"] == pytest.approx(0.40)
+    assert aaa[("gross_margin", "AAA")]["normalization_formula"] == "benchmark_percent_to_fraction"
     assert aaa[("operating_margin", "AAA")]["outcome"] == "Definitional difference"
     assert aaa[("gross_margin", "CCC")]["outcome"] == "Probable defect"
     assert aaa[("depreciation_amortization", "AAA")]["outcome"] == "Unavailable"
@@ -309,6 +312,26 @@ def test_tier_c_debt_definition_is_row_specific_for_flagged_lease_fallback(synth
     debt = next(row for row in details if row["ticker"] == "AAA" and row["field"] == "total_debt")
     assert debt["outcome"] == "Inconclusive"
     assert debt["rule"] == "ttm_vs_fiscal_year_without_exact_reconciliation"
+
+
+def test_tier_c_average_equity_roe_requires_consecutive_fiscal_years(synthetic_inputs):
+    _, candidate, _, records = synthetic_inputs
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        details, _ = evaluate_tier_c(db, benchmark_records=records)
+    roe = {row["ticker"]: row for row in details if row["field"] == "roe_average_equity_hypothesis"}
+    assert roe["AAA"]["moat_normalized_value"] == pytest.approx(5_000_000.0 / 50_000_000.0)
+
+    candidate.chmod(0o644)
+    conn = sqlite3.connect(candidate)
+    conn.execute("UPDATE fundamentals_annual SET fiscal_year=2023 WHERE ticker='AAA' AND fiscal_year=2024")
+    conn.commit()
+    conn.close()
+    candidate.chmod(0o444)
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        details, _ = evaluate_tier_c(db, benchmark_records=records)
+    gap = next(row for row in details if row["ticker"] == "AAA" and row["field"] == "roe_average_equity_hypothesis")
+    assert gap["moat_normalized_value"] is None
+    assert gap["outcome"] == "Unavailable"
 
 
 def test_public_allowlist_suppresses_small_cells_and_contains_no_records(synthetic_inputs):

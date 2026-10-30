@@ -176,6 +176,7 @@ def public_noise_floor(summary: dict) -> dict:
         "status": "available",
         "replicate_run_id": summary["replicate_run_id"],
         "paired_company_count": summary["paired_company_count"],
+        "stored_preflight_invalid_abstention_count": summary["stored_preflight_invalid_abstention_count"],
         "component_score_delta_distributions": summary["component_score_delta_distributions"],
         "overall_score_delta_distribution": summary["overall_score_delta_distribution"],
         "status_flip_count": summary["status_flip_count"],

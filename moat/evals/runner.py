@@ -106,6 +106,7 @@ def run_evaluation(
             candidate_quality_run_id=manifest["run_sets"]["candidate"]["runs"]["screen"],
             candidate_valuation_run_id=manifest["run_sets"]["candidate"]["runs"]["valuation"],
             runtime_provenance=manifest["experiments"]["noise_floor_runtime_provenance"],
+            invalid_tickers=set(preflight.record_issues["candidate"]),
         )
     replay_inputs = load_replay_inputs(per_fix_replay_input) if per_fix_replay_input else None
     replay_records, replay_summary = evaluate_replays(replay_inputs)

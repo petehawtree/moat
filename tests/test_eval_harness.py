@@ -601,3 +601,33 @@ def test_noise_floor_rejects_stored_run_as_its_own_replicate(synthetic_inputs):
     assert records == []
     assert summary["status"] == "unavailable"
     assert summary["reason"] == "replicate_run_id_is_not_distinct_from_stored_run"
+
+
+def test_noise_floor_does_not_pair_preflight_invalid_stored_verdicts(synthetic_inputs):
+    _, candidate, _, _ = synthetic_inputs
+    stored = RUN_IDS["candidate"]["committee"]
+    _insert_verdict(candidate, stored, "BBB", (10.0, 10.0, 10.0, 10.0, 10.0, 90.0, 9.0), status="Reject", severity="low")
+    candidate.chmod(0o644)
+    conn = sqlite3.connect(candidate)
+    conn.execute(
+        "INSERT INTO pipeline_runs (run_id,started_at,stage_reached,status) VALUES ('noise-run','2026-01-02','committee','complete')"
+    )
+    conn.commit()
+    conn.close()
+    candidate.chmod(0o444)
+    _insert_verdict(candidate, "noise-run", "AAA", (81.0, 79.0, 71.0, 61.0, 74.0, 31.0, 74.8), status="Watch", severity="high")
+    _insert_verdict(candidate, "noise-run", "BBB", (60.0, 60.0, 60.0, 60.0, 60.0, 40.0, 60.0), status="Watch", severity="low")
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        records, summary = evaluate_noise_floor(
+            db,
+            stored_run_id=stored,
+            replicate_run_id="noise-run",
+            candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
+            candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            runtime_provenance="synthetic equivalent runtime",
+            invalid_tickers={"BBB"},
+        )
+    assert summary["status"] == "available"
+    assert [row["ticker"] for row in records] == ["AAA"]
+    assert summary["stored_preflight_invalid_abstention_count"] == 1
+    assert summary["status_flip_count"] == 0

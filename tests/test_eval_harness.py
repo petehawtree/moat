@@ -688,3 +688,31 @@ def test_public_rates_do_not_reveal_a_small_complement_cell():
     watch = public["research_priority_enrichment"]["Watch"]
     assert watch["supported_numerator"] == "suppressed_lt_5"
     assert watch["supported_rate"] is None
+
+
+def test_paired_valuation_keeps_cohorts_separate_and_requires_benchmark_eligibility():
+    from moat.evals.valuation import paired_valuation
+
+    def row(ticker, tier, benchmark_class, moat_class, margin):
+        return {
+            "ticker": ticker, "view": "as_run", "coverage_tier": tier,
+            "benchmark_class": benchmark_class, "moat_classification": moat_class,
+            "moat_base_margin_of_safety": margin,
+        }
+
+    baseline = [
+        row("AAA", "analyst", "Fair", "Fair", 0.0),
+        row("BBB", "quantitative", "Fair", "Fair", 0.0),
+        row("CCC", "analyst", "Abstain", "Fair", 0.0),
+    ]
+    candidate = [
+        row("AAA", "analyst", "Fair", "Cheap", 0.3),
+        row("BBB", "quantitative", "Fair", "Expensive", -0.3),
+        row("CCC", "analyst", "Abstain", "Cheap", 0.3),
+    ]
+    paired = paired_valuation(baseline, candidate)
+    assert paired["as_run_analyst"]["paired_scored_count"] == 1
+    assert paired["as_run_analyst"]["class_transitions"] == {"Fair_to_Cheap": 1}
+    assert paired["as_run_analyst"]["orientation"] == "primary"
+    assert paired["as_run_quantitative"]["class_transitions"] == {"Fair_to_Expensive": 1}
+    assert paired["as_run_quantitative"]["orientation"] == "secondary"

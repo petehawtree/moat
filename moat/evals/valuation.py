@@ -222,12 +222,15 @@ def evaluate_valuation(
 
 def paired_valuation(baseline: list[dict], candidate: list[dict]) -> dict:
     output = {}
-    for view in ("as_run", "price_normalised"):
-        before = {row["ticker"]: row for row in baseline if row["view"] == view}
-        after = {row["ticker"]: row for row in candidate if row["view"] == view}
+    for view, cohort in ((view, cohort) for view in ("as_run", "price_normalised") for cohort in ("analyst", "quantitative")):
+        # Same eligibility and cohort split as the per-run summaries (§4.3, §12).
+        before = {row["ticker"]: row for row in baseline if row["view"] == view and row["coverage_tier"] == cohort}
+        after = {row["ticker"]: row for row in candidate if row["view"] == view and row["coverage_tier"] == cohort}
         records = []
         for ticker in sorted(set(before) & set(after)):
             left, right = before[ticker], after[ticker]
+            if "Abstain" in (left["benchmark_class"], right["benchmark_class"]):
+                continue
             if left["moat_classification"] == "Abstain" or right["moat_classification"] == "Abstain":
                 continue
             records.append({
@@ -239,7 +242,8 @@ def paired_valuation(baseline: list[dict], candidate: list[dict]) -> dict:
                 "base_margin_of_safety_delta": right["moat_base_margin_of_safety"] - left["moat_base_margin_of_safety"],
             })
         transitions = Counter((row["baseline_class"], row["candidate_class"]) for row in records)
-        output[view] = {
+        output[f"{view}_{cohort}"] = {
+            "orientation": "primary" if cohort == "analyst" else "secondary",
             "paired_scored_count": len(records),
             "class_transitions": {f"{left}_to_{right}": count for (left, right), count in sorted(transitions.items())},
             "mean_base_margin_of_safety_delta": sum(row["base_margin_of_safety_delta"] for row in records) / len(records) if records else None,

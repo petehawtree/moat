@@ -656,3 +656,35 @@ def test_public_category_cells_have_fixed_keys_so_zero_and_small_cells_look_alik
     for summary in public_valuation(valuation).values():
         assert set(summary["benchmark_class_distribution"]) == {"Cheap", "Fair", "Expensive", "Abstain"}
         assert set(summary["moat_class_distribution"]) == {"Cheap", "Fair", "Expensive", "Abstain"}
+
+
+def test_public_rates_do_not_reveal_a_small_complement_cell():
+    from moat.evals.reporting import _public_metric, public_committee
+
+    # 6 of 8 would publish the 2 companies outside the numerator by subtraction.
+    hidden = _public_metric({"numerator": 6, "denominator": 8, "value": 0.75, "kind": "descriptive"})
+    assert hidden["numerator"] == "suppressed_lt_5"
+    assert hidden["value"] is None
+    shown = _public_metric({"numerator": 6, "denominator": 12, "value": 0.5, "kind": "descriptive"})
+    assert shown == {"numerator": 6, "denominator": 12, "value": 0.5, "kind": "descriptive"}
+
+    association = {"denominator": 0, "value": None, "kind": "exploratory"}
+    enrichment = {
+        status: {"supported_numerator": 6, "denominator": 8, "supported_rate": 0.75,
+                 "composition": {"strong": 6, "weak": 0, "ambiguous": 2, "contradicted": 0}}
+        for status in ("Reject", "Watch", "Investigate")
+    }
+    public = public_committee({
+        "eligible_screen_passer_count": 8, "committee_scored_count": 8,
+        "committee_abstention_count": 0, "committee_coverage_rate": 1.0,
+        "investigate_support_composition": {},
+        "investigate_contradiction_rate": {"numerator": 0, "denominator": 8, "value": 0.0, "kind": "descriptive_conservative"},
+        "support_composition_by_status": {},
+        "research_priority_enrichment": enrichment,
+        "priority_support_spearman_rho": association,
+        "watch_score_external_support_trend": association,
+        "direct_status_star_rating_spearman_rho": association,
+    })
+    watch = public["research_priority_enrichment"]["Watch"]
+    assert watch["supported_numerator"] == "suppressed_lt_5"
+    assert watch["supported_rate"] is None

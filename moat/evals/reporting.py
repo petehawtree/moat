@@ -12,12 +12,17 @@ def _suppressed_count(value: int):
     return value if value >= PUBLIC_DISCLOSURE_MIN_CELL else "suppressed_lt_5"
 
 
+def _small_cell_or_complement(numerator: int, denominator: int) -> bool:
+    """Publishing both counts would also publish denominator - numerator."""
+    return numerator < PUBLIC_DISCLOSURE_MIN_CELL or denominator - numerator < PUBLIC_DISCLOSURE_MIN_CELL
+
+
 def _public_metric(metric: dict) -> dict:
     denominator = metric.get("denominator")
     numerator = metric.get("numerator")
     if isinstance(denominator, int) and denominator < PUBLIC_DISCLOSURE_MIN_CELL:
         return {"numerator": "suppressed_lt_5", "denominator": "suppressed_lt_5", "value": None, "kind": metric.get("kind")}
-    if isinstance(numerator, int) and numerator < PUBLIC_DISCLOSURE_MIN_CELL:
+    if isinstance(numerator, int) and isinstance(denominator, int) and _small_cell_or_complement(numerator, denominator):
         return {"numerator": "suppressed_lt_5", "denominator": denominator, "value": None, "kind": metric.get("kind")}
     return {key: metric[key] for key in ("numerator", "denominator", "value", "kind") if key in metric}
 
@@ -124,9 +129,18 @@ def public_committee(summary: dict) -> dict:
         },
         "research_priority_enrichment": {
             status: {
-                "supported_numerator": _suppressed_count(values["supported_numerator"]),
+                "supported_numerator": (
+                    "suppressed_lt_5"
+                    if _small_cell_or_complement(values["supported_numerator"], values["denominator"])
+                    else values["supported_numerator"]
+                ),
                 "denominator": _suppressed_count(values["denominator"]),
-                "supported_rate": values["supported_rate"] if values["denominator"] >= PUBLIC_DISCLOSURE_MIN_CELL and values["supported_numerator"] >= PUBLIC_DISCLOSURE_MIN_CELL else None,
+                "supported_rate": (
+                    None
+                    if values["denominator"] < PUBLIC_DISCLOSURE_MIN_CELL
+                    or _small_cell_or_complement(values["supported_numerator"], values["denominator"])
+                    else values["supported_rate"]
+                ),
                 "composition": {key: _suppressed_count(value) for key, value in values["composition"].items()},
             }
             for status, values in summary["research_priority_enrichment"].items()

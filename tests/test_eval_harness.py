@@ -575,3 +575,29 @@ def test_persona_excludes_preflight_invalid_verdicts_from_medians_and_counterfac
     assert summary["preflight_invalid_abstention_count"] == 1
     assert summary["invalid_or_missing_numeric_count"] == 0
     assert summary["component_medians"]["business_quality_score"] == 80.0
+
+
+def test_noise_floor_rejects_stored_run_as_its_own_replicate(synthetic_inputs):
+    baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    stored = RUN_IDS["candidate"]["committee"]
+    with pytest.raises(ManifestError, match="distinct"):
+        build_manifest(
+            repo_root=REPO_ROOT,
+            baseline_db=baseline,
+            candidate_db=candidate,
+            benchmark_dir=benchmark_dir,
+            noise_floor_run_id=stored,
+            noise_floor_runtime_provenance="synthetic equivalent runtime",
+        )
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        records, summary = evaluate_noise_floor(
+            db,
+            stored_run_id=stored,
+            replicate_run_id=stored,
+            candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
+            candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            runtime_provenance="synthetic equivalent runtime",
+        )
+    assert records == []
+    assert summary["status"] == "unavailable"
+    assert summary["reason"] == "replicate_run_id_is_not_distinct_from_stored_run"

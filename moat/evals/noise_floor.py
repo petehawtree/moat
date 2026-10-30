@@ -38,6 +38,12 @@ def evaluate_noise_floor(
             "reason": "replicate_run_id_not_supplied",
             "interpretation": "committee baseline/candidate movement remains descriptive only",
         }
+    if replicate_run_id == stored_run_id:
+        return [], {
+            "status": "unavailable",
+            "reason": "replicate_run_id_is_not_distinct_from_stored_run",
+            "interpretation": "committee baseline/candidate movement remains descriptive only",
+        }
     run = db.run_row(replicate_run_id)
     if run is None:
         return [], {

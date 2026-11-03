@@ -115,8 +115,22 @@ def public_committee(summary: dict) -> dict:
         "committee_scored_count": summary["committee_scored_count"],
         "committee_abstention_count": summary["committee_abstention_count"],
         "committee_coverage_rate": summary["committee_coverage_rate"],
-        "external_support_scored_count": _suppressed_count(summary["external_support_scored_count"]),
-        "external_support_abstention_count": _suppressed_count(summary["external_support_abstention_count"]),
+        # The two counts partition the public committee_scored_count, so one
+        # small cell would be recoverable by subtraction from the other.
+        **(
+            {
+                "external_support_scored_count": "suppressed_lt_5",
+                "external_support_abstention_count": "suppressed_lt_5",
+            }
+            if _small_cell_or_complement(
+                summary["external_support_abstention_count"],
+                summary["committee_scored_count"],
+            )
+            else {
+                "external_support_scored_count": summary["external_support_scored_count"],
+                "external_support_abstention_count": summary["external_support_abstention_count"],
+            }
+        ),
         "investigate_support_composition": {
             key: _suppressed_count(value) for key, value in summary["investigate_support_composition"].items()
         },

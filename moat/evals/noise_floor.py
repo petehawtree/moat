@@ -31,11 +31,19 @@ def evaluate_noise_floor(
     candidate_quality_run_id: str,
     candidate_valuation_run_id: str,
     runtime_provenance: str | None,
+    invalid_tickers: set[str] | None = None,
 ) -> tuple[list[dict], dict]:
+    invalid_tickers = invalid_tickers or set()
     if replicate_run_id is None:
         return [], {
             "status": "unavailable",
             "reason": "replicate_run_id_not_supplied",
+            "interpretation": "committee baseline/candidate movement remains descriptive only",
+        }
+    if replicate_run_id == stored_run_id:
+        return [], {
+            "status": "unavailable",
+            "reason": "replicate_run_id_is_not_distinct_from_stored_run",
             "interpretation": "committee baseline/candidate movement remains descriptive only",
         }
     run = db.run_row(replicate_run_id)
@@ -70,8 +78,10 @@ def evaluate_noise_floor(
             "replicate_count": len(replicate),
             "interpretation": "committee baseline/candidate movement remains descriptive only",
         }
+    # Stored verdicts that failed preflight abstain (§3); they are not paired.
+    paired_tickers = sorted(set(stored) - invalid_tickers)
     invalid = [
-        row for ticker, row in replicate.items()
+        row for ticker, row in ((ticker, replicate[ticker]) for ticker in paired_tickers)
         if row["reused_from_run_id"] is not None
         or row["quality_run_id"] != candidate_quality_run_id
         or row["valuation_run_id"] != candidate_valuation_run_id
@@ -94,7 +104,7 @@ def evaluate_noise_floor(
             "interpretation": "committee baseline/candidate movement remains descriptive only",
         }
     records = []
-    for ticker in sorted(stored):
+    for ticker in paired_tickers:
         left, right = stored[ticker], replicate[ticker]
         component_deltas = {
             component: right[component] - left[component] for component in COMPONENT_WEIGHTS
@@ -115,6 +125,7 @@ def evaluate_noise_floor(
         "replicate_run_id": replicate_run_id,
         "runtime_provenance": runtime_provenance,
         "paired_company_count": len(records),
+        "stored_preflight_invalid_abstention_count": len(set(stored) & invalid_tickers),
         "component_score_delta_distributions": {
             component: _distribution([row["component_score_deltas"][component] for row in records])
             for component in COMPONENT_WEIGHTS

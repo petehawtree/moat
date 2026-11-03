@@ -9,7 +9,8 @@ specification.
 - The report format is JSON. Detailed company records are separate atomic
   JSONL files in the private output directory.
 - Public disclosure suppresses each benchmark-derived count below five. A rate
-  is hidden when its numerator or denominator is below five.
+  is hidden when its numerator, denominator or complement (denominator minus
+  numerator) is below five.
 - Manifest objects and normalized input records reject unknown keys and
   categories. Development manifests may bind synthetic inputs; authoritative
   manifests must bind the two frozen snapshot digests and sizes.

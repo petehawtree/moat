@@ -137,6 +137,8 @@ def validate_manifest(data: dict) -> None:
         isinstance(experiments["noise_floor_run_id"], str) and experiments["noise_floor_run_id"]
     ):
         raise ManifestError("noise-floor run id must be null or a non-empty string")
+    if experiments["noise_floor_run_id"] in {run_id for runs in RUN_IDS.values() for run_id in runs.values()}:
+        raise ManifestError("noise-floor run id must be distinct from the frozen run sets")
     runtime_provenance = experiments["noise_floor_runtime_provenance"]
     if (experiments["noise_floor_run_id"] is None) != (runtime_provenance is None):
         raise ManifestError("noise-floor run id and runtime provenance must both be null or both populated")

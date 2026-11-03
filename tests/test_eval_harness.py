@@ -383,7 +383,9 @@ def test_committee_support_and_persona_cap_counterfactuals(synthetic_inputs):
     aaa = next(row for row in details if row["ticker"] == "AAA")
     assert aaa["committee_outcome"] == "Investigate"
     assert aaa["external_support"] == "strong"
-    assert summary["investigate_support_composition"] == {"strong": 1}
+    assert summary["investigate_support_composition"] == {
+        "strong": 1, "weak": 0, "ambiguous": 0, "contradicted": 0, "abstain": 0,
+    }
 
     with ImmutableDatabase(candidate, "candidate-v1") as db:
         persona_records, persona_summary = evaluate_persona_influence(
@@ -440,7 +442,30 @@ def test_noise_floor_optional_and_exact_lineage(synthetic_inputs):
     assert noise_records[0]["component_score_deltas"]["business_quality_score"] == 1.0
 
 
-def test_per_fix_replay_recomputes_screen_and_valuation_transitions():
+def _replace_synthetic_screen_rows(path: Path, ticker: str, statuses: dict[str, str]) -> None:
+    path.chmod(0o644)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "DELETE FROM quant_scores WHERE run_id=? AND ticker=?",
+        (RUN_IDS["baseline"]["screen"], ticker),
+    )
+    conn.executemany(
+        "INSERT INTO quant_scores (run_id,ticker,metric,overall_pass,status) VALUES (?,?,?,?,?)",
+        [
+            (
+                RUN_IDS["baseline"]["screen"], ticker, metric,
+                int(status == "pass"), status,
+            )
+            for metric, status in statuses.items()
+        ],
+    )
+    conn.commit()
+    conn.close()
+    path.chmod(0o444)
+
+
+def test_per_fix_replay_verifies_frozen_before_states_and_recomputes_transitions(synthetic_inputs):
+    baseline, _, _, _ = synthetic_inputs
     metrics = {metric: "fail" for metric in {
         "roic", "roe", "free_cash_flow", "revenue_eps_growth", "operating_margin",
         "debt", "share_dilution", "gross_margin",
@@ -449,7 +474,8 @@ def test_per_fix_replay_recomputes_screen_and_valuation_transitions():
         metrics[metric] = "pass"
     counterfactual = dict(metrics)
     counterfactual["debt"] = "pass"
-    traces, summary = evaluate_replays([
+    _replace_synthetic_screen_rows(baseline, "AAA", metrics)
+    records = [
         {
             "fix_id": "synthetic-screen-fix",
             "ticker": "AAA",
@@ -461,17 +487,57 @@ def test_per_fix_replay_recomputes_screen_and_valuation_transitions():
         },
         {
             "fix_id": "synthetic-valuation-fix",
-            "ticker": "BBB",
+            "ticker": "AAA",
             "stage": "valuation",
-            "before": {"bear": 50.0, "base": 75.0, "bull": 100.0, "price": 110.0},
-            "counterfactual": {"bear": 120.0, "base": 140.0, "bull": 160.0, "price": 110.0},
+            "before": {"bear": 80.0, "base": 100.0, "bull": 120.0, "price": 70.0},
+            "counterfactual": {"bear": 50.0, "base": 60.0, "bull": 65.0, "price": 70.0},
             "evidence": "synthetic isolated DCF change",
             "other_inputs_held_constant": True,
         },
-    ])
+    ]
+    with ImmutableDatabase(baseline, "baseline-v1") as db:
+        traces, summary = evaluate_replays(
+            records,
+            baseline_db=db,
+            baseline_screen_run_id=RUN_IDS["baseline"]["screen"],
+            baseline_valuation_run_id=RUN_IDS["baseline"]["valuation"],
+        )
     assert summary["status"] == "available"
     assert traces[0]["final_transition"] == "fail_to_pass"
-    assert traces[1]["final_transition"] == "Expensive_to_Cheap"
+    assert traces[1]["final_transition"] == "Cheap_to_Expensive"
+
+
+@pytest.mark.parametrize("stage", ["screen", "valuation"])
+def test_per_fix_replay_rejects_before_state_mismatches(synthetic_inputs, stage):
+    baseline, _, _, _ = synthetic_inputs
+    metrics = {metric: "fail" for metric in {
+        "roic", "roe", "free_cash_flow", "revenue_eps_growth", "operating_margin",
+        "debt", "share_dilution", "gross_margin",
+    }}
+    metrics["roic"] = "pass"
+    _replace_synthetic_screen_rows(baseline, "AAA", metrics)
+    before = (
+        {"metric_statuses": {**metrics, "debt": "pass"}}
+        if stage == "screen"
+        else {"bear": 80.0, "base": 100.0, "bull": 120.0, "price": 71.0}
+    )
+    record = {
+        "fix_id": "synthetic-mismatch",
+        "ticker": "AAA",
+        "stage": stage,
+        "before": before,
+        "counterfactual": before,
+        "evidence": "synthetic mismatch",
+        "other_inputs_held_constant": True,
+    }
+    with ImmutableDatabase(baseline, "baseline-v1") as db:
+        with pytest.raises(PreflightError, match="does not match the frozen baseline"):
+            evaluate_replays(
+                [record],
+                baseline_db=db,
+                baseline_screen_run_id=RUN_IDS["baseline"]["screen"],
+                baseline_valuation_run_id=RUN_IDS["baseline"]["valuation"],
+            )
 
 
 def test_tier_c_average_equity_roe_requires_consecutive_fiscal_years(synthetic_inputs):
@@ -540,3 +606,177 @@ def test_synthetic_end_to_end_writes_private_details_and_public_aggregates(synth
     assert "AAA" not in public.read_text()
     assert public_data["paired_baseline_candidate"]["tier_a"]["claim_boundary"].startswith("combined Phase 1 effect")
     assert public_data["persona_influence_and_external_alignment"]["candidate"]["external_alignment"]["Quality_vs_economic_moat"]["denominator"] == "suppressed_lt_5"
+
+
+def _insert_verdict(path: Path, run_id: str, ticker: str, scores: tuple, *, status: str, severity: str,
+                    cache_key: str = "synthetic-key", profile_name: str = "candidate") -> None:
+    path.chmod(0o644)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO committee_verdicts (run_id,ticker,status,bear_case_severity,cache_key,valuation_run_id,quality_run_id,created_at,business_quality_score,competitive_moat_score,financial_strength_score,management_score,valuation_score,risk_score,overall_score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (run_id, ticker, status, severity, cache_key, RUN_IDS[profile_name]["valuation"], RUN_IDS[profile_name]["screen"], "2026-01-02", *scores),
+    )
+    conn.commit()
+    conn.close()
+    path.chmod(0o444)
+
+
+def test_persona_excludes_preflight_invalid_verdicts_from_medians_and_counterfactuals(synthetic_inputs):
+    _, candidate, _, records = synthetic_inputs
+    # Numerically valid, but preflight flagged it (e.g. lineage or cache-key failure).
+    _insert_verdict(
+        candidate, RUN_IDS["candidate"]["committee"], "BBB",
+        (10.0, 10.0, 10.0, 10.0, 10.0, 90.0, 9.0), status="Reject", severity="low",
+    )
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        persona_records, summary = evaluate_persona_influence(
+            db,
+            committee_run_id=RUN_IDS["candidate"]["committee"],
+            benchmark_records=records,
+            primary=True,
+            invalid_tickers={"BBB"},
+        )
+    assert [row["ticker"] for row in persona_records] == ["AAA"]
+    assert summary["valid_verdict_count"] == 1
+    assert summary["preflight_invalid_abstention_count"] == 1
+    assert summary["invalid_or_missing_numeric_count"] == 0
+    assert summary["component_medians"]["business_quality_score"] == 80.0
+
+
+def test_noise_floor_rejects_stored_run_as_its_own_replicate(synthetic_inputs):
+    baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    stored = RUN_IDS["candidate"]["committee"]
+    with pytest.raises(ManifestError, match="distinct"):
+        build_manifest(
+            repo_root=REPO_ROOT,
+            baseline_db=baseline,
+            candidate_db=candidate,
+            benchmark_dir=benchmark_dir,
+            noise_floor_run_id=stored,
+            noise_floor_runtime_provenance="synthetic equivalent runtime",
+        )
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        records, summary = evaluate_noise_floor(
+            db,
+            stored_run_id=stored,
+            replicate_run_id=stored,
+            candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
+            candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            runtime_provenance="synthetic equivalent runtime",
+        )
+    assert records == []
+    assert summary["status"] == "unavailable"
+    assert summary["reason"] == "replicate_run_id_is_not_distinct_from_stored_run"
+
+
+def test_noise_floor_does_not_pair_preflight_invalid_stored_verdicts(synthetic_inputs):
+    _, candidate, _, _ = synthetic_inputs
+    stored = RUN_IDS["candidate"]["committee"]
+    _insert_verdict(candidate, stored, "BBB", (10.0, 10.0, 10.0, 10.0, 10.0, 90.0, 9.0), status="Reject", severity="low")
+    candidate.chmod(0o644)
+    conn = sqlite3.connect(candidate)
+    conn.execute(
+        "INSERT INTO pipeline_runs (run_id,started_at,stage_reached,status) VALUES ('noise-run','2026-01-02','committee','complete')"
+    )
+    conn.commit()
+    conn.close()
+    candidate.chmod(0o444)
+    _insert_verdict(candidate, "noise-run", "AAA", (81.0, 79.0, 71.0, 61.0, 74.0, 31.0, 74.8), status="Watch", severity="high")
+    _insert_verdict(candidate, "noise-run", "BBB", (60.0, 60.0, 60.0, 60.0, 60.0, 40.0, 60.0), status="Watch", severity="low")
+    with ImmutableDatabase(candidate, "candidate-v1") as db:
+        records, summary = evaluate_noise_floor(
+            db,
+            stored_run_id=stored,
+            replicate_run_id="noise-run",
+            candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
+            candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            runtime_provenance="synthetic equivalent runtime",
+            invalid_tickers={"BBB"},
+        )
+    assert summary["status"] == "available"
+    assert [row["ticker"] for row in records] == ["AAA"]
+    assert summary["stored_preflight_invalid_abstention_count"] == 1
+    assert summary["status_flip_count"] == 0
+
+
+def test_public_category_cells_have_fixed_keys_so_zero_and_small_cells_look_alike(synthetic_inputs):
+    from moat.evals.reporting import public_committee, public_valuation
+
+    baseline, _, _, records = synthetic_inputs
+    with ImmutableDatabase(baseline, "baseline-v1") as db:
+        _, committee = evaluate_committee(
+            db,
+            committee_run_id=RUN_IDS["baseline"]["committee"],
+            screen_run_id=RUN_IDS["baseline"]["screen"],
+            benchmark_records=records,
+        )
+        _, valuation = evaluate_valuation(db, run_id=RUN_IDS["baseline"]["valuation"], benchmark_records=records)
+    public_c = public_committee(committee)
+    composition = public_c["investigate_support_composition"]
+    assert set(composition) == {"strong", "weak", "ambiguous", "contradicted", "abstain"}
+    assert set(composition.values()) == {"suppressed_lt_5"}
+    for values in public_c["research_priority_enrichment"].values():
+        assert set(values["composition"]) == {"strong", "weak", "ambiguous", "contradicted"}
+    for summary in public_valuation(valuation).values():
+        assert set(summary["benchmark_class_distribution"]) == {"Cheap", "Fair", "Expensive", "Abstain"}
+        assert set(summary["moat_class_distribution"]) == {"Cheap", "Fair", "Expensive", "Abstain"}
+
+
+def test_public_rates_do_not_reveal_a_small_complement_cell():
+    from moat.evals.reporting import _public_metric, public_committee
+
+    # 6 of 8 would publish the 2 companies outside the numerator by subtraction.
+    hidden = _public_metric({"numerator": 6, "denominator": 8, "value": 0.75, "kind": "descriptive"})
+    assert hidden["numerator"] == "suppressed_lt_5"
+    assert hidden["value"] is None
+    shown = _public_metric({"numerator": 6, "denominator": 12, "value": 0.5, "kind": "descriptive"})
+    assert shown == {"numerator": 6, "denominator": 12, "value": 0.5, "kind": "descriptive"}
+
+    association = {"denominator": 0, "value": None, "kind": "exploratory"}
+    enrichment = {
+        status: {"supported_numerator": 6, "denominator": 8, "supported_rate": 0.75,
+                 "composition": {"strong": 6, "weak": 0, "ambiguous": 2, "contradicted": 0}}
+        for status in ("Reject", "Watch", "Investigate")
+    }
+    public = public_committee({
+        "eligible_screen_passer_count": 8, "committee_scored_count": 8,
+        "committee_abstention_count": 0, "committee_coverage_rate": 1.0,
+        "investigate_support_composition": {},
+        "investigate_contradiction_rate": {"numerator": 0, "denominator": 8, "value": 0.0, "kind": "descriptive_conservative"},
+        "support_composition_by_status": {},
+        "research_priority_enrichment": enrichment,
+        "priority_support_spearman_rho": association,
+        "watch_score_external_support_trend": association,
+        "direct_status_star_rating_spearman_rho": association,
+    })
+    watch = public["research_priority_enrichment"]["Watch"]
+    assert watch["supported_numerator"] == "suppressed_lt_5"
+    assert watch["supported_rate"] is None
+
+
+def test_paired_valuation_keeps_cohorts_separate_and_requires_benchmark_eligibility():
+    from moat.evals.valuation import paired_valuation
+
+    def row(ticker, tier, benchmark_class, moat_class, margin):
+        return {
+            "ticker": ticker, "view": "as_run", "coverage_tier": tier,
+            "benchmark_class": benchmark_class, "moat_classification": moat_class,
+            "moat_base_margin_of_safety": margin,
+        }
+
+    baseline = [
+        row("AAA", "analyst", "Fair", "Fair", 0.0),
+        row("BBB", "quantitative", "Fair", "Fair", 0.0),
+        row("CCC", "analyst", "Abstain", "Fair", 0.0),
+    ]
+    candidate = [
+        row("AAA", "analyst", "Fair", "Cheap", 0.3),
+        row("BBB", "quantitative", "Fair", "Expensive", -0.3),
+        row("CCC", "analyst", "Abstain", "Cheap", 0.3),
+    ]
+    paired = paired_valuation(baseline, candidate)
+    assert paired["as_run_analyst"]["paired_scored_count"] == 1
+    assert paired["as_run_analyst"]["class_transitions"] == {"Fair_to_Cheap": 1}
+    assert paired["as_run_analyst"]["orientation"] == "primary"
+    assert paired["as_run_quantitative"]["class_transitions"] == {"Fair_to_Expensive": 1}
+    assert paired["as_run_quantitative"]["orientation"] == "secondary"

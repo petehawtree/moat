@@ -91,8 +91,15 @@ def evaluate_persona_influence(
     committee_run_id: str,
     benchmark_records: list[dict],
     primary: bool,
+    invalid_tickers: set[str] | None = None,
 ) -> tuple[list[dict], dict]:
-    rows = [row for row in db.committee_full_rows(committee_run_id) if _valid_row(row)]
+    invalid_tickers = invalid_tickers or set()
+    all_rows = db.committee_full_rows(committee_run_id)
+    preflight_invalid = [row for row in all_rows if canonical_ticker(row["ticker"]) in invalid_tickers]
+    rows = [
+        row for row in all_rows
+        if canonical_ticker(row["ticker"]) not in invalid_tickers and _valid_row(row)
+    ]
     medians = {
         component: statistics.median(row[component] for row in rows)
         for component in COMPONENT_WEIGHTS
@@ -199,7 +206,8 @@ def evaluate_persona_influence(
     summary = {
         "role": "primary_candidate" if primary else "secondary_baseline",
         "valid_verdict_count": len(details),
-        "invalid_or_missing_numeric_count": len(db.committee_full_rows(committee_run_id)) - len(details),
+        "invalid_or_missing_numeric_count": len(all_rows) - len(preflight_invalid) - len(details),
+        "preflight_invalid_abstention_count": len(preflight_invalid),
         "component_medians": medians,
         "median_cohort": "all valid verdicts in the evaluated committee run",
         "score_distribution": {

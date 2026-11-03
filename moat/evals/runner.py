@@ -83,6 +83,7 @@ def run_evaluation(
                 committee_run_id=config["runs"]["committee"],
                 benchmark_records=benchmark,
                 primary=name == "candidate",
+                invalid_tickers=committee_invalid,
             )
         tier_a_records[name], tier_a_summaries[name], exclusions[name] = a_records, a_summary, a_exclusions
         tier_c_records[name], tier_c_summaries[name] = c_records, c_summary
@@ -105,9 +106,19 @@ def run_evaluation(
             candidate_quality_run_id=manifest["run_sets"]["candidate"]["runs"]["screen"],
             candidate_valuation_run_id=manifest["run_sets"]["candidate"]["runs"]["valuation"],
             runtime_provenance=manifest["experiments"]["noise_floor_runtime_provenance"],
+            invalid_tickers=set(preflight.record_issues["candidate"]),
         )
     replay_inputs = load_replay_inputs(per_fix_replay_input) if per_fix_replay_input else None
-    replay_records, replay_summary = evaluate_replays(replay_inputs)
+    baseline_config = manifest["run_sets"]["baseline"]
+    with ImmutableDatabase(
+        baseline_db, baseline_config["database"]["profile"]
+    ) as db:
+        replay_records, replay_summary = evaluate_replays(
+            replay_inputs,
+            baseline_db=db,
+            baseline_screen_run_id=baseline_config["runs"]["screen"],
+            baseline_valuation_run_id=baseline_config["runs"]["valuation"],
+        )
     write_private_outputs(
         private_output_dir,
         manifest=manifest,

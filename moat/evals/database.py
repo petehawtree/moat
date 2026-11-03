@@ -88,6 +88,18 @@ class ImmutableDatabase:
             (run_id,),
         )]
 
+    def replay_screen_before_state(self, run_id: str, ticker: str) -> dict | None:
+        """Return the frozen statuses that a screen replay must reproduce."""
+        rows = self.conn.execute(
+            "SELECT metric, status FROM quant_scores "
+            "WHERE run_id = ? AND ticker = ? ORDER BY metric",
+            (run_id, ticker),
+        ).fetchall()
+        statuses = {row["metric"]: row["status"] for row in rows}
+        if len(rows) != len(statuses):
+            return None
+        return {"metric_statuses": statuses}
+
     def valuation_count(self, run_id: str) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM valuations WHERE run_id = ?", (run_id,)).fetchone()[0]
 
@@ -102,6 +114,27 @@ class ImmutableDatabase:
             f"SELECT {columns} FROM valuations WHERE run_id = ? ORDER BY ticker, method, scenario",
             (run_id,),
         )]
+
+    def replay_valuation_before_state(self, run_id: str, ticker: str) -> dict | None:
+        """Return the frozen owner-earnings scenarios and their common price."""
+        rows = self.conn.execute(
+            "SELECT scenario, intrinsic_value_low, current_price FROM valuations "
+            "WHERE run_id = ? AND ticker = ? AND method = 'owner_earnings_dcf' "
+            "ORDER BY scenario",
+            (run_id, ticker),
+        ).fetchall()
+        by_scenario = {row["scenario"]: row for row in rows}
+        if len(rows) != 3 or set(by_scenario) != {"bear", "base", "bull"}:
+            return None
+        prices = {row["current_price"] for row in rows}
+        if len(prices) != 1:
+            return None
+        return {
+            "bear": by_scenario["bear"]["intrinsic_value_low"],
+            "base": by_scenario["base"]["intrinsic_value_low"],
+            "bull": by_scenario["bull"]["intrinsic_value_low"],
+            "price": prices.pop(),
+        }
 
     def reconstruct_price_date(self, ticker: str, price: float) -> dict:
         rows = self.conn.execute(

@@ -109,7 +109,16 @@ def run_evaluation(
             invalid_tickers=set(preflight.record_issues["candidate"]),
         )
     replay_inputs = load_replay_inputs(per_fix_replay_input) if per_fix_replay_input else None
-    replay_records, replay_summary = evaluate_replays(replay_inputs)
+    baseline_config = manifest["run_sets"]["baseline"]
+    with ImmutableDatabase(
+        baseline_db, baseline_config["database"]["profile"]
+    ) as db:
+        replay_records, replay_summary = evaluate_replays(
+            replay_inputs,
+            baseline_db=db,
+            baseline_screen_run_id=baseline_config["runs"]["screen"],
+            baseline_valuation_run_id=baseline_config["runs"]["valuation"],
+        )
     write_private_outputs(
         private_output_dir,
         manifest=manifest,

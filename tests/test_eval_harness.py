@@ -442,7 +442,30 @@ def test_noise_floor_optional_and_exact_lineage(synthetic_inputs):
     assert noise_records[0]["component_score_deltas"]["business_quality_score"] == 1.0
 
 
-def test_per_fix_replay_recomputes_screen_and_valuation_transitions():
+def _replace_synthetic_screen_rows(path: Path, ticker: str, statuses: dict[str, str]) -> None:
+    path.chmod(0o644)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "DELETE FROM quant_scores WHERE run_id=? AND ticker=?",
+        (RUN_IDS["baseline"]["screen"], ticker),
+    )
+    conn.executemany(
+        "INSERT INTO quant_scores (run_id,ticker,metric,overall_pass,status) VALUES (?,?,?,?,?)",
+        [
+            (
+                RUN_IDS["baseline"]["screen"], ticker, metric,
+                int(status == "pass"), status,
+            )
+            for metric, status in statuses.items()
+        ],
+    )
+    conn.commit()
+    conn.close()
+    path.chmod(0o444)
+
+
+def test_per_fix_replay_verifies_frozen_before_states_and_recomputes_transitions(synthetic_inputs):
+    baseline, _, _, _ = synthetic_inputs
     metrics = {metric: "fail" for metric in {
         "roic", "roe", "free_cash_flow", "revenue_eps_growth", "operating_margin",
         "debt", "share_dilution", "gross_margin",
@@ -451,7 +474,8 @@ def test_per_fix_replay_recomputes_screen_and_valuation_transitions():
         metrics[metric] = "pass"
     counterfactual = dict(metrics)
     counterfactual["debt"] = "pass"
-    traces, summary = evaluate_replays([
+    _replace_synthetic_screen_rows(baseline, "AAA", metrics)
+    records = [
         {
             "fix_id": "synthetic-screen-fix",
             "ticker": "AAA",
@@ -463,17 +487,57 @@ def test_per_fix_replay_recomputes_screen_and_valuation_transitions():
         },
         {
             "fix_id": "synthetic-valuation-fix",
-            "ticker": "BBB",
+            "ticker": "AAA",
             "stage": "valuation",
-            "before": {"bear": 50.0, "base": 75.0, "bull": 100.0, "price": 110.0},
-            "counterfactual": {"bear": 120.0, "base": 140.0, "bull": 160.0, "price": 110.0},
+            "before": {"bear": 80.0, "base": 100.0, "bull": 120.0, "price": 70.0},
+            "counterfactual": {"bear": 50.0, "base": 60.0, "bull": 65.0, "price": 70.0},
             "evidence": "synthetic isolated DCF change",
             "other_inputs_held_constant": True,
         },
-    ])
+    ]
+    with ImmutableDatabase(baseline, "baseline-v1") as db:
+        traces, summary = evaluate_replays(
+            records,
+            baseline_db=db,
+            baseline_screen_run_id=RUN_IDS["baseline"]["screen"],
+            baseline_valuation_run_id=RUN_IDS["baseline"]["valuation"],
+        )
     assert summary["status"] == "available"
     assert traces[0]["final_transition"] == "fail_to_pass"
-    assert traces[1]["final_transition"] == "Expensive_to_Cheap"
+    assert traces[1]["final_transition"] == "Cheap_to_Expensive"
+
+
+@pytest.mark.parametrize("stage", ["screen", "valuation"])
+def test_per_fix_replay_rejects_before_state_mismatches(synthetic_inputs, stage):
+    baseline, _, _, _ = synthetic_inputs
+    metrics = {metric: "fail" for metric in {
+        "roic", "roe", "free_cash_flow", "revenue_eps_growth", "operating_margin",
+        "debt", "share_dilution", "gross_margin",
+    }}
+    metrics["roic"] = "pass"
+    _replace_synthetic_screen_rows(baseline, "AAA", metrics)
+    before = (
+        {"metric_statuses": {**metrics, "debt": "pass"}}
+        if stage == "screen"
+        else {"bear": 80.0, "base": 100.0, "bull": 120.0, "price": 71.0}
+    )
+    record = {
+        "fix_id": "synthetic-mismatch",
+        "ticker": "AAA",
+        "stage": stage,
+        "before": before,
+        "counterfactual": before,
+        "evidence": "synthetic mismatch",
+        "other_inputs_held_constant": True,
+    }
+    with ImmutableDatabase(baseline, "baseline-v1") as db:
+        with pytest.raises(PreflightError, match="does not match the frozen baseline"):
+            evaluate_replays(
+                [record],
+                baseline_db=db,
+                baseline_screen_run_id=RUN_IDS["baseline"]["screen"],
+                baseline_valuation_run_id=RUN_IDS["baseline"]["valuation"],
+            )
 
 
 def test_tier_c_average_equity_roe_requires_consecutive_fiscal_years(synthetic_inputs):

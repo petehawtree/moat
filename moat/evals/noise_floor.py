@@ -7,7 +7,7 @@ import statistics
 from collections import Counter
 
 from .benchmark import canonical_ticker
-from .constants import COMPONENT_WEIGHTS
+from .constants import COMMITTEE_BUNDLE_METHOD, COMPONENT_WEIGHTS, RUN_IDS
 from .database import ImmutableDatabase
 
 
@@ -23,8 +23,43 @@ def _distribution(values: list[float]) -> dict:
     }
 
 
+def _committee_output_is_valid(row: dict) -> bool:
+    if row.get("status") not in {"Investigate", "Watch", "Reject"}:
+        return False
+    if row.get("bear_case_severity") not in {"low", "medium", "high"}:
+        return False
+    if not all(
+        isinstance(row.get(component), (int, float))
+        and not isinstance(row.get(component), bool)
+        and math.isfinite(row[component])
+        and 0 <= row[component] <= 100
+        for component in COMPONENT_WEIGHTS
+    ):
+        return False
+    if (
+        not isinstance(row.get("overall_score"), (int, float))
+        or isinstance(row.get("overall_score"), bool)
+        or not math.isfinite(row["overall_score"])
+    ):
+        return False
+    recomputed_score = sum(
+        ((100.0 - row[component]) if component == "risk_score" else row[component]) * weight
+        for component, weight in COMPONENT_WEIGHTS.items()
+    )
+    expected_status = (
+        "Watch" if recomputed_score >= 70 and row["bear_case_severity"] == "high"
+        else "Investigate" if recomputed_score >= 70
+        else "Watch" if recomputed_score >= 50
+        else "Reject"
+    )
+    return math.isclose(
+        recomputed_score, row["overall_score"], rel_tol=1e-9, abs_tol=1e-9
+    ) and row["status"] == expected_status
+
+
 def evaluate_noise_floor(
-    db: ImmutableDatabase,
+    candidate_db: ImmutableDatabase,
+    replicate_db: ImmutableDatabase | None,
     *,
     stored_run_id: str,
     replicate_run_id: str | None,
@@ -40,17 +75,30 @@ def evaluate_noise_floor(
             "reason": "replicate_run_id_not_supplied",
             "interpretation": "committee baseline/candidate movement remains descriptive only",
         }
-    if replicate_run_id == stored_run_id:
+    frozen_run_ids = {run_id for runs in RUN_IDS.values() for run_id in runs.values()}
+    if replicate_run_id in frozen_run_ids:
         return [], {
             "status": "unavailable",
-            "reason": "replicate_run_id_is_not_distinct_from_stored_run",
+            "reason": "replicate_run_id_is_not_distinct_from_every_frozen_run",
             "interpretation": "committee baseline/candidate movement remains descriptive only",
         }
-    run = db.run_row(replicate_run_id)
+    if replicate_db is None:
+        return [], {
+            "status": "unavailable",
+            "reason": "replicate_database_not_supplied",
+            "interpretation": "committee baseline/candidate movement remains descriptive only",
+        }
+    if replicate_db.path in {candidate_db.path}:
+        return [], {
+            "status": "unavailable",
+            "reason": "replicate_database_aliases_candidate_snapshot",
+            "interpretation": "committee baseline/candidate movement remains descriptive only",
+        }
+    run = replicate_db.run_row(replicate_run_id)
     if run is None:
         return [], {
             "status": "unavailable",
-            "reason": "replicate_run_not_found_in_candidate_snapshot",
+            "reason": "replicate_run_not_found_in_replicate_snapshot",
             "replicate_run_id": replicate_run_id,
             "interpretation": "committee baseline/candidate movement remains descriptive only",
         }
@@ -61,15 +109,23 @@ def evaluate_noise_floor(
             "replicate_run_id": replicate_run_id,
             "interpretation": "committee baseline/candidate movement remains descriptive only",
         }
-    if run["stage_reached"] != "committee" or run["status"] not in {"complete", "partial"}:
+    if run["stage_reached"] not in {"committee", "monitor"} or run["status"] not in {"complete", "partial"}:
         return [], {
             "status": "unavailable",
             "reason": "replicate_run_did_not_complete_committee_stage",
             "replicate_run_id": replicate_run_id,
             "interpretation": "committee baseline/candidate movement remains descriptive only",
         }
-    stored = {canonical_ticker(row["ticker"]): row for row in db.committee_full_rows(stored_run_id)}
-    replicate = {canonical_ticker(row["ticker"]): row for row in db.committee_full_rows(replicate_run_id)}
+    stored_rows = candidate_db.committee_full_rows(stored_run_id)
+    replicate_rows = replicate_db.committee_full_rows(replicate_run_id)
+    stored = {canonical_ticker(row["ticker"]): row for row in stored_rows}
+    replicate = {canonical_ticker(row["ticker"]): row for row in replicate_rows}
+    if len(stored) != len(stored_rows) or len(replicate) != len(replicate_rows):
+        return [], {
+            "status": "unavailable",
+            "reason": "committee_cohort_contains_ambiguous_canonical_identifiers",
+            "interpretation": "committee baseline/candidate movement remains descriptive only",
+        }
     if set(stored) != set(replicate):
         return [], {
             "status": "unavailable",
@@ -78,31 +134,77 @@ def evaluate_noise_floor(
             "replicate_count": len(replicate),
             "interpretation": "committee baseline/candidate movement remains descriptive only",
         }
-    # Stored verdicts that failed preflight abstain (§3); they are not paired.
-    paired_tickers = sorted(set(stored) - invalid_tickers)
-    invalid = [
-        row for ticker, row in ((ticker, replicate[ticker]) for ticker in paired_tickers)
-        if row["reused_from_run_id"] is not None
-        or row["quality_run_id"] != candidate_quality_run_id
-        or row["valuation_run_id"] != candidate_valuation_run_id
-        or row["cache_key"] != stored[ticker]["cache_key"]
-        or any(
-            not isinstance(row.get(component), (int, float))
-            or isinstance(row.get(component), bool)
-            or not math.isfinite(row[component])
-            or not isinstance(stored[ticker].get(component), (int, float))
-            or isinstance(stored[ticker].get(component), bool)
-            or not math.isfinite(stored[ticker][component])
-            for component in (*COMPONENT_WEIGHTS, "overall_score")
-        )
-    ]
-    if invalid:
+    if any(row["reused_from_run_id"] is not None for row in replicate.values()):
         return [], {
             "status": "unavailable",
-            "reason": "replicate_did_not_prove_cache_bypass_and_exact_candidate_lineage",
-            "affected_count": len(invalid),
+            "reason": "replicate_contains_cache_reused_verdicts",
             "interpretation": "committee baseline/candidate movement remains descriptive only",
         }
+    wrong_lineage = [
+        row for row in (*stored.values(), *replicate.values())
+        if row["quality_run_id"] != candidate_quality_run_id
+        or row["valuation_run_id"] != candidate_valuation_run_id
+    ]
+    if wrong_lineage:
+        return [], {
+            "status": "unavailable",
+            "reason": "committee_verdict_lineage_does_not_match_frozen_candidate_inputs",
+            "affected_count": len(wrong_lineage),
+            "interpretation": "committee baseline/candidate movement remains descriptive only",
+        }
+    bundle_failures = Counter()
+    if not candidate_db.can_recompute_committee_bundle():
+        bundle_failures["candidate_bundle_capability_unavailable"] += len(stored)
+    if not replicate_db.can_recompute_committee_bundle():
+        bundle_failures["replicate_bundle_capability_unavailable"] += len(replicate)
+    if bundle_failures:
+        return [], {
+            "status": "unavailable",
+            "reason": "committee_bundle_equivalence_failed",
+            "failure_counts": dict(sorted(bundle_failures.items())),
+            "input_equivalence_method": COMMITTEE_BUNDLE_METHOD,
+            "interpretation": "committee baseline/candidate movement remains descriptive only",
+        }
+    for ticker in sorted(stored):
+        candidate_bundle = candidate_db.recompute_committee_bundle_key(
+            stored[ticker]["ticker"], candidate_valuation_run_id, candidate_quality_run_id
+        )
+        replicate_bundle = replicate_db.recompute_committee_bundle_key(
+            replicate[ticker]["ticker"], candidate_valuation_run_id, candidate_quality_run_id
+        )
+        if candidate_bundle is None:
+            bundle_failures["candidate_bundle_unavailable"] += 1
+        if replicate_bundle is None:
+            bundle_failures["replicate_bundle_unavailable"] += 1
+        if candidate_bundle is not None and candidate_bundle != stored[ticker]["cache_key"]:
+            bundle_failures["candidate_cache_key_mismatch"] += 1
+        if replicate_bundle is not None and replicate_bundle != replicate[ticker]["cache_key"]:
+            bundle_failures["replicate_cache_key_mismatch"] += 1
+        if (
+            candidate_bundle is not None
+            and replicate_bundle is not None
+            and candidate_bundle != replicate_bundle
+        ):
+            bundle_failures["cross_snapshot_bundle_mismatch"] += 1
+    if bundle_failures:
+        return [], {
+            "status": "unavailable",
+            "reason": "committee_bundle_equivalence_failed",
+            "failure_counts": dict(sorted(bundle_failures.items())),
+            "input_equivalence_method": COMMITTEE_BUNDLE_METHOD,
+            "interpretation": "committee baseline/candidate movement remains descriptive only",
+        }
+    # Stored verdicts that failed preflight abstain (§3); they remain part of
+    # the bundle-equivalence proof but are not paired for noise measurement.
+    stored_output_invalid = {
+        ticker for ticker, row in stored.items() if not _committee_output_is_valid(row)
+    }
+    replicate_output_invalid = {
+        ticker for ticker, row in replicate.items() if not _committee_output_is_valid(row)
+    }
+    paired_tickers = sorted(
+        set(stored) - invalid_tickers - stored_output_invalid - replicate_output_invalid
+    )
     records = []
     for ticker in paired_tickers:
         left, right = stored[ticker], replicate[ticker]
@@ -124,8 +226,12 @@ def evaluate_noise_floor(
         "status": "available",
         "replicate_run_id": replicate_run_id,
         "runtime_provenance": runtime_provenance,
+        "input_equivalence_method": COMMITTEE_BUNDLE_METHOD,
         "paired_company_count": len(records),
-        "stored_preflight_invalid_abstention_count": len(set(stored) & invalid_tickers),
+        "stored_preflight_invalid_abstention_count": len(
+            (set(stored) & invalid_tickers) | stored_output_invalid
+        ),
+        "replicate_preflight_invalid_abstention_count": len(replicate_output_invalid),
         "component_score_delta_distributions": {
             component: _distribution([row["component_score_deltas"][component] for row in records])
             for component in COMPONENT_WEIGHTS

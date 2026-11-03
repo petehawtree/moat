@@ -69,12 +69,21 @@ specification.
   Direct star-rating association accepts numeric, textual numeric, and star
   glyph forms and remains secondary.
 
-## Noise floor and replay choices (§12)
+## Noise floor and replay choices (§12 and Amendment 1)
 
-- A noise-floor run ID is an explicit manifest and CLI input. The run must be
-  in the candidate snapshot, have exactly the stored candidate cohort, reach
-  committee, contain no reused verdict, preserve candidate quality/valuation
-  lineage, and carry the same cache bundle for every company.
+- The replicate database path and run ID are explicit manifest and CLI inputs.
+  The manifest uses the strict `experiments.noise_floor` object from Amendment
+  1; all experiment fields are either populated together or null together.
+- Replicate file integrity and sealing failures fail preflight. Experiment
+  validity failures after the snapshot is safely opened make the experiment
+  unavailable. Neither path emits company identifiers or proprietary values.
+- The replicate run must be in the separate snapshot, have exactly the stored
+  candidate cohort, reach committee, contain no reused verdict, and preserve
+  candidate quality/valuation lineage.
+- `committee_bundle_v1` is independently reconstructed in both snapshots for
+  every stored cohort member. Both digests must be non-null, equal each other
+  and equal the cache key on the corresponding verdict. No selected-input
+  fallback is implemented.
 - Runtime equivalence is not persisted by the committee schema, so a non-empty
   manifest runtime-provenance statement is also required. Without it the
   experiment is unavailable rather than silently assumed equivalent.

@@ -189,8 +189,10 @@ def public_noise_floor(summary: dict) -> dict:
     return {
         "status": "available",
         "replicate_run_id": summary["replicate_run_id"],
+        "input_equivalence_method": summary["input_equivalence_method"],
         "paired_company_count": summary["paired_company_count"],
         "stored_preflight_invalid_abstention_count": summary["stored_preflight_invalid_abstention_count"],
+        "replicate_preflight_invalid_abstention_count": summary["replicate_preflight_invalid_abstention_count"],
         "component_score_delta_distributions": summary["component_score_delta_distributions"],
         "overall_score_delta_distribution": summary["overall_score_delta_distribution"],
         "status_flip_count": summary["status_flip_count"],
@@ -247,8 +249,7 @@ def write_public_report(
         "authoritative": manifest["evaluation_mode"] == "authoritative",
         "execution": {
             "timestamp": manifest["execution"]["timestamp"],
-            "eval_spec_version": manifest["eval_spec"]["version"],
-            "eval_spec_sha256": manifest["eval_spec"]["sha256"],
+            "eval_spec": manifest["eval_spec"],
             "harness_git_commit": manifest["harness"]["git_commit"],
         },
         "reproducibility_checks": preflight_public,

@@ -23,13 +23,19 @@ def run_evaluation(
     *, repo_root: Path, baseline_db: Path, candidate_db: Path, benchmark_dir: Path,
     manifest_path: Path, private_output_dir: Path, public_output: Path,
     preflight_only: bool = False, verify_git: bool = True,
+    noise_floor_db: Path | None = None,
     noise_floor_run_id: str | None = None,
     per_fix_replay_input: Path | None = None,
 ) -> dict:
     manifest = load_manifest(manifest_path)
-    declared_noise = manifest["experiments"]["noise_floor_run_id"]
+    noise_floor = manifest["experiments"]["noise_floor"]
+    declared_noise = noise_floor["run_id"]
     if noise_floor_run_id != declared_noise:
         raise ManifestError("explicit noise-floor run ID does not match manifest")
+    declared_noise_db = noise_floor["database"]["path"] if noise_floor["database"] else None
+    supplied_noise_db = str(noise_floor_db.resolve()) if noise_floor_db else None
+    if supplied_noise_db != declared_noise_db:
+        raise ManifestError("explicit noise-floor database does not match manifest")
     declared_replay = manifest["experiments"]["per_fix_replay"]["path"]
     supplied_replay = str(per_fix_replay_input.resolve()) if per_fix_replay_input else None
     if supplied_replay != declared_replay:
@@ -43,6 +49,7 @@ def run_evaluation(
         benchmark_dir=benchmark_dir,
         private_output_dir=private_output_dir,
         public_output=public_output,
+        noise_floor_db=noise_floor_db,
         verify_git=verify_git,
     )
     if preflight_only:
@@ -98,16 +105,31 @@ def run_evaluation(
     )
     valuation_paired = paired_valuation(valuation_records["baseline"], valuation_records["candidate"])
     committee_paired = paired_committee(committee_records["baseline"], committee_records["candidate"])
-    with ImmutableDatabase(candidate_db, manifest["run_sets"]["candidate"]["database"]["profile"]) as db:
-        noise_records, noise_summary = evaluate_noise_floor(
-            db,
-            stored_run_id=manifest["run_sets"]["candidate"]["runs"]["committee"],
-            replicate_run_id=noise_floor_run_id,
-            candidate_quality_run_id=manifest["run_sets"]["candidate"]["runs"]["screen"],
-            candidate_valuation_run_id=manifest["run_sets"]["candidate"]["runs"]["valuation"],
-            runtime_provenance=manifest["experiments"]["noise_floor_runtime_provenance"],
-            invalid_tickers=set(preflight.record_issues["candidate"]),
-        )
+    candidate_config = manifest["run_sets"]["candidate"]
+    with ImmutableDatabase(candidate_db, candidate_config["database"]["profile"]) as candidate_open:
+        if noise_floor_db is None:
+            noise_records, noise_summary = evaluate_noise_floor(
+                candidate_open,
+                None,
+                stored_run_id=candidate_config["runs"]["committee"],
+                replicate_run_id=None,
+                candidate_quality_run_id=candidate_config["runs"]["screen"],
+                candidate_valuation_run_id=candidate_config["runs"]["valuation"],
+                runtime_provenance=None,
+                invalid_tickers=set(preflight.record_issues["candidate"]),
+            )
+        else:
+            with ImmutableDatabase(noise_floor_db, noise_floor["database"]["profile"]) as replicate_open:
+                noise_records, noise_summary = evaluate_noise_floor(
+                    candidate_open,
+                    replicate_open,
+                    stored_run_id=candidate_config["runs"]["committee"],
+                    replicate_run_id=noise_floor_run_id,
+                    candidate_quality_run_id=candidate_config["runs"]["screen"],
+                    candidate_valuation_run_id=candidate_config["runs"]["valuation"],
+                    runtime_provenance=noise_floor["runtime_provenance"],
+                    invalid_tickers=set(preflight.record_issues["candidate"]),
+                )
     replay_inputs = load_replay_inputs(per_fix_replay_input) if per_fix_replay_input else None
     baseline_config = manifest["run_sets"]["baseline"]
     with ImmutableDatabase(

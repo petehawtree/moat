@@ -18,4 +18,5 @@ sprints executed against.
 - [Sprint 5 — Investment Committee + Investment Brief](sprint-5.md)
 
 Planned: [Sprint 6 — External-benchmark eval](sprint-6-plan.md).
+Drafted, unscheduled: [Sprint 7 — Retrieval layer](sprint-7-plan.md); [Sprint 8 — MCP tool layer](sprint-8-plan.md).
 Not yet scheduled: [future sprints](future-sprints.md).

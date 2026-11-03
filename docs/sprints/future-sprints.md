@@ -12,6 +12,7 @@ fundamentals and valuations themselves rather than being handed a fixed
 bundle.
 
 - **Moved out of:** Sprint 6 (§A27), after §A26 first scoped it there.
+- **Now drafted as:** [Sprint 8](sprint-8-plan.md), retrieval-first (Sprint 7).
 - **Waits on:** Sprint 6's eval harness. Without it there is no way to say
   whether the change improved verdicts or only changed them.
 - **Plan must answer:** does tool access change what the personas cite

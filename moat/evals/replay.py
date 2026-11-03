@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .benchmark import canonical_ticker
 from .constants import KNOWN_QUANT_METRICS, KNOWN_QUANT_STATUSES
+from .database import ImmutableDatabase
 from .errors import PreflightError
 from .valuation import classify_moat_valuation
 
@@ -80,18 +81,63 @@ def _valuation_state(state: dict) -> dict:
     return classify_moat_valuation(rows, state["price"])
 
 
-def evaluate_replays(records: list[dict] | None) -> tuple[list[dict], dict]:
+def _verify_frozen_before_state(
+    record: dict,
+    baseline_db: ImmutableDatabase,
+    baseline_screen_run_id: str,
+    baseline_valuation_run_id: str,
+) -> None:
+    """Fail closed unless the claimed before state is the frozen baseline row.
+
+    Error text intentionally omits ticker and values because replay inputs and
+    traces are private artifacts.
+    """
+    if record["stage"] == "screen":
+        frozen = baseline_db.replay_screen_before_state(
+            baseline_screen_run_id, record["ticker"]
+        )
+    else:
+        frozen = baseline_db.replay_valuation_before_state(
+            baseline_valuation_run_id, record["ticker"]
+        )
+    if frozen is None or record["before"] != frozen:
+        raise PreflightError(
+            "per-fix replay before state does not match the frozen baseline"
+        )
+
+
+def evaluate_replays(
+    records: list[dict] | None,
+    *,
+    baseline_db: ImmutableDatabase | None = None,
+    baseline_screen_run_id: str | None = None,
+    baseline_valuation_run_id: str | None = None,
+) -> tuple[list[dict], dict]:
     if records is None:
         return [], {
             "status": "unavailable",
             "reason": "isolated_historical_replay_inputs_not_supplied",
             "claim_boundary": "no per-fix causal result emitted",
         }
+    if (
+        baseline_db is None
+        or not baseline_screen_run_id
+        or not baseline_valuation_run_id
+    ):
+        raise PreflightError(
+            "per-fix replay requires the frozen baseline database and run IDs"
+        )
     traces = []
     for record in records:
         compute = _screen_state if record["stage"] == "screen" else _valuation_state
         before = compute(record["before"])
         counterfactual = compute(record["counterfactual"])
+        _verify_frozen_before_state(
+            record,
+            baseline_db,
+            baseline_screen_run_id,
+            baseline_valuation_run_id,
+        )
         if record["stage"] == "screen":
             transition = f"{'pass' if before['passed_screen'] else 'fail'}_to_{'pass' if counterfactual['passed_screen'] else 'fail'}"
             downstream_metric = "passed_screen"

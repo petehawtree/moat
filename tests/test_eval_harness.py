@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -14,9 +16,16 @@ from moat.evals.constants import PROFILE_COLUMNS, RUN_IDS
 from moat.evals.database import ImmutableDatabase
 from moat.evals.errors import ManifestError, PreflightError
 from moat.evals.manifest import build_manifest, validate_manifest
-from moat.evals.noise_floor import evaluate_noise_floor
+from moat.evals.noise_floor import (
+    ABOVE_BOUNDARY,
+    AT_OR_BELOW_BOUNDARY,
+    NEAREST_RANK_METHOD,
+    apply_noise_interpretation,
+    evaluate_noise_floor,
+    nearest_rank_percentile,
+)
 from moat.evals.persona import evaluate_persona_influence
-from moat.evals.preflight import validate_paths
+from moat.evals.preflight import run_preflight, validate_paths
 from moat.evals.reporting import public_tier_a, public_tier_c
 from moat.evals.runner import run_evaluation
 from moat.evals.replay import evaluate_replays
@@ -52,6 +61,9 @@ def _create_profile_db(path: Path, profile: str, *, candidate_values: bool = Fal
     for table, columns in PROFILE_COLUMNS[profile].items():
         definitions = ", ".join(f'"{column}" {_column_type(column)}' for column in columns)
         conn.execute(f'CREATE TABLE "{table}" ({definitions})')
+    conn.execute(
+        "CREATE TABLE ai_analysis (ticker TEXT, analysis_type TEXT, cache_key TEXT, is_current INTEGER)"
+    )
     for ticker, sector in [
         ("AAA", "Technology"), ("BBB", "Technology"), ("CCC", "Energy"),
         ("DDD", "Financials"), ("EEE", "Industrials"), ("FFF", "Consumer Defensive"),
@@ -103,6 +115,12 @@ def _create_profile_db(path: Path, profile: str, *, candidate_values: bool = Fal
         (runs["committee"], "AAA", status, severity, "synthetic-key", runs["valuation"], runs["screen"], "2026-01-01T00:02:00Z", 80.0, 80.0, 70.0, 60.0, 75.0, 30.0, 74.75),
     )
     for ticker in ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF"):
+        conn.executemany(
+            "INSERT INTO ai_analysis (ticker,analysis_type,cache_key,is_current) VALUES (?,?,?,1)",
+            [(ticker, analysis_type, f"synthetic-{ticker}-{analysis_type}") for analysis_type in (
+                "business_quality", "management", "moat", "risk",
+            )],
+        )
         rows = [
             (2024, "2024-09-30", 90_000_000.0, 18_000_000.0, 0.40, 0.20, 0.15, 0.10, 12_000_000.0, 20_000_000.0, 8_000_000.0, 30_000_000.0, 5_000_000.0, 10_000_000.0, 45_000_000.0),
             (2025, "2025-09-30", 100_000_000.0, 20_000_000.0, 0.40, 0.20, 0.15, 0.10, 14_000_000.0, 22_000_000.0, 8_000_000.0, 32_000_000.0, 6_000_000.0, 10_000_000.0, 55_000_000.0),
@@ -126,6 +144,66 @@ def _create_profile_db(path: Path, profile: str, *, candidate_values: bool = Fal
                 f"INSERT INTO fundamentals_annual ({','.join(columns)}) VALUES ({placeholders})",
                 values,
             )
+    conn.commit()
+    conn.close()
+    path.chmod(0o444)
+    with ImmutableDatabase(path, profile) as db:
+        cache_key = db.recompute_committee_bundle_key(
+            "AAA", runs["valuation"], runs["screen"]
+        )
+    assert cache_key is not None
+    path.chmod(0o644)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "UPDATE committee_verdicts SET cache_key=? WHERE run_id=? AND ticker='AAA'",
+        (cache_key, runs["committee"]),
+    )
+    conn.commit()
+    conn.close()
+    path.chmod(0o444)
+
+
+def _create_replicate_db(
+    candidate: Path,
+    replicate: Path,
+    *,
+    run_id: str = "noise-run",
+    aaa_scores: tuple = (81.0, 79.0, 71.0, 61.0, 74.0, 31.0, 74.75),
+    aaa_status: str = "Investigate",
+    aaa_severity: str = "medium",
+) -> None:
+    shutil.copyfile(candidate, replicate)
+    replicate.chmod(0o644)
+    conn = sqlite3.connect(replicate)
+    conn.execute(
+        "INSERT INTO pipeline_runs (run_id,started_at,stage_reached,status) VALUES (?,?,?,?)",
+        (run_id, "2026-01-02", "committee", "partial"),
+    )
+    conn.execute(
+        "INSERT INTO committee_verdicts "
+        "(run_id,ticker,status,bear_case_severity,cache_key,valuation_run_id,quality_run_id,created_at,"
+        "business_quality_score,competitive_moat_score,financial_strength_score,management_score,"
+        "valuation_score,risk_score,overall_score) "
+        "SELECT ?,ticker,status,bear_case_severity,cache_key,valuation_run_id,quality_run_id,?,"
+        "business_quality_score,competitive_moat_score,financial_strength_score,management_score,"
+        "valuation_score,risk_score,overall_score FROM committee_verdicts WHERE run_id=?",
+        (run_id, "2026-01-02", RUN_IDS["candidate"]["committee"]),
+    )
+    conn.execute(
+        "UPDATE committee_verdicts SET status=?,bear_case_severity=?,business_quality_score=?,"
+        "competitive_moat_score=?,financial_strength_score=?,management_score=?,valuation_score=?,"
+        "risk_score=?,overall_score=? WHERE run_id=? AND ticker='AAA'",
+        (aaa_status, aaa_severity, *aaa_scores, run_id),
+    )
+    conn.commit()
+    conn.close()
+    replicate.chmod(0o444)
+
+
+def _mutate_synthetic_db(path: Path, sql: str, params: tuple = ()) -> None:
+    path.chmod(0o644)
+    conn = sqlite3.connect(path)
+    conn.execute(sql, params)
     conn.commit()
     conn.close()
     path.chmod(0o444)
@@ -246,19 +324,175 @@ def test_manifest_is_strict_and_records_tier_b_not_run(synthetic_inputs, tmp_pat
         "prompt_sha256": None, "cohort_sha256": None,
     }
     assert manifest["bootstrap_replicates"] == 10_000
+    assert manifest["eval_spec"]["base"]["status"] == "FROZEN"
+    assert manifest["eval_spec"]["amendment_1"]["status"] == "FROZEN"
+    assert manifest["experiments"]["noise_floor"] == {
+        "run_id": None,
+        "database": None,
+        "runtime_provenance": None,
+        "input_equivalence": None,
+    }
     assert manifest["run_sets"]["candidate"]["production_provenance"]["screen"]["dependencies_sha256"]
     assert len(manifest["run_sets"]["candidate"]["production_provenance"]["committee"]["driver_sha256s"]) == 2
     broken = dict(manifest)
     broken["unexpected"] = True
     with pytest.raises(ManifestError, match="unknown key"):
         validate_manifest(broken)
-    with pytest.raises(ManifestError, match="runtime provenance"):
+    with pytest.raises(ManifestError, match="supplied together"):
         build_manifest(
             repo_root=REPO_ROOT,
             baseline_db=baseline,
             candidate_db=candidate,
             benchmark_dir=benchmark_dir,
             noise_floor_run_id="future-replicate",
+        )
+
+
+def _run_synthetic_preflight(
+    *, baseline: Path, candidate: Path, benchmark_dir: Path, replicate: Path,
+    manifest: dict, tmp_path: Path,
+):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    return run_preflight(
+        repo_root=REPO_ROOT,
+        manifest_path=manifest_path,
+        manifest=manifest,
+        baseline_db=baseline,
+        candidate_db=candidate,
+        benchmark_dir=benchmark_dir,
+        private_output_dir=tmp_path / "private",
+        public_output=tmp_path / "public.json",
+        noise_floor_db=replicate,
+        verify_git=False,
+    )
+
+
+def test_noise_floor_manifest_is_strict_and_complete(synthetic_inputs, tmp_path):
+    baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    replicate = tmp_path / "replicate.db"
+    _create_replicate_db(candidate, replicate)
+    manifest = build_manifest(
+        repo_root=REPO_ROOT,
+        baseline_db=baseline,
+        candidate_db=candidate,
+        benchmark_dir=benchmark_dir,
+        noise_floor_run_id="noise-run",
+        noise_floor_db=replicate,
+        noise_floor_runtime_provenance="synthetic equivalent runtime",
+    )
+    noise = manifest["experiments"]["noise_floor"]
+    assert noise["database"]["path"] == str(replicate.resolve())
+    assert noise["database"]["profile"] == "candidate-v1"
+    assert noise["input_equivalence"] == {
+        "method": "committee_bundle_v1",
+        "reference_candidate_sha256": "61b9514a068b855998377f7262f55386783c2339f659370f8baea980bb7c3828",
+        "quality_run_id": RUN_IDS["candidate"]["screen"],
+        "valuation_run_id": RUN_IDS["candidate"]["valuation"],
+    }
+    partial = deepcopy(manifest)
+    partial["experiments"]["noise_floor"]["runtime_provenance"] = None
+    with pytest.raises(ManifestError, match="all null or all populated"):
+        validate_manifest(partial)
+    unknown = deepcopy(manifest)
+    unknown["experiments"]["noise_floor"]["surprise"] = True
+    with pytest.raises(ManifestError, match="unknown key"):
+        validate_manifest(unknown)
+    wrong_profile = deepcopy(manifest)
+    wrong_profile["experiments"]["noise_floor"]["database"]["profile"] = "baseline-v1"
+    with pytest.raises(ManifestError, match="candidate-v1"):
+        validate_manifest(wrong_profile)
+    aliased = deepcopy(manifest)
+    aliased["experiments"]["noise_floor"]["database"]["path"] = str(candidate.resolve())
+    with pytest.raises(ManifestError, match="alias"):
+        validate_manifest(aliased)
+    live = deepcopy(manifest)
+    live["experiments"]["noise_floor"]["database"]["path"] = str(
+        (tmp_path / "moat.db").resolve()
+    )
+    with pytest.raises(ManifestError, match="live data/moat.db"):
+        validate_manifest(live)
+
+
+def test_noise_floor_manifest_rejects_missing_and_aliased_databases(synthetic_inputs, tmp_path):
+    baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    with pytest.raises(ManifestError, match="do not exist"):
+        build_manifest(
+            repo_root=REPO_ROOT,
+            baseline_db=baseline,
+            candidate_db=candidate,
+            benchmark_dir=benchmark_dir,
+            noise_floor_run_id="noise-run",
+            noise_floor_db=tmp_path / "missing.db",
+            noise_floor_runtime_provenance="synthetic equivalent runtime",
+        )
+    with pytest.raises(ManifestError, match="distinct"):
+        build_manifest(
+            repo_root=REPO_ROOT,
+            baseline_db=baseline,
+            candidate_db=candidate,
+            benchmark_dir=benchmark_dir,
+            noise_floor_run_id="noise-run",
+            noise_floor_db=candidate,
+            noise_floor_runtime_provenance="synthetic equivalent runtime",
+        )
+    hardlink = tmp_path / "hardlink-replicate.db"
+    hardlink.hardlink_to(candidate)
+    with pytest.raises(ManifestError, match="distinct"):
+        build_manifest(
+            repo_root=REPO_ROOT,
+            baseline_db=baseline,
+            candidate_db=candidate,
+            benchmark_dir=benchmark_dir,
+            noise_floor_run_id="noise-run",
+            noise_floor_db=hardlink,
+            noise_floor_runtime_provenance="synthetic equivalent runtime",
+        )
+
+
+@pytest.mark.parametrize("failure", ["writable", "sidecar", "wrong_hash", "live_name"])
+def test_noise_floor_preflight_rejects_unsafe_snapshot_inputs(synthetic_inputs, tmp_path, failure):
+    baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    replicate = tmp_path / ("moat.db" if failure == "live_name" else "replicate.db")
+    _create_replicate_db(candidate, replicate)
+    if failure == "live_name":
+        with pytest.raises(ManifestError, match="live data/moat.db"):
+            build_manifest(
+                repo_root=REPO_ROOT,
+                baseline_db=baseline,
+                candidate_db=candidate,
+                benchmark_dir=benchmark_dir,
+                noise_floor_run_id="noise-run",
+                noise_floor_db=replicate,
+                noise_floor_runtime_provenance="synthetic equivalent runtime",
+            )
+        return
+    manifest = build_manifest(
+        repo_root=REPO_ROOT,
+        baseline_db=baseline,
+        candidate_db=candidate,
+        benchmark_dir=benchmark_dir,
+        noise_floor_run_id="noise-run",
+        noise_floor_db=replicate,
+        noise_floor_runtime_provenance="synthetic equivalent runtime",
+    )
+    if failure == "writable":
+        replicate.chmod(0o644)
+        expected = "sealed read-only"
+    elif failure == "sidecar":
+        Path(str(replicate) + "-wal").write_bytes(b"")
+        expected = "WAL/SHM sidecar"
+    elif failure == "wrong_hash":
+        manifest["experiments"]["noise_floor"]["database"]["sha256"] = "0" * 64
+        expected = "hash mismatch"
+    with pytest.raises(PreflightError, match=expected):
+        _run_synthetic_preflight(
+            baseline=baseline,
+            candidate=candidate,
+            benchmark_dir=benchmark_dir,
+            replicate=replicate,
+            manifest=manifest,
+            tmp_path=tmp_path,
         )
 
 
@@ -401,11 +635,55 @@ def test_committee_support_and_persona_cap_counterfactuals(synthetic_inputs):
     assert aaa_persona["counterfactuals"]["Bear_cap_disabled"]["status"] == "Investigate"
 
 
-def test_noise_floor_optional_and_exact_lineage(synthetic_inputs):
+def test_quantitative_only_external_support_abstains_but_remains_in_coverage_and_star_analysis(
+    synthetic_inputs,
+):
+    baseline, _, _, records = synthetic_inputs
+    quantitative_records = [dict(record) for record in records]
+    next(record for record in quantitative_records if record["ticker"] == "AAA")[
+        "coverage_tier"
+    ] = "quantitative"
+    with ImmutableDatabase(baseline, "baseline-v1") as db:
+        details, summary = evaluate_committee(
+            db,
+            committee_run_id=RUN_IDS["baseline"]["committee"],
+            screen_run_id=RUN_IDS["baseline"]["screen"],
+            benchmark_records=quantitative_records,
+        )
+        _, tier_a, _ = evaluate_tier_a(
+            db,
+            run_id=RUN_IDS["baseline"]["screen"],
+            benchmark_records=quantitative_records,
+            bootstrap_seed=61001,
+            bootstrap_replicates=10_000,
+        )
+    aaa = next(row for row in details if row["ticker"] == "AAA")
+    assert aaa["committee_outcome"] == "Investigate"
+    assert aaa["external_support"] == "abstain"
+    assert summary["eligible_screen_passer_count"] == 3
+    assert summary["committee_scored_count"] == 1
+    assert summary["committee_abstention_count"] == 2
+    assert summary["committee_coverage_rate"] == pytest.approx(1 / 3)
+    assert summary["external_support_scored_count"] == 0
+    assert summary["external_support_abstention_count"] == 1
+    assert summary["investigate_support_composition"] == {
+        "strong": 0, "weak": 0, "ambiguous": 0, "contradicted": 0, "abstain": 1,
+    }
+    assert summary["investigate_support_composition_denominator"] == 0
+    assert summary["support_composition_by_status_denominators"]["Investigate"] == 0
+    assert summary["investigate_contradiction_rate"]["denominator"] == 0
+    assert summary["priority_support_spearman_rho"]["denominator"] == 0
+    assert summary["direct_status_star_rating_spearman_rho"]["denominator"] == 1
+    assert tier_a["screen_scored_count"] == 5
+    assert tier_a["metrics"]["wide_precision"]["value"] == pytest.approx(1 / 3)
+
+
+def test_noise_floor_optional_and_cross_snapshot_bundle_equivalence(synthetic_inputs, tmp_path):
     _, candidate, _, _ = synthetic_inputs
     with ImmutableDatabase(candidate, "candidate-v1") as db:
         records, summary = evaluate_noise_floor(
             db,
+            None,
             stored_run_id=RUN_IDS["candidate"]["committee"],
             replicate_run_id=None,
             candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
@@ -416,21 +694,14 @@ def test_noise_floor_optional_and_exact_lineage(synthetic_inputs):
     assert summary["status"] == "unavailable"
     assert summary["reason"] == "replicate_run_id_not_supplied"
 
-    candidate.chmod(0o644)
-    conn = sqlite3.connect(candidate)
-    conn.execute(
-        "INSERT INTO pipeline_runs (run_id,started_at,stage_reached,status) VALUES ('noise-run','2026-01-02','committee','partial')"
-    )
-    conn.execute(
-        "INSERT INTO committee_verdicts (run_id,ticker,status,bear_case_severity,cache_key,valuation_run_id,quality_run_id,created_at,business_quality_score,competitive_moat_score,financial_strength_score,management_score,valuation_score,risk_score,overall_score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("noise-run", "AAA", "Watch", "medium", "synthetic-key", RUN_IDS["candidate"]["valuation"], RUN_IDS["candidate"]["screen"], "2026-01-02", 81.0, 79.0, 71.0, 61.0, 74.0, 31.0, 74.8),
-    )
-    conn.commit()
-    conn.close()
-    candidate.chmod(0o444)
-    with ImmutableDatabase(candidate, "candidate-v1") as db:
+    replicate = tmp_path / "replicate.db"
+    _create_replicate_db(candidate, replicate)
+    with ImmutableDatabase(candidate, "candidate-v1") as db, ImmutableDatabase(
+        replicate, "candidate-v1"
+    ) as replicate_db:
         noise_records, noise_summary = evaluate_noise_floor(
             db,
+            replicate_db,
             stored_run_id=RUN_IDS["candidate"]["committee"],
             replicate_run_id="noise-run",
             candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
@@ -439,7 +710,308 @@ def test_noise_floor_optional_and_exact_lineage(synthetic_inputs):
         )
     assert noise_summary["status"] == "available"
     assert noise_summary["paired_company_count"] == 1
+    assert noise_summary["replicate_preflight_invalid_abstention_count"] == 0
     assert noise_records[0]["component_score_deltas"]["business_quality_score"] == 1.0
+
+
+def test_preflight_only_establishes_replicate_bundle_contract(synthetic_inputs, tmp_path):
+    baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    replicate = tmp_path / "replicate.db"
+    _create_replicate_db(candidate, replicate)
+    manifest = build_manifest(
+        repo_root=REPO_ROOT,
+        baseline_db=baseline,
+        candidate_db=candidate,
+        benchmark_dir=benchmark_dir,
+        noise_floor_run_id="noise-run",
+        noise_floor_db=replicate,
+        noise_floor_runtime_provenance="synthetic equivalent runtime",
+    )
+    report, _ = _run_synthetic_preflight(
+        baseline=baseline,
+        candidate=candidate,
+        benchmark_dir=benchmark_dir,
+        replicate=replicate,
+        manifest=manifest,
+        tmp_path=tmp_path,
+    )
+    assert report.checks["noise_floor_database"] == "passed"
+    assert report.checks["noise_floor_experiment"] == "passed"
+
+
+def test_preflight_marks_missing_bundle_capability_unavailable(synthetic_inputs, tmp_path):
+    baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    replicate = tmp_path / "replicate.db"
+    _create_replicate_db(candidate, replicate)
+    _mutate_synthetic_db(replicate, "DROP TABLE ai_analysis")
+    manifest = build_manifest(
+        repo_root=REPO_ROOT,
+        baseline_db=baseline,
+        candidate_db=candidate,
+        benchmark_dir=benchmark_dir,
+        noise_floor_run_id="noise-run",
+        noise_floor_db=replicate,
+        noise_floor_runtime_provenance="synthetic equivalent runtime",
+    )
+    report, _ = _run_synthetic_preflight(
+        baseline=baseline,
+        candidate=candidate,
+        benchmark_dir=benchmark_dir,
+        replicate=replicate,
+        manifest=manifest,
+        tmp_path=tmp_path,
+    )
+    assert report.checks["noise_floor_experiment"] == (
+        "unavailable:committee_bundle_equivalence_failed"
+    )
+
+
+def test_nearest_rank_boundary_and_overall_score_labels_are_frozen():
+    assert nearest_rank_percentile([float(value) for value in range(1, 21)], 0.95) == 19.0
+    paired = {
+        "paired_common_count": 2,
+        "status_flip_count": 1,
+        "bear_severity_change_count": 0,
+        "records": [
+            {"ticker": "AAA", "score_delta": -2.0},
+            {"ticker": "BBB", "score_delta": 2.01},
+        ],
+    }
+    noise = {
+        "status": "available",
+        "paired_company_count": 20,
+        "status_flip_count": 2,
+        "bear_severity_change_count": 3,
+        "practical_noise_boundary": {
+            "value": 2.0,
+            "cohort_size": 20,
+            "calculation_method": NEAREST_RANK_METHOD,
+        },
+    }
+    interpreted, summary = apply_noise_interpretation(paired, noise)
+    assert interpreted["records"][0]["noise_interpretation"] == AT_OR_BELOW_BOUNDARY
+    assert interpreted["records"][1]["noise_interpretation"] == ABOVE_BOUNDARY
+    assert summary["status_flip_comparison"] == {
+        "baseline_candidate": {"count": 1, "denominator": 2, "rate": 0.5},
+        "candidate_replicate": {"count": 2, "denominator": 20, "rate": 0.1},
+    }
+    assert summary["overall_score_noise_interpretation_counts"] == {
+        AT_OR_BELOW_BOUNDARY: 1,
+        ABOVE_BOUNDARY: 1,
+    }
+
+
+def test_unavailable_noise_floor_emits_no_company_level_label():
+    paired = {
+        "paired_common_count": 1,
+        "status_flip_count": 0,
+        "bear_severity_change_count": 0,
+        "records": [{"ticker": "AAA", "score_delta": 0.1}],
+    }
+    interpreted, summary = apply_noise_interpretation(
+        paired,
+        {"status": "unavailable", "reason": "synthetic"},
+    )
+    assert "noise_interpretation" not in interpreted["records"][0]
+    assert "status_flip_comparison" not in summary
+
+
+def test_noise_floor_private_and_public_outputs_follow_amendment_interpretation(
+    synthetic_inputs, tmp_path
+):
+    baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    replicate = tmp_path / "replicate.db"
+    _create_replicate_db(candidate, replicate)
+    manifest = build_manifest(
+        repo_root=REPO_ROOT,
+        baseline_db=baseline,
+        candidate_db=candidate,
+        benchmark_dir=benchmark_dir,
+        noise_floor_run_id="noise-run",
+        noise_floor_db=replicate,
+        noise_floor_runtime_provenance="synthetic equivalent runtime",
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    private = tmp_path / "private"
+    public = tmp_path / "public.json"
+    run_evaluation(
+        repo_root=REPO_ROOT,
+        baseline_db=baseline,
+        candidate_db=candidate,
+        benchmark_dir=benchmark_dir,
+        manifest_path=manifest_path,
+        private_output_dir=private,
+        public_output=public,
+        noise_floor_db=replicate,
+        noise_floor_run_id="noise-run",
+        verify_git=False,
+    )
+    paired = json.loads((private / "committee-paired.json").read_text())
+    paired_record = paired["records"][0]
+    assert paired_record["noise_interpretation"] == AT_OR_BELOW_BOUNDARY
+    assert not {"baseline_status", "candidate_status", "status_flip"} & set(paired_record)
+    noise_record = json.loads(
+        (private / "committee-noise-floor-records.jsonl").read_text().splitlines()[0]
+    )
+    assert "noise_interpretation" not in noise_record
+    assert not {
+        "stored_status", "replicate_status", "status_flip",
+        "stored_bear_severity", "replicate_bear_severity", "bear_severity_changed",
+    } & set(noise_record)
+    assert all("noise" not in key for key in noise_record["component_score_deltas"])
+    public_data = json.loads(public.read_text())
+    public_noise = public_data["sensitivity_analyses"]["committee_noise_floor"]
+    assert public_noise["practical_noise_boundary"]["calculation_method"] == NEAREST_RANK_METHOD
+    assert public_noise["status_flip_comparison"]["baseline_candidate"]["count"] == 1
+    assert public_noise["status_flip_comparison"]["candidate_replicate"]["count"] == 1
+    assert public_noise["overall_score_noise_interpretation_counts"] == {
+        AT_OR_BELOW_BOUNDARY: 1,
+        ABOVE_BOUNDARY: 0,
+    }
+    assert "AAA" not in json.dumps(public_noise)
+
+
+@pytest.mark.parametrize(
+    ("failure", "failure_key"),
+    [
+        ("candidate_bundle_unavailable", "candidate_bundle_unavailable"),
+        ("replicate_bundle_unavailable", "replicate_bundle_unavailable"),
+        ("candidate_cache_key_mismatch", "candidate_cache_key_mismatch"),
+        ("replicate_cache_key_mismatch", "replicate_cache_key_mismatch"),
+        ("cross_snapshot_bundle_mismatch", "cross_snapshot_bundle_mismatch"),
+    ],
+)
+def test_noise_floor_rejects_each_bundle_mismatch_class(
+    synthetic_inputs, tmp_path, failure, failure_key
+):
+    _, candidate, _, _ = synthetic_inputs
+    replicate = tmp_path / "replicate.db"
+    _create_replicate_db(candidate, replicate)
+    if failure == "candidate_bundle_unavailable":
+        _mutate_synthetic_db(
+            candidate,
+            "DELETE FROM ai_analysis WHERE ticker='AAA' AND analysis_type='risk'",
+        )
+    elif failure == "replicate_bundle_unavailable":
+        _mutate_synthetic_db(
+            replicate,
+            "DELETE FROM ai_analysis WHERE ticker='AAA' AND analysis_type='risk'",
+        )
+    elif failure == "candidate_cache_key_mismatch":
+        _mutate_synthetic_db(
+            candidate,
+            "UPDATE committee_verdicts SET cache_key=? WHERE run_id=? AND ticker='AAA'",
+            ("0" * 64, RUN_IDS["candidate"]["committee"]),
+        )
+    elif failure == "replicate_cache_key_mismatch":
+        _mutate_synthetic_db(
+            replicate,
+            "UPDATE committee_verdicts SET cache_key=? WHERE run_id='noise-run' AND ticker='AAA'",
+            ("0" * 64,),
+        )
+    else:
+        _mutate_synthetic_db(
+            replicate,
+            "UPDATE ai_analysis SET cache_key='different-input' "
+            "WHERE ticker='AAA' AND analysis_type='risk'",
+        )
+        with ImmutableDatabase(replicate, "candidate-v1") as replicate_db:
+            changed_key = replicate_db.recompute_committee_bundle_key(
+                "AAA", RUN_IDS["candidate"]["valuation"], RUN_IDS["candidate"]["screen"]
+            )
+        assert changed_key is not None
+        _mutate_synthetic_db(
+            replicate,
+            "UPDATE committee_verdicts SET cache_key=? WHERE run_id='noise-run' AND ticker='AAA'",
+            (changed_key,),
+        )
+    with ImmutableDatabase(candidate, "candidate-v1") as candidate_db, ImmutableDatabase(
+        replicate, "candidate-v1"
+    ) as replicate_db:
+        records, summary = evaluate_noise_floor(
+            candidate_db,
+            replicate_db,
+            stored_run_id=RUN_IDS["candidate"]["committee"],
+            replicate_run_id="noise-run",
+            candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
+            candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            runtime_provenance="synthetic equivalent runtime",
+        )
+    assert records == []
+    assert summary["status"] == "unavailable"
+    assert summary["failure_counts"][failure_key] == 1
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        ("missing_run", "replicate_run_not_found_in_replicate_snapshot"),
+        ("wrong_stage", "replicate_run_did_not_complete_committee_stage"),
+        ("wrong_status", "replicate_run_did_not_complete_committee_stage"),
+        ("cohort", "replicate_cohort_does_not_equal_stored_candidate_cohort"),
+        ("cache_reuse", "replicate_contains_cache_reused_verdicts"),
+        ("lineage", "committee_verdict_lineage_does_not_match_frozen_candidate_inputs"),
+        ("invalid_output", "no_preflight_valid_paired_companies"),
+    ],
+)
+def test_noise_floor_rejects_invalid_replicate_run_contract(
+    synthetic_inputs, tmp_path, failure, reason
+):
+    _, candidate, _, _ = synthetic_inputs
+    replicate = tmp_path / "replicate.db"
+    _create_replicate_db(candidate, replicate)
+    run_id = "absent-run" if failure == "missing_run" else "noise-run"
+    if failure == "wrong_stage":
+        _mutate_synthetic_db(
+            replicate,
+            "UPDATE pipeline_runs SET stage_reached='valuation' WHERE run_id='noise-run'",
+        )
+    elif failure == "wrong_status":
+        _mutate_synthetic_db(
+            replicate,
+            "UPDATE pipeline_runs SET status='failed' WHERE run_id='noise-run'",
+        )
+    elif failure == "cohort":
+        _insert_verdict(
+            replicate,
+            "noise-run",
+            "BBB",
+            (60.0, 60.0, 60.0, 60.0, 60.0, 40.0, 60.0),
+            status="Watch",
+            severity="low",
+        )
+    elif failure == "cache_reuse":
+        _mutate_synthetic_db(
+            replicate,
+            "UPDATE committee_verdicts SET reused_from_run_id=? WHERE run_id='noise-run'",
+            (RUN_IDS["candidate"]["committee"],),
+        )
+    elif failure == "lineage":
+        _mutate_synthetic_db(
+            replicate,
+            "UPDATE committee_verdicts SET quality_run_id='wrong' WHERE run_id='noise-run'",
+        )
+    elif failure == "invalid_output":
+        _mutate_synthetic_db(
+            replicate,
+            "UPDATE committee_verdicts SET overall_score=999 WHERE run_id='noise-run'",
+        )
+    with ImmutableDatabase(candidate, "candidate-v1") as candidate_db, ImmutableDatabase(
+        replicate, "candidate-v1"
+    ) as replicate_db:
+        records, summary = evaluate_noise_floor(
+            candidate_db,
+            replicate_db,
+            stored_run_id=RUN_IDS["candidate"]["committee"],
+            replicate_run_id=run_id,
+            candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
+            candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            runtime_provenance="synthetic equivalent runtime",
+        )
+    assert records == []
+    assert summary["status"] == "unavailable"
+    assert summary["reason"] == reason
 
 
 def _replace_synthetic_screen_rows(path: Path, ticker: str, statuses: dict[str, str]) -> None:
@@ -643,9 +1215,11 @@ def test_persona_excludes_preflight_invalid_verdicts_from_medians_and_counterfac
     assert summary["component_medians"]["business_quality_score"] == 80.0
 
 
-def test_noise_floor_rejects_stored_run_as_its_own_replicate(synthetic_inputs):
+def test_noise_floor_rejects_stored_run_as_its_own_replicate(synthetic_inputs, tmp_path):
     baseline, candidate, benchmark_dir, _ = synthetic_inputs
     stored = RUN_IDS["candidate"]["committee"]
+    replicate = tmp_path / "replicate.db"
+    _create_replicate_db(candidate, replicate)
     with pytest.raises(ManifestError, match="distinct"):
         build_manifest(
             repo_root=REPO_ROOT,
@@ -653,11 +1227,15 @@ def test_noise_floor_rejects_stored_run_as_its_own_replicate(synthetic_inputs):
             candidate_db=candidate,
             benchmark_dir=benchmark_dir,
             noise_floor_run_id=stored,
+            noise_floor_db=replicate,
             noise_floor_runtime_provenance="synthetic equivalent runtime",
         )
-    with ImmutableDatabase(candidate, "candidate-v1") as db:
+    with ImmutableDatabase(candidate, "candidate-v1") as db, ImmutableDatabase(
+        replicate, "candidate-v1"
+    ) as replicate_db:
         records, summary = evaluate_noise_floor(
             db,
+            replicate_db,
             stored_run_id=stored,
             replicate_run_id=stored,
             candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
@@ -666,26 +1244,27 @@ def test_noise_floor_rejects_stored_run_as_its_own_replicate(synthetic_inputs):
         )
     assert records == []
     assert summary["status"] == "unavailable"
-    assert summary["reason"] == "replicate_run_id_is_not_distinct_from_stored_run"
+    assert summary["reason"] == "replicate_run_id_is_not_distinct_from_every_frozen_run"
 
 
-def test_noise_floor_does_not_pair_preflight_invalid_stored_verdicts(synthetic_inputs):
+def test_noise_floor_does_not_pair_preflight_invalid_stored_verdicts(synthetic_inputs, tmp_path):
     _, candidate, _, _ = synthetic_inputs
     stored = RUN_IDS["candidate"]["committee"]
     _insert_verdict(candidate, stored, "BBB", (10.0, 10.0, 10.0, 10.0, 10.0, 90.0, 9.0), status="Reject", severity="low")
-    candidate.chmod(0o644)
-    conn = sqlite3.connect(candidate)
-    conn.execute(
-        "INSERT INTO pipeline_runs (run_id,started_at,stage_reached,status) VALUES ('noise-run','2026-01-02','committee','complete')"
-    )
-    conn.commit()
-    conn.close()
-    candidate.chmod(0o444)
-    _insert_verdict(candidate, "noise-run", "AAA", (81.0, 79.0, 71.0, 61.0, 74.0, 31.0, 74.8), status="Watch", severity="high")
-    _insert_verdict(candidate, "noise-run", "BBB", (60.0, 60.0, 60.0, 60.0, 60.0, 40.0, 60.0), status="Watch", severity="low")
+    # Give the synthetic BBB row a valid bundle key before cloning the snapshot.
     with ImmutableDatabase(candidate, "candidate-v1") as db:
+        bbb_key = db.recompute_committee_bundle_key(
+            "BBB", RUN_IDS["candidate"]["valuation"], RUN_IDS["candidate"]["screen"]
+        )
+    assert bbb_key is None  # BBB lacks valuation inputs and is preflight-invalid.
+    replicate = tmp_path / "replicate.db"
+    _create_replicate_db(candidate, replicate)
+    with ImmutableDatabase(candidate, "candidate-v1") as db, ImmutableDatabase(
+        replicate, "candidate-v1"
+    ) as replicate_db:
         records, summary = evaluate_noise_floor(
             db,
+            replicate_db,
             stored_run_id=stored,
             replicate_run_id="noise-run",
             candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
@@ -693,10 +1272,10 @@ def test_noise_floor_does_not_pair_preflight_invalid_stored_verdicts(synthetic_i
             runtime_provenance="synthetic equivalent runtime",
             invalid_tickers={"BBB"},
         )
-    assert summary["status"] == "available"
-    assert [row["ticker"] for row in records] == ["AAA"]
-    assert summary["stored_preflight_invalid_abstention_count"] == 1
-    assert summary["status_flip_count"] == 0
+    assert records == []
+    assert summary["status"] == "unavailable"
+    assert summary["failure_counts"]["candidate_bundle_unavailable"] == 1
+    assert summary["failure_counts"]["replicate_bundle_unavailable"] == 1
 
 
 def test_public_category_cells_have_fixed_keys_so_zero_and_small_cells_look_alike(synthetic_inputs):
@@ -741,9 +1320,14 @@ def test_public_rates_do_not_reveal_a_small_complement_cell():
     public = public_committee({
         "eligible_screen_passer_count": 8, "committee_scored_count": 8,
         "committee_abstention_count": 0, "committee_coverage_rate": 1.0,
+        "external_support_scored_count": 8, "external_support_abstention_count": 0,
         "investigate_support_composition": {},
+        "investigate_support_composition_denominator": 8,
         "investigate_contradiction_rate": {"numerator": 0, "denominator": 8, "value": 0.0, "kind": "descriptive_conservative"},
         "support_composition_by_status": {},
+        "support_composition_by_status_denominators": {
+            "Reject": 8, "Watch": 8, "Investigate": 8,
+        },
         "research_priority_enrichment": enrichment,
         "priority_support_spearman_rho": association,
         "watch_score_external_support_trend": association,

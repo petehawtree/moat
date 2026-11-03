@@ -115,9 +115,14 @@ def public_committee(summary: dict) -> dict:
         "committee_scored_count": summary["committee_scored_count"],
         "committee_abstention_count": summary["committee_abstention_count"],
         "committee_coverage_rate": summary["committee_coverage_rate"],
+        "external_support_scored_count": _suppressed_count(summary["external_support_scored_count"]),
+        "external_support_abstention_count": _suppressed_count(summary["external_support_abstention_count"]),
         "investigate_support_composition": {
             key: _suppressed_count(value) for key, value in summary["investigate_support_composition"].items()
         },
+        "investigate_support_composition_denominator": _suppressed_count(
+            summary["investigate_support_composition_denominator"]
+        ),
         "investigate_contradiction_rate": (
             _public_metric(summary["investigate_contradiction_rate"])
             if investigate_denominator >= PUBLIC_DISCLOSURE_MIN_CELL
@@ -126,6 +131,10 @@ def public_committee(summary: dict) -> dict:
         "support_composition_by_status": {
             status: {key: _suppressed_count(value) for key, value in cells.items()}
             for status, cells in summary["support_composition_by_status"].items()
+        },
+        "support_composition_by_status_denominators": {
+            status: _suppressed_count(value)
+            for status, value in summary["support_composition_by_status_denominators"].items()
         },
         "research_priority_enrichment": {
             status: {
@@ -189,13 +198,23 @@ def public_noise_floor(summary: dict) -> dict:
     return {
         "status": "available",
         "replicate_run_id": summary["replicate_run_id"],
+        "input_equivalence_method": summary["input_equivalence_method"],
         "paired_company_count": summary["paired_company_count"],
         "stored_preflight_invalid_abstention_count": summary["stored_preflight_invalid_abstention_count"],
+        "replicate_preflight_invalid_abstention_count": summary["replicate_preflight_invalid_abstention_count"],
         "component_score_delta_distributions": summary["component_score_delta_distributions"],
         "overall_score_delta_distribution": summary["overall_score_delta_distribution"],
+        "absolute_overall_score_delta_distribution": summary["absolute_overall_score_delta_distribution"],
+        "practical_noise_boundary": summary["practical_noise_boundary"],
+        "overall_score_noise_interpretation_counts": summary["overall_score_noise_interpretation_counts"],
         "status_flip_count": summary["status_flip_count"],
+        "status_flip_rate": summary["status_flip_rate"],
         "status_transitions": summary["status_transitions"],
         "bear_severity_change_count": summary["bear_severity_change_count"],
+        "bear_severity_change_rate": summary["bear_severity_change_rate"],
+        "bear_severity_transitions": summary["bear_severity_transitions"],
+        "status_flip_comparison": summary["status_flip_comparison"],
+        "bear_severity_change_comparison": summary["bear_severity_change_comparison"],
         "limitation": summary["limitation"],
     }
 
@@ -247,8 +266,7 @@ def write_public_report(
         "authoritative": manifest["evaluation_mode"] == "authoritative",
         "execution": {
             "timestamp": manifest["execution"]["timestamp"],
-            "eval_spec_version": manifest["eval_spec"]["version"],
-            "eval_spec_sha256": manifest["eval_spec"]["sha256"],
+            "eval_spec": manifest["eval_spec"],
             "harness_git_commit": manifest["harness"]["git_commit"],
         },
         "reproducibility_checks": preflight_public,

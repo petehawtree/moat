@@ -11,12 +11,14 @@ from pathlib import Path
 
 from .benchmark import canonical_ticker, load_benchmark
 from .constants import (
-    COMPONENT_WEIGHTS, FROZEN_SPEC_SHA256, KNOWN_QUANT_METRICS, KNOWN_QUANT_STATUSES,
+    AMENDMENT_HASH_RELATIVE_PATH, AMENDMENT_RELATIVE_PATH, COMPONENT_WEIGHTS,
+    FROZEN_AMENDMENT_SHA256, FROZEN_SPEC_SHA256, KNOWN_QUANT_METRICS, KNOWN_QUANT_STATUSES,
     KNOWN_VALUATION_SHAPES, RUN_IDS, SNAPSHOT_BYTES,
     SPEC_HASH_RELATIVE_PATH, SPEC_RELATIVE_PATH,
 )
 from .database import ImmutableDatabase
 from .errors import PreflightError
+from .noise_floor import evaluate_noise_floor
 from .util import path_is_within, sha256_file
 
 
@@ -51,6 +53,7 @@ def _resolved_manifest_path(raw: str, manifest_path: Path) -> Path:
 def validate_paths(
     *, repo_root: Path, manifest_path: Path, manifest: dict, baseline_db: Path,
     candidate_db: Path, benchmark_dir: Path, private_output_dir: Path, public_output: Path,
+    noise_floor_db: Path | None = None,
 ) -> None:
     repo_root = repo_root.resolve()
     if path_is_within(manifest_path, repo_root):
@@ -68,6 +71,23 @@ def validate_paths(
         raise PreflightError("explicit benchmark directory does not match manifest")
     if private_output_dir.resolve() == public_output.resolve():
         raise PreflightError("private and public output targets must be distinct")
+    noise_floor = manifest["experiments"]["noise_floor"]
+    declared_noise_db = (
+        _resolved_manifest_path(noise_floor["database"]["path"], manifest_path)
+        if noise_floor["database"] is not None else None
+    )
+    supplied_noise_db = noise_floor_db.resolve() if noise_floor_db is not None else None
+    if supplied_noise_db != declared_noise_db:
+        raise PreflightError("explicit noise-floor database path does not match manifest")
+    if declared_noise_db is not None:
+        if path_is_within(declared_noise_db, repo_root):
+            raise PreflightError("noise-floor database must be outside the repository")
+        frozen_paths = {baseline_db.resolve(), candidate_db.resolve()}
+        if declared_noise_db in frozen_paths or (
+            declared_noise_db.exists()
+            and any(declared_noise_db.samefile(path) for path in (baseline_db, candidate_db))
+        ):
+            raise PreflightError("noise-floor database aliases a frozen database")
     replay = manifest["experiments"]["per_fix_replay"]
     if replay["path"] is not None:
         replay_path = _resolved_manifest_path(replay["path"], manifest_path)
@@ -81,18 +101,37 @@ def validate_paths(
             raise PreflightError("per-fix replay input hash mismatch")
 
 
-def _verify_spec(repo_root: Path, manifest: dict) -> None:
-    spec = repo_root / SPEC_RELATIVE_PATH
-    sidecar = repo_root / SPEC_HASH_RELATIVE_PATH
-    if not spec.is_file() or not sidecar.is_file():
-        raise PreflightError("frozen eval specification or hash sidecar is missing")
-    try:
-        sidecar_hash = sidecar.read_text(encoding="utf-8").split()[0]
-    except (OSError, IndexError) as exc:
-        raise PreflightError("frozen eval specification hash sidecar is invalid") from exc
-    actual = sha256_file(spec)
-    if actual != sidecar_hash or actual != FROZEN_SPEC_SHA256 or actual != manifest["eval_spec"]["sha256"]:
-        raise PreflightError("frozen eval specification hash mismatch")
+def _verify_specs(repo_root: Path, manifest: dict) -> None:
+    bindings = (
+        (
+            "base",
+            SPEC_RELATIVE_PATH,
+            SPEC_HASH_RELATIVE_PATH,
+            FROZEN_SPEC_SHA256,
+        ),
+        (
+            "amendment_1",
+            AMENDMENT_RELATIVE_PATH,
+            AMENDMENT_HASH_RELATIVE_PATH,
+            FROZEN_AMENDMENT_SHA256,
+        ),
+    )
+    for key, relative_path, hash_relative_path, frozen_hash in bindings:
+        document = repo_root / relative_path
+        sidecar = repo_root / hash_relative_path
+        if not document.is_file() or not sidecar.is_file():
+            raise PreflightError("frozen eval specification document or hash sidecar is missing")
+        try:
+            sidecar_hash = sidecar.read_text(encoding="utf-8").split()[0]
+        except (OSError, IndexError) as exc:
+            raise PreflightError("frozen eval specification hash sidecar is invalid") from exc
+        actual = sha256_file(document)
+        if (
+            actual != sidecar_hash
+            or actual != frozen_hash
+            or actual != manifest["eval_spec"][key]["sha256"]
+        ):
+            raise PreflightError("frozen eval specification hash mismatch")
 
 
 def _verify_git(repo_root: Path, manifest: dict) -> None:
@@ -230,17 +269,18 @@ def _validate_db_records(db: ImmutableDatabase, name: str, report: PreflightRepo
 def run_preflight(
     *, repo_root: Path, manifest_path: Path, manifest: dict, baseline_db: Path,
     candidate_db: Path, benchmark_dir: Path, private_output_dir: Path, public_output: Path,
-    verify_git: bool = True,
+    noise_floor_db: Path | None = None, verify_git: bool = True,
 ) -> tuple[PreflightReport, list[dict]]:
     report = PreflightReport()
     validate_paths(
         repo_root=repo_root, manifest_path=manifest_path, manifest=manifest,
         baseline_db=baseline_db, candidate_db=candidate_db, benchmark_dir=benchmark_dir,
         private_output_dir=private_output_dir, public_output=public_output,
+        noise_floor_db=noise_floor_db,
     )
     report.checks["path_boundary"] = "passed"
-    _verify_spec(repo_root, manifest)
-    report.checks["frozen_spec"] = "passed"
+    _verify_specs(repo_root, manifest)
+    report.checks["frozen_spec_and_amendment"] = "passed"
     execution = manifest["execution"]
     if (
         execution["python_version"] != platform.python_version()
@@ -274,6 +314,41 @@ def run_preflight(
             canonical_db_tickers.update(tickers)
             _validate_db_records(db, name, report)
         report.checks[f"{name}_database"] = "passed"
+    noise_floor = manifest["experiments"]["noise_floor"]
+    if noise_floor_db is not None:
+        declared = noise_floor["database"]
+        try:
+            actual_hash = sha256_file(noise_floor_db)
+        except OSError as exc:
+            raise PreflightError("noise-floor database is missing or unreadable") from exc
+        if actual_hash != declared["sha256"]:
+            raise PreflightError("noise-floor database hash mismatch")
+        with ImmutableDatabase(noise_floor_db, declared["profile"]) as db:
+            db.validate_schema()
+        report.checks["noise_floor_database"] = "passed"
+        candidate_config = manifest["run_sets"]["candidate"]
+        with ImmutableDatabase(
+            candidate_db, candidate_config["database"]["profile"]
+        ) as candidate_open, ImmutableDatabase(
+            noise_floor_db, declared["profile"]
+        ) as replicate_open:
+            _, noise_summary = evaluate_noise_floor(
+                candidate_open,
+                replicate_open,
+                stored_run_id=candidate_config["runs"]["committee"],
+                replicate_run_id=noise_floor["run_id"],
+                candidate_quality_run_id=candidate_config["runs"]["screen"],
+                candidate_valuation_run_id=candidate_config["runs"]["valuation"],
+                runtime_provenance=noise_floor["runtime_provenance"],
+                invalid_tickers=set(report.record_issues["candidate"]),
+            )
+        report.checks["noise_floor_experiment"] = (
+            "passed" if noise_summary["status"] == "available"
+            else f"unavailable:{noise_summary['reason']}"
+        )
+    else:
+        report.checks["noise_floor_database"] = "unavailable"
+        report.checks["noise_floor_experiment"] = "unavailable"
     benchmark_tickers = {record["ticker"] for record in records}
     if benchmark_tickers - canonical_db_tickers:
         raise PreflightError("benchmark contains identifiers not mapped to either database profile")

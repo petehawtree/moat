@@ -10,9 +10,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .constants import (
+    AMENDMENT_RELATIVE_PATH,
+    AMENDMENT_VERSION,
+    COMMITTEE_BUNDLE_METHOD,
     DEFAULT_BOOTSTRAP_REPLICATES,
     DEFAULT_BOOTSTRAP_SEED,
     DEFAULT_SAMPLING_SEED,
+    FROZEN_AMENDMENT_SHA256,
     FROZEN_SPEC_SHA256,
     MANIFEST_VERSION,
     PROFILE_NAMES,
@@ -66,12 +70,20 @@ def validate_manifest(data: dict) -> None:
     if data["evaluation_mode"] not in {"development", "authoritative"}:
         raise ManifestError("evaluation_mode must be development or authoritative")
 
-    spec = _require_object(data["eval_spec"], "eval_spec")
-    _exact_keys(spec, {"version", "path", "sha256", "status"}, "eval_spec")
+    specs = _require_object(data["eval_spec"], "eval_spec")
+    _exact_keys(specs, {"base", "amendment_1"}, "eval_spec")
+    spec = _require_object(specs["base"], "eval_spec.base")
+    _exact_keys(spec, {"version", "path", "sha256", "status"}, "eval_spec.base")
     if (spec["version"], spec["path"], spec["sha256"], spec["status"]) != (
         SPEC_VERSION, SPEC_RELATIVE_PATH, FROZEN_SPEC_SHA256, "FROZEN"
     ):
         raise ManifestError("manifest does not bind the frozen v1 specification")
+    amendment = _require_object(specs["amendment_1"], "eval_spec.amendment_1")
+    _exact_keys(amendment, {"version", "path", "sha256", "status"}, "eval_spec.amendment_1")
+    if (amendment["version"], amendment["path"], amendment["sha256"], amendment["status"]) != (
+        AMENDMENT_VERSION, AMENDMENT_RELATIVE_PATH, FROZEN_AMENDMENT_SHA256, "FROZEN"
+    ):
+        raise ManifestError("manifest does not bind frozen eval-spec-v1 Amendment 1")
 
     harness = _require_object(data["harness"], "harness")
     _exact_keys(harness, {"git_commit", "git_dirty"}, "harness")
@@ -132,20 +144,63 @@ def validate_manifest(data: dict) -> None:
         raise ManifestError("Tier B judge fields must be null while judging is not run")
 
     experiments = _require_object(data["experiments"], "experiments")
-    _exact_keys(experiments, {"noise_floor_run_id", "noise_floor_runtime_provenance", "per_fix_replay"}, "experiments")
-    if experiments["noise_floor_run_id"] is not None and not (
-        isinstance(experiments["noise_floor_run_id"], str) and experiments["noise_floor_run_id"]
-    ):
-        raise ManifestError("noise-floor run id must be null or a non-empty string")
-    if experiments["noise_floor_run_id"] in {run_id for runs in RUN_IDS.values() for run_id in runs.values()}:
-        raise ManifestError("noise-floor run id must be distinct from the frozen run sets")
-    runtime_provenance = experiments["noise_floor_runtime_provenance"]
-    if (experiments["noise_floor_run_id"] is None) != (runtime_provenance is None):
-        raise ManifestError("noise-floor run id and runtime provenance must both be null or both populated")
-    if runtime_provenance is not None and not (
-        isinstance(runtime_provenance, str) and runtime_provenance.strip()
-    ):
-        raise ManifestError("noise-floor runtime provenance must be a non-empty string")
+    _exact_keys(experiments, {"noise_floor", "per_fix_replay"}, "experiments")
+    noise_floor = _require_object(experiments["noise_floor"], "experiments.noise_floor")
+    _exact_keys(
+        noise_floor,
+        {"run_id", "database", "runtime_provenance", "input_equivalence"},
+        "experiments.noise_floor",
+    )
+    populated = [
+        noise_floor["run_id"] is not None,
+        noise_floor["database"] is not None,
+        noise_floor["runtime_provenance"] is not None,
+        noise_floor["input_equivalence"] is not None,
+    ]
+    if any(populated) and not all(populated):
+        raise ManifestError("noise-floor fields must be all null or all populated")
+    if all(populated):
+        if not isinstance(noise_floor["run_id"], str) or not noise_floor["run_id"]:
+            raise ManifestError("noise-floor run id must be a non-empty string")
+        frozen_run_ids = {run_id for runs in RUN_IDS.values() for run_id in runs.values()}
+        if noise_floor["run_id"] in frozen_run_ids:
+            raise ManifestError("noise-floor run id must be distinct from every frozen run")
+        database = _require_object(noise_floor["database"], "experiments.noise_floor.database")
+        _exact_keys(database, {"path", "sha256", "profile"}, "experiments.noise_floor.database")
+        if (
+            not isinstance(database["path"], str)
+            or not Path(database["path"]).is_absolute()
+            or not _is_sha256(database["sha256"])
+        ):
+            raise ManifestError("noise-floor database must have an absolute path and valid SHA-256")
+        if database["profile"] != "candidate-v1":
+            raise ManifestError("noise-floor database must use the candidate-v1 profile")
+        replicate_path = Path(database["path"]).resolve()
+        if replicate_path.name == "moat.db":
+            raise ManifestError("live data/moat.db is forbidden as a noise-floor database")
+        frozen_paths = {
+            Path(run_sets[name]["database"]["path"]).resolve()
+            for name in ("baseline", "candidate")
+        }
+        if replicate_path in frozen_paths:
+            raise ManifestError("noise-floor database must not alias a frozen database")
+        if not isinstance(noise_floor["runtime_provenance"], str) or not noise_floor["runtime_provenance"].strip():
+            raise ManifestError("noise-floor runtime provenance must be a non-empty string")
+        equivalence = _require_object(
+            noise_floor["input_equivalence"], "experiments.noise_floor.input_equivalence"
+        )
+        _exact_keys(
+            equivalence,
+            {"method", "reference_candidate_sha256", "quality_run_id", "valuation_run_id"},
+            "experiments.noise_floor.input_equivalence",
+        )
+        if equivalence != {
+            "method": COMMITTEE_BUNDLE_METHOD,
+            "reference_candidate_sha256": SNAPSHOT_SHA256["candidate"],
+            "quality_run_id": RUN_IDS["candidate"]["screen"],
+            "valuation_run_id": RUN_IDS["candidate"]["valuation"],
+        }:
+            raise ManifestError("noise-floor input equivalence does not match the frozen contract")
     replay = _require_object(experiments["per_fix_replay"], "experiments.per_fix_replay")
     _exact_keys(replay, {"path", "sha256"}, "experiments.per_fix_replay")
     if (replay["path"] is None) != (replay["sha256"] is None):
@@ -198,6 +253,7 @@ def build_manifest(
     mode: str = "development", bootstrap_seed: int = DEFAULT_BOOTSTRAP_SEED,
     sampling_seed: int = DEFAULT_SAMPLING_SEED,
     noise_floor_run_id: str | None = None,
+    noise_floor_db: Path | None = None,
     noise_floor_runtime_provenance: str | None = None,
     per_fix_replay_input: Path | None = None,
 ) -> dict:
@@ -207,12 +263,30 @@ def build_manifest(
     """
     tier_a = benchmark_dir / "tier-a-screener.jsonl"
     inputs = [baseline_db, candidate_db, tier_a]
+    if noise_floor_db is not None:
+        inputs.append(noise_floor_db)
     if per_fix_replay_input is not None:
         inputs.append(per_fix_replay_input)
     for path in inputs:
         if not path.is_file():
             raise ManifestError("one or more manifest inputs do not exist")
     commit, dirty = _git_state(repo_root)
+    noise_requested = any(
+        value is not None
+        for value in (noise_floor_run_id, noise_floor_db, noise_floor_runtime_provenance)
+    )
+    if noise_requested and not all(
+        value is not None
+        for value in (noise_floor_run_id, noise_floor_db, noise_floor_runtime_provenance)
+    ):
+        raise ManifestError("noise-floor run ID, database, and runtime provenance must be supplied together")
+    if noise_floor_db is not None:
+        resolved_replicate = noise_floor_db.resolve()
+        if resolved_replicate in {baseline_db.resolve(), candidate_db.resolve()} or any(
+            resolved_replicate.samefile(frozen_db)
+            for frozen_db in (baseline_db, candidate_db)
+        ):
+            raise ManifestError("noise-floor database must be distinct from baseline and candidate databases")
     baseline_provenance = {
         "screen": _provenance("252348cfa880833851671c02a8674e34ce58035c", "reconstructed_unverified", "timestamp reconstruction; see sprint-6.0-run-provenance.md"),
         "valuation": _provenance("252348cfa880833851671c02a8674e34ce58035c", "reconstructed_unverified", "timestamp reconstruction; see sprint-6.0-run-provenance.md"),
@@ -238,7 +312,10 @@ def build_manifest(
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "evaluation_mode": mode,
-        "eval_spec": {"version": SPEC_VERSION, "path": SPEC_RELATIVE_PATH, "sha256": FROZEN_SPEC_SHA256, "status": "FROZEN"},
+        "eval_spec": {
+            "base": {"version": SPEC_VERSION, "path": SPEC_RELATIVE_PATH, "sha256": FROZEN_SPEC_SHA256, "status": "FROZEN"},
+            "amendment_1": {"version": AMENDMENT_VERSION, "path": AMENDMENT_RELATIVE_PATH, "sha256": FROZEN_AMENDMENT_SHA256, "status": "FROZEN"},
+        },
         "harness": {"git_commit": commit, "git_dirty": dirty},
         "run_sets": {
             "baseline": {"database": {"path": str(baseline_db.resolve()), "sha256": sha256_file(baseline_db), "profile": PROFILE_NAMES["baseline"]}, "runs": RUN_IDS["baseline"], "production_provenance": baseline_provenance},
@@ -247,8 +324,27 @@ def build_manifest(
         "benchmark": {"directory": str(benchmark_dir.resolve()), "version": "morningstar-benchmark-v1", "files": {"tier_a_screener": {"path": "tier-a-screener.jsonl", "sha256": sha256_file(tier_a)}}},
         "judging": {"status": "not_run", "rubric_sha256": None, "model": None, "prompt_sha256": None, "cohort_sha256": None},
         "experiments": {
-            "noise_floor_run_id": noise_floor_run_id,
-            "noise_floor_runtime_provenance": noise_floor_runtime_provenance,
+            "noise_floor": {
+                "run_id": noise_floor_run_id,
+                "database": (
+                    {
+                        "path": str(noise_floor_db.resolve()),
+                        "sha256": sha256_file(noise_floor_db),
+                        "profile": "candidate-v1",
+                    }
+                    if noise_floor_db is not None else None
+                ),
+                "runtime_provenance": noise_floor_runtime_provenance,
+                "input_equivalence": (
+                    {
+                        "method": COMMITTEE_BUNDLE_METHOD,
+                        "reference_candidate_sha256": SNAPSHOT_SHA256["candidate"],
+                        "quality_run_id": RUN_IDS["candidate"]["screen"],
+                        "valuation_run_id": RUN_IDS["candidate"]["valuation"],
+                    }
+                    if noise_floor_db is not None else None
+                ),
+            },
             "per_fix_replay": {
                 "path": str(per_fix_replay_input.resolve()) if per_fix_replay_input else None,
                 "sha256": sha256_file(per_fix_replay_input) if per_fix_replay_input else None,

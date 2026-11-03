@@ -15,7 +15,13 @@ SUPPORT_CATEGORIES = ("strong", "weak", "ambiguous", "contradicted", "abstain")
 _SUPPORT_ORDINAL = {"contradicted": 0.0, "ambiguous": 1.0, "weak": 2.0, "strong": 3.0}
 
 
-def external_support(moat_label: str | None, valuation_class: str) -> str:
+def external_support(
+    moat_label: str | None,
+    valuation_class: str,
+    coverage_tier: str | None = None,
+) -> str:
+    if coverage_tier == "quantitative":
+        return "abstain"
     if moat_label == "None" or valuation_class == "Expensive":
         return "contradicted"
     if moat_label is None or valuation_class == "Abstain":
@@ -53,7 +59,11 @@ def evaluate_committee(
             or not math.isfinite(verdict["overall_score"])
         ):
             verdict = None
-        support = external_support(source.get("economic_moat") if source else None, benchmark_value["classification"])
+        support = external_support(
+            source.get("economic_moat") if source else None,
+            benchmark_value["classification"],
+            source.get("coverage_tier") if source else None,
+        )
         details.append({
             "ticker": ticker,
             "sector": passers[ticker]["sector"],
@@ -70,7 +80,12 @@ def evaluate_committee(
 
     scored = [row for row in details if row["committee_outcome"] != "Abstain"]
     investigates = [row for row in scored if row["committee_outcome"] == "Investigate"]
-    contradicted = sum(row["external_support"] == "contradicted" for row in investigates)
+    supported_investigates = [
+        row for row in investigates if row["external_support"] != "abstain"
+    ]
+    contradicted = sum(
+        row["external_support"] == "contradicted" for row in supported_investigates
+    )
     by_status = {
         status: {category: sum(row["committee_outcome"] == status and row["external_support"] == category for row in scored) for category in SUPPORT_CATEGORIES}
         for status in ("Reject", "Watch", "Investigate")
@@ -93,14 +108,24 @@ def evaluate_committee(
         "committee_scored_count": len(scored),
         "committee_abstention_count": len(details) - len(scored),
         "committee_coverage_rate": len(scored) / len(details) if details else None,
+        "external_support_scored_count": sum(row["external_support"] != "abstain" for row in scored),
+        "external_support_abstention_count": sum(row["external_support"] == "abstain" for row in scored),
         "investigate_support_composition": {category: sum(row["external_support"] == category for row in investigates) for category in SUPPORT_CATEGORIES},
+        "investigate_support_composition_denominator": len(supported_investigates),
         "investigate_contradiction_rate": {
             "numerator": contradicted,
-            "denominator": len(investigates),
-            "value": contradicted / len(investigates) if investigates else None,
+            "denominator": len(supported_investigates),
+            "value": contradicted / len(supported_investigates) if supported_investigates else None,
             "kind": "descriptive_conservative",
         },
         "support_composition_by_status": by_status,
+        "support_composition_by_status_denominators": {
+            status: sum(
+                row["committee_outcome"] == status and row["external_support"] != "abstain"
+                for row in scored
+            )
+            for status in ("Reject", "Watch", "Investigate")
+        },
         "research_priority_enrichment": enrichment,
         "priority_support_spearman_rho": {
             "denominator": len(ranking),
@@ -136,25 +161,38 @@ def paired_committee(baseline: list[dict], candidate: list[dict]) -> dict:
     after = {row["ticker"]: row for row in candidate if row["committee_outcome"] != "Abstain"}
     common = sorted(set(before) & set(after))
     records = []
+    status_pairs = []
+    severity_pairs = []
     for ticker in common:
         left, right = before[ticker], after[ticker]
+        score_delta = right["overall_score"] - left["overall_score"]
         records.append({
             "ticker": ticker,
             "baseline_score": left["overall_score"],
             "candidate_score": right["overall_score"],
-            "score_delta": right["overall_score"] - left["overall_score"],
-            "baseline_status": left["committee_outcome"],
-            "candidate_status": right["committee_outcome"],
-            "status_ordinal_delta": STATUS_ORDINAL[right["committee_outcome"]] - STATUS_ORDINAL[left["committee_outcome"]],
+            "score_delta": score_delta,
+            "absolute_overall_score_delta": abs(score_delta),
         })
-    transitions = Counter((row["baseline_status"], row["candidate_status"]) for row in records)
+        status_pairs.append((left["committee_outcome"], right["committee_outcome"]))
+        severity_pairs.append((left["bear_case_severity"], right["bear_case_severity"]))
+    transitions = Counter(status_pairs)
+    severity_transitions = Counter(severity_pairs)
+    status_flip_count = sum(left != right for left, right in status_pairs)
+    severity_change_count = sum(left != right for left, right in severity_pairs)
     return {
         "claim_boundary": "combined Phase 1 effect; committee movement is descriptive until compared with the unchanged-input noise floor",
         "paired_common_count": len(records),
         "baseline_only_count": len(set(before) - set(after)),
         "candidate_only_count": len(set(after) - set(before)),
         "status_transitions": {f"{left}_to_{right}": count for (left, right), count in sorted(transitions.items())},
-        "status_flip_count": sum(row["baseline_status"] != row["candidate_status"] for row in records),
+        "status_flip_count": status_flip_count,
+        "status_flip_rate": status_flip_count / len(records) if records else None,
+        "bear_severity_transitions": {
+            f"{left}_to_{right}": count
+            for (left, right), count in sorted(severity_transitions.items())
+        },
+        "bear_severity_change_count": severity_change_count,
+        "bear_severity_change_rate": severity_change_count / len(records) if records else None,
         "mean_overall_score_delta": sum(row["score_delta"] for row in records) / len(records) if records else None,
         "records": records,
     }

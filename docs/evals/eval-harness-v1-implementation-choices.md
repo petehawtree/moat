@@ -68,19 +68,41 @@ specification.
 - Reject/Watch/Investigate are ordered 0/1/2 for exploratory association.
   Direct star-rating association accepts numeric, textual numeric, and star
   glyph forms and remains secondary.
+- Amendment 1 makes every quantitative-only external-support classification
+  `abstain`. The abstention is counted separately and excluded from support
+  composition, enrichment, contradiction-rate and trend denominators. It does
+  not change committee workflow coverage, Tier A or the secondary direct
+  status-versus-star-rating association.
 
-## Noise floor and replay choices (§12)
+## Noise floor and replay choices (§12 and Amendment 1)
 
-- A noise-floor run ID is an explicit manifest and CLI input. The run must be
-  in the candidate snapshot, have exactly the stored candidate cohort, reach
-  committee, contain no reused verdict, preserve candidate quality/valuation
-  lineage, and carry the same cache bundle for every company.
+- The replicate database path and run ID are explicit manifest and CLI inputs.
+  The manifest uses the strict `experiments.noise_floor` object from Amendment
+  1; all experiment fields are either populated together or null together.
+- Replicate file integrity and sealing failures fail preflight. Experiment
+  validity failures after the snapshot is safely opened make the experiment
+  unavailable. Neither path emits company identifiers or proprietary values.
+- The replicate run must be in the separate snapshot, have exactly the stored
+  candidate cohort, reach committee, contain no reused verdict, and preserve
+  candidate quality/valuation lineage.
+- `committee_bundle_v1` is independently reconstructed in both snapshots for
+  every stored cohort member. Both digests must be non-null, equal each other
+  and equal the cache key on the corresponding verdict. No selected-input
+  fallback is implemented.
 - Runtime equivalence is not persisted by the committee schema, so a non-empty
   manifest runtime-provenance statement is also required. Without it the
   experiment is unavailable rather than silently assumed equivalent.
 - Noise distributions report count, minimum, median, mean and maximum for each
-  component and overall score, plus status/severity changes. One replicate is
-  explicitly not treated as a full sampling distribution.
+  component and for signed and absolute overall-score movement. The practical
+  boundary is the Amendment 1 nearest-rank 95th percentile of absolute overall
+  deltas.
+- The two frozen company-level meanings are applied only to paired
+  baseline/candidate overall-score movement. Component deltas have no noise
+  label. Individual status and Bear-severity changes are not emitted by the
+  paired comparison; only aggregate counts, rates and transition tables are
+  retained, with baseline/candidate and candidate/replicate rates shown side
+  by side.
+- One replicate is explicitly not treated as a full sampling distribution.
 - Per-fix replay is never inferred from baseline/candidate differences. An
   optional private, hash-bound JSONL input must provide isolated before and
   counterfactual states, evidence, and `other_inputs_held_constant=true`.

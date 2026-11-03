@@ -24,6 +24,7 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path, help="Private manifest path outside the repository")
     parser.add_argument("--mode", choices=("development", "authoritative"), default="development")
     parser.add_argument("--noise-floor-run-id", help="Optional unchanged-input committee replicate run ID")
+    parser.add_argument("--noise-floor-db", type=Path, help="Optional separate sealed committee replicate snapshot")
     parser.add_argument("--noise-floor-runtime-provenance", help="Evidence that the replicate used the equivalent runtime environment")
     parser.add_argument("--per-fix-replay-input", type=Path, help="Optional private deterministic replay JSONL")
     args = parser.parse_args()
@@ -37,6 +38,7 @@ def main() -> int:
             benchmark_dir=args.benchmark_dir,
             mode=args.mode,
             noise_floor_run_id=args.noise_floor_run_id,
+            noise_floor_db=args.noise_floor_db,
             noise_floor_runtime_provenance=args.noise_floor_runtime_provenance,
             per_fix_replay_input=args.per_fix_replay_input,
         )

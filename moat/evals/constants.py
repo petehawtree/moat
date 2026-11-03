@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 SPEC_VERSION = "v1"
+AMENDMENT_VERSION = "v1-amendment-1"
 MANIFEST_VERSION = "eval-manifest-v1"
 SPEC_RELATIVE_PATH = "docs/evals/eval-spec-v1.md"
 SPEC_HASH_RELATIVE_PATH = "docs/evals/eval-spec-v1.md.sha256"
 FROZEN_SPEC_SHA256 = "76ad487b10f1e114ff4ccd01247a110821cb495de43ed618f9b32f4a5a1163d6"
+AMENDMENT_RELATIVE_PATH = "docs/evals/eval-spec-v1-amendment-1.md"
+AMENDMENT_HASH_RELATIVE_PATH = "docs/evals/eval-spec-v1-amendment-1.md.sha256"
+FROZEN_AMENDMENT_SHA256 = "fa95f4be7445abcae9514b18b75963b47b099db311eaf2a109030e9ece46d8a3"
+
+COMMITTEE_BUNDLE_METHOD = "committee_bundle_v1"
 
 RUN_IDS = {
     "baseline": {

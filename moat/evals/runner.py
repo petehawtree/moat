@@ -115,6 +115,8 @@ def run_evaluation(
                 replicate_run_id=None,
                 candidate_quality_run_id=candidate_config["runs"]["screen"],
                 candidate_valuation_run_id=candidate_config["runs"]["valuation"],
+                reference_candidate_sha256=None,
+                declared_candidate_sha256=candidate_config["database"]["sha256"],
                 runtime_provenance=None,
                 invalid_tickers=set(preflight.record_issues["candidate"]),
             )
@@ -127,6 +129,10 @@ def run_evaluation(
                     replicate_run_id=noise_floor_run_id,
                     candidate_quality_run_id=candidate_config["runs"]["screen"],
                     candidate_valuation_run_id=candidate_config["runs"]["valuation"],
+                    reference_candidate_sha256=noise_floor["input_equivalence"][
+                        "reference_candidate_sha256"
+                    ],
+                    declared_candidate_sha256=candidate_config["database"]["sha256"],
                     runtime_provenance=noise_floor["runtime_provenance"],
                     invalid_tickers=set(preflight.record_issues["candidate"]),
                 )

@@ -92,6 +92,12 @@ specification.
 - Runtime equivalence is not persisted by the committee schema, so a non-empty
   manifest runtime-provenance statement is also required. Without it the
   experiment is unavailable rather than silently assumed equivalent.
+- The input-equivalence reference digest, the manifest's candidate snapshot
+  digest and the digest of the candidate file actually opened must all match.
+  This enforces Amendment 1 A1 and A4's proof boundary, as approved by Pete on
+  2026-11-03. A development run on a non-frozen candidate therefore reports
+  the noise-floor experiment as unavailable rather than claiming equivalence
+  to the frozen candidate snapshot.
 - Noise distributions report count, minimum, median, mean and maximum for each
   component and for signed and absolute overall-score movement. The practical
   boundary is the Amendment 1 nearest-rank 95th percentile of absolute overall

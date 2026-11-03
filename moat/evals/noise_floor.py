@@ -9,6 +9,7 @@ from collections import Counter
 from .benchmark import canonical_ticker
 from .constants import COMMITTEE_BUNDLE_METHOD, COMPONENT_WEIGHTS, RUN_IDS
 from .database import ImmutableDatabase
+from .util import sha256_file
 
 AT_OR_BELOW_BOUNDARY = "indistinguishable from one-run model variation"
 ABOVE_BOUNDARY = "exceeds the observed practical noise boundary"
@@ -141,6 +142,8 @@ def evaluate_noise_floor(
     replicate_run_id: str | None,
     candidate_quality_run_id: str,
     candidate_valuation_run_id: str,
+    reference_candidate_sha256: str | None,
+    declared_candidate_sha256: str,
     runtime_provenance: str | None,
     invalid_tickers: set[str] | None = None,
 ) -> tuple[list[dict], dict]:
@@ -162,6 +165,17 @@ def evaluate_noise_floor(
         return [], {
             "status": "unavailable",
             "reason": "replicate_database_not_supplied",
+            "interpretation": "committee baseline/candidate movement remains descriptive only",
+        }
+    actual_candidate_sha256 = sha256_file(candidate_db.path)
+    if not (
+        reference_candidate_sha256
+        == declared_candidate_sha256
+        == actual_candidate_sha256
+    ):
+        return [], {
+            "status": "unavailable",
+            "reason": "candidate_snapshot_does_not_match_equivalence_reference",
             "interpretation": "committee baseline/candidate movement remains descriptive only",
         }
     if replicate_db.path in {candidate_db.path}:

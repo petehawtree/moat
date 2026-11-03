@@ -12,7 +12,7 @@ import pytest
 
 from moat.evals.benchmark import load_benchmark
 from moat.evals.committee_eval import evaluate_committee
-from moat.evals.constants import PROFILE_COLUMNS, RUN_IDS
+from moat.evals.constants import PROFILE_COLUMNS, RUN_IDS, SNAPSHOT_SHA256
 from moat.evals.database import ImmutableDatabase
 from moat.evals.errors import ManifestError, PreflightError
 from moat.evals.manifest import build_manifest, validate_manifest
@@ -31,9 +31,24 @@ from moat.evals.runner import run_evaluation
 from moat.evals.replay import evaluate_replays
 from moat.evals.tier_a import evaluate_tier_a
 from moat.evals.tier_c import evaluate_tier_c, symmetric_relative_difference
+from moat.evals.util import sha256_file
 from moat.evals.valuation import classify_moat_valuation, evaluate_valuation
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _noise_candidate_hashes(candidate: Path) -> dict[str, str]:
+    digest = sha256_file(candidate)
+    return {
+        "reference_candidate_sha256": digest,
+        "declared_candidate_sha256": digest,
+    }
+
+
+def _bind_synthetic_candidate_reference(monkeypatch, candidate: Path) -> str:
+    digest = sha256_file(candidate)
+    monkeypatch.setitem(SNAPSHOT_SHA256, "candidate", digest)
+    return digest
 
 
 def _column_type(name: str) -> str:
@@ -368,8 +383,9 @@ def _run_synthetic_preflight(
     )
 
 
-def test_noise_floor_manifest_is_strict_and_complete(synthetic_inputs, tmp_path):
+def test_noise_floor_manifest_is_strict_and_complete(synthetic_inputs, tmp_path, monkeypatch):
     baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    candidate_digest = _bind_synthetic_candidate_reference(monkeypatch, candidate)
     replicate = tmp_path / "replicate.db"
     _create_replicate_db(candidate, replicate)
     manifest = build_manifest(
@@ -386,7 +402,7 @@ def test_noise_floor_manifest_is_strict_and_complete(synthetic_inputs, tmp_path)
     assert noise["database"]["profile"] == "candidate-v1"
     assert noise["input_equivalence"] == {
         "method": "committee_bundle_v1",
-        "reference_candidate_sha256": "61b9514a068b855998377f7262f55386783c2339f659370f8baea980bb7c3828",
+        "reference_candidate_sha256": candidate_digest,
         "quality_run_id": RUN_IDS["candidate"]["screen"],
         "valuation_run_id": RUN_IDS["candidate"]["valuation"],
     }
@@ -688,6 +704,7 @@ def test_noise_floor_optional_and_cross_snapshot_bundle_equivalence(synthetic_in
             replicate_run_id=None,
             candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
             candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            **_noise_candidate_hashes(candidate),
             runtime_provenance=None,
         )
     assert records == []
@@ -706,6 +723,7 @@ def test_noise_floor_optional_and_cross_snapshot_bundle_equivalence(synthetic_in
             replicate_run_id="noise-run",
             candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
             candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            **_noise_candidate_hashes(candidate),
             runtime_provenance="synthetic equivalent runtime",
         )
     assert noise_summary["status"] == "available"
@@ -714,8 +732,11 @@ def test_noise_floor_optional_and_cross_snapshot_bundle_equivalence(synthetic_in
     assert noise_records[0]["component_score_deltas"]["business_quality_score"] == 1.0
 
 
-def test_preflight_only_establishes_replicate_bundle_contract(synthetic_inputs, tmp_path):
+def test_preflight_only_establishes_replicate_bundle_contract(
+    synthetic_inputs, tmp_path, monkeypatch,
+):
     baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    _bind_synthetic_candidate_reference(monkeypatch, candidate)
     replicate = tmp_path / "replicate.db"
     _create_replicate_db(candidate, replicate)
     manifest = build_manifest(
@@ -739,8 +760,11 @@ def test_preflight_only_establishes_replicate_bundle_contract(synthetic_inputs, 
     assert report.checks["noise_floor_experiment"] == "passed"
 
 
-def test_preflight_marks_missing_bundle_capability_unavailable(synthetic_inputs, tmp_path):
+def test_preflight_marks_missing_bundle_capability_unavailable(
+    synthetic_inputs, tmp_path, monkeypatch,
+):
     baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    _bind_synthetic_candidate_reference(monkeypatch, candidate)
     replicate = tmp_path / "replicate.db"
     _create_replicate_db(candidate, replicate)
     _mutate_synthetic_db(replicate, "DROP TABLE ai_analysis")
@@ -817,9 +841,10 @@ def test_unavailable_noise_floor_emits_no_company_level_label():
 
 
 def test_noise_floor_private_and_public_outputs_follow_amendment_interpretation(
-    synthetic_inputs, tmp_path
+    synthetic_inputs, tmp_path, monkeypatch,
 ):
     baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    _bind_synthetic_candidate_reference(monkeypatch, candidate)
     replicate = tmp_path / "replicate.db"
     _create_replicate_db(candidate, replicate)
     manifest = build_manifest(
@@ -870,6 +895,86 @@ def test_noise_floor_private_and_public_outputs_follow_amendment_interpretation(
         ABOVE_BOUNDARY: 0,
     }
     assert "AAA" not in json.dumps(public_noise)
+
+
+def test_candidate_reference_mismatch_makes_noise_floor_unavailable_everywhere(
+    synthetic_inputs, tmp_path, capsys,
+):
+    baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    replicate = tmp_path / "replicate.db"
+    _create_replicate_db(candidate, replicate)
+    actual_candidate_digest = sha256_file(candidate)
+    assert actual_candidate_digest != SNAPSHOT_SHA256["candidate"]
+    manifest = build_manifest(
+        repo_root=REPO_ROOT,
+        baseline_db=baseline,
+        candidate_db=candidate,
+        benchmark_dir=benchmark_dir,
+        noise_floor_run_id="noise-run",
+        noise_floor_db=replicate,
+        noise_floor_runtime_provenance="synthetic equivalent runtime",
+    )
+    reference_digest = manifest["experiments"]["noise_floor"]["input_equivalence"][
+        "reference_candidate_sha256"
+    ]
+    assert reference_digest != manifest["run_sets"]["candidate"]["database"]["sha256"]
+
+    preflight, _ = _run_synthetic_preflight(
+        baseline=baseline,
+        candidate=candidate,
+        benchmark_dir=benchmark_dir,
+        replicate=replicate,
+        manifest=manifest,
+        tmp_path=tmp_path,
+    )
+    reason = "candidate_snapshot_does_not_match_equivalence_reference"
+    assert preflight.checks["noise_floor_experiment"] == f"unavailable:{reason}"
+
+    manifest_path = tmp_path / "runner-manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    private = tmp_path / "runner-private"
+    public = tmp_path / "runner-public.json"
+    run_evaluation(
+        repo_root=REPO_ROOT,
+        baseline_db=baseline,
+        candidate_db=candidate,
+        benchmark_dir=benchmark_dir,
+        manifest_path=manifest_path,
+        private_output_dir=private,
+        public_output=public,
+        noise_floor_db=replicate,
+        noise_floor_run_id="noise-run",
+        verify_git=False,
+    )
+    noise_summary = json.loads(
+        (private / "committee-noise-floor-summary.json").read_text()
+    )
+    assert noise_summary == {
+        "status": "unavailable",
+        "reason": reason,
+        "interpretation": "committee baseline/candidate movement remains descriptive only",
+    }
+    paired = json.loads((private / "committee-paired.json").read_text())
+    assert all("noise_interpretation" not in record for record in paired["records"])
+
+    public_data = json.loads(public.read_text())
+    public_noise = public_data["sensitivity_analyses"]["committee_noise_floor"]
+    assert public_noise == noise_summary
+    assert public_data["reproducibility_checks"]["checks"][
+        "noise_floor_experiment"
+    ] == f"unavailable:{reason}"
+
+    captured = capsys.readouterr()
+    disclosure_surfaces = "\n".join(
+        (reason, json.dumps(public_data), captured.out, captured.err)
+    )
+    for secret in (
+        actual_candidate_digest,
+        reference_digest,
+        str(candidate),
+        str(candidate.resolve()),
+    ):
+        assert secret not in disclosure_surfaces
 
 
 @pytest.mark.parametrize(
@@ -936,6 +1041,7 @@ def test_noise_floor_rejects_each_bundle_mismatch_class(
             replicate_run_id="noise-run",
             candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
             candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            **_noise_candidate_hashes(candidate),
             runtime_provenance="synthetic equivalent runtime",
         )
     assert records == []
@@ -1007,6 +1113,7 @@ def test_noise_floor_rejects_invalid_replicate_run_contract(
             replicate_run_id=run_id,
             candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
             candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            **_noise_candidate_hashes(candidate),
             runtime_provenance="synthetic equivalent runtime",
         )
     assert records == []
@@ -1240,6 +1347,7 @@ def test_noise_floor_rejects_stored_run_as_its_own_replicate(synthetic_inputs, t
             replicate_run_id=stored,
             candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
             candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            **_noise_candidate_hashes(candidate),
             runtime_provenance="synthetic equivalent runtime",
         )
     assert records == []
@@ -1269,6 +1377,7 @@ def test_noise_floor_does_not_pair_preflight_invalid_stored_verdicts(synthetic_i
             replicate_run_id="noise-run",
             candidate_quality_run_id=RUN_IDS["candidate"]["screen"],
             candidate_valuation_run_id=RUN_IDS["candidate"]["valuation"],
+            **_noise_candidate_hashes(candidate),
             runtime_provenance="synthetic equivalent runtime",
             invalid_tickers={"BBB"},
         )

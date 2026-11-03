@@ -110,13 +110,28 @@ def public_valuation(summaries: dict[str, dict]) -> dict:
 
 def public_committee(summary: dict) -> dict:
     investigate_denominator = summary["investigate_contradiction_rate"]["denominator"]
-    return {
+    hide_external_support = _small_cell_or_complement(
+        summary["external_support_abstention_count"],
+        summary["committee_scored_count"],
+    )
+    result = {
         "eligible_screen_passer_count": summary["eligible_screen_passer_count"],
         "committee_scored_count": summary["committee_scored_count"],
         "committee_abstention_count": summary["committee_abstention_count"],
         "committee_coverage_rate": summary["committee_coverage_rate"],
-        "external_support_scored_count": _suppressed_count(summary["external_support_scored_count"]),
-        "external_support_abstention_count": _suppressed_count(summary["external_support_abstention_count"]),
+        # The two counts partition the public committee_scored_count, so one
+        # small cell would be recoverable by subtraction from the other.
+        **(
+            {
+                "external_support_scored_count": "suppressed_lt_5",
+                "external_support_abstention_count": "suppressed_lt_5",
+            }
+            if hide_external_support
+            else {
+                "external_support_scored_count": summary["external_support_scored_count"],
+                "external_support_abstention_count": summary["external_support_abstention_count"],
+            }
+        ),
         "investigate_support_composition": {
             key: _suppressed_count(value) for key, value in summary["investigate_support_composition"].items()
         },
@@ -158,6 +173,43 @@ def public_committee(summary: dict) -> dict:
         "watch_score_external_support_trend": _public_association(summary["watch_score_external_support_trend"]),
         "direct_status_star_rating_spearman_rho": _public_association(summary["direct_status_star_rating_spearman_rho"]),
     }
+    if hide_external_support:
+        # These fields are all derived from the same external-support cohort.
+        # Their denominators and count partitions would otherwise reconstruct
+        # the suppressed split, either directly or by summing across statuses.
+        result["investigate_support_composition"] = {
+            key: "suppressed_lt_5" for key in summary["investigate_support_composition"]
+        }
+        result["investigate_support_composition_denominator"] = "suppressed_lt_5"
+        result["investigate_contradiction_rate"] = {
+            "numerator": "suppressed_lt_5",
+            "denominator": "suppressed_lt_5",
+            "value": None,
+            "kind": summary["investigate_contradiction_rate"]["kind"],
+            "analysis_status": "ran_but_publicly_suppressed",
+        }
+        result["support_composition_by_status"] = {
+            status: {key: "suppressed_lt_5" for key in cells}
+            for status, cells in summary["support_composition_by_status"].items()
+        }
+        result["support_composition_by_status_denominators"] = {
+            status: "suppressed_lt_5"
+            for status in summary["support_composition_by_status_denominators"]
+        }
+        result["research_priority_enrichment"] = {
+            status: {
+                "supported_numerator": "suppressed_lt_5",
+                "denominator": "suppressed_lt_5",
+                "supported_rate": None,
+                "composition": {key: "suppressed_lt_5" for key in values["composition"]},
+            }
+            for status, values in summary["research_priority_enrichment"].items()
+        }
+        for field in ("priority_support_spearman_rho", "watch_score_external_support_trend"):
+            association = result[field]
+            association["denominator"] = "suppressed_lt_5"
+            association["value"] = None
+    return result
 
 
 def public_persona(summary: dict) -> dict:

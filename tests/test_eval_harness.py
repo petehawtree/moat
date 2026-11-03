@@ -1338,6 +1338,107 @@ def test_public_rates_do_not_reveal_a_small_complement_cell():
     assert watch["supported_rate"] is None
 
 
+@pytest.mark.parametrize(
+    ("scored", "abstained", "published"),
+    [(37, 3, False), (3, 37, False), (35, 5, True), (40, 0, False)],
+)
+def test_public_external_support_split_does_not_reveal_a_small_cell_by_subtraction(
+    scored, abstained, published,
+):
+    from moat.evals.reporting import public_committee
+
+    association = {"denominator": 0, "value": None, "kind": "exploratory"}
+    enrichment = {
+        status: {"supported_numerator": 0, "denominator": 0, "supported_rate": None, "composition": {}}
+        for status in ("Reject", "Watch", "Investigate")
+    }
+    public = public_committee({
+        "eligible_screen_passer_count": scored + abstained,
+        "committee_scored_count": scored + abstained,
+        "committee_abstention_count": 0, "committee_coverage_rate": 1.0,
+        "external_support_scored_count": scored,
+        "external_support_abstention_count": abstained,
+        "investigate_support_composition": {},
+        "investigate_support_composition_denominator": 0,
+        "investigate_contradiction_rate": {"numerator": 0, "denominator": 0, "value": None, "kind": "descriptive_conservative"},
+        "support_composition_by_status": {},
+        "support_composition_by_status_denominators": {"Reject": 0, "Watch": 0, "Investigate": 0},
+        "research_priority_enrichment": enrichment,
+        "priority_support_spearman_rho": association,
+        "watch_score_external_support_trend": association,
+        "direct_status_star_rating_spearman_rho": association,
+    })
+    # committee_scored_count is public, so the split is published whole or not at all.
+    assert public["committee_scored_count"] == scored + abstained
+    if published:
+        assert public["external_support_scored_count"] == scored
+        assert public["external_support_abstention_count"] == abstained
+    else:
+        assert public["external_support_scored_count"] == "suppressed_lt_5"
+        assert public["external_support_abstention_count"] == "suppressed_lt_5"
+
+
+def test_public_external_support_aggregates_do_not_reconstruct_a_suppressed_split():
+    from moat.evals.reporting import public_committee
+
+    status_denominators = {"Reject": 12, "Watch": 12, "Investigate": 13}
+    association = {"denominator": 37, "value": 0.25, "kind": "exploratory"}
+    public = public_committee({
+        "eligible_screen_passer_count": 40, "committee_scored_count": 40,
+        "committee_abstention_count": 0, "committee_coverage_rate": 1.0,
+        "external_support_scored_count": 37, "external_support_abstention_count": 3,
+        "investigate_support_composition": {
+            "strong": 5, "weak": 5, "ambiguous": 2, "contradicted": 1, "abstain": 0,
+        },
+        "investigate_support_composition_denominator": 13,
+        "investigate_contradiction_rate": {
+            "numerator": 1, "denominator": 13, "value": 1 / 13,
+            "kind": "descriptive_conservative",
+        },
+        "support_composition_by_status": {
+            status: {
+                "strong": denominator, "weak": 0, "ambiguous": 0,
+                "contradicted": 0, "abstain": 0,
+            }
+            for status, denominator in status_denominators.items()
+        },
+        "support_composition_by_status_denominators": status_denominators,
+        "research_priority_enrichment": {
+            status: {
+                "supported_numerator": denominator, "denominator": denominator,
+                "supported_rate": 1.0,
+                "composition": {
+                    "strong": denominator, "weak": 0, "ambiguous": 0, "contradicted": 0,
+                },
+            }
+            for status, denominator in status_denominators.items()
+        },
+        "priority_support_spearman_rho": association,
+        "watch_score_external_support_trend": association,
+        "direct_status_star_rating_spearman_rho": association,
+    })
+
+    assert public["external_support_scored_count"] == "suppressed_lt_5"
+    assert set(public["investigate_support_composition"].values()) == {"suppressed_lt_5"}
+    assert public["investigate_support_composition_denominator"] == "suppressed_lt_5"
+    assert public["investigate_contradiction_rate"]["denominator"] == "suppressed_lt_5"
+    assert public["investigate_contradiction_rate"]["value"] is None
+    for cells in public["support_composition_by_status"].values():
+        assert set(cells.values()) == {"suppressed_lt_5"}
+    assert set(public["support_composition_by_status_denominators"].values()) == {
+        "suppressed_lt_5"
+    }
+    for values in public["research_priority_enrichment"].values():
+        assert values["supported_numerator"] == "suppressed_lt_5"
+        assert values["denominator"] == "suppressed_lt_5"
+        assert values["supported_rate"] is None
+        assert set(values["composition"].values()) == {"suppressed_lt_5"}
+    assert public["priority_support_spearman_rho"]["denominator"] == "suppressed_lt_5"
+    assert public["priority_support_spearman_rho"]["value"] is None
+    assert public["watch_score_external_support_trend"]["denominator"] == "suppressed_lt_5"
+    assert public["direct_status_star_rating_spearman_rho"]["denominator"] == 37
+
+
 def test_paired_valuation_keeps_cohorts_separate_and_requires_benchmark_eligibility():
     from moat.evals.valuation import paired_valuation
 

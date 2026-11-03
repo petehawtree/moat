@@ -68,6 +68,11 @@ specification.
 - Reject/Watch/Investigate are ordered 0/1/2 for exploratory association.
   Direct star-rating association accepts numeric, textual numeric, and star
   glyph forms and remains secondary.
+- Amendment 1 makes every quantitative-only external-support classification
+  `abstain`. The abstention is counted separately and excluded from support
+  composition, enrichment, contradiction-rate and trend denominators. It does
+  not change committee workflow coverage, Tier A or the secondary direct
+  status-versus-star-rating association.
 
 ## Noise floor and replay choices (§12 and Amendment 1)
 

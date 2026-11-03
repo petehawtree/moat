@@ -635,6 +635,49 @@ def test_committee_support_and_persona_cap_counterfactuals(synthetic_inputs):
     assert aaa_persona["counterfactuals"]["Bear_cap_disabled"]["status"] == "Investigate"
 
 
+def test_quantitative_only_external_support_abstains_but_remains_in_coverage_and_star_analysis(
+    synthetic_inputs,
+):
+    baseline, _, _, records = synthetic_inputs
+    quantitative_records = [dict(record) for record in records]
+    next(record for record in quantitative_records if record["ticker"] == "AAA")[
+        "coverage_tier"
+    ] = "quantitative"
+    with ImmutableDatabase(baseline, "baseline-v1") as db:
+        details, summary = evaluate_committee(
+            db,
+            committee_run_id=RUN_IDS["baseline"]["committee"],
+            screen_run_id=RUN_IDS["baseline"]["screen"],
+            benchmark_records=quantitative_records,
+        )
+        _, tier_a, _ = evaluate_tier_a(
+            db,
+            run_id=RUN_IDS["baseline"]["screen"],
+            benchmark_records=quantitative_records,
+            bootstrap_seed=61001,
+            bootstrap_replicates=10_000,
+        )
+    aaa = next(row for row in details if row["ticker"] == "AAA")
+    assert aaa["committee_outcome"] == "Investigate"
+    assert aaa["external_support"] == "abstain"
+    assert summary["eligible_screen_passer_count"] == 3
+    assert summary["committee_scored_count"] == 1
+    assert summary["committee_abstention_count"] == 2
+    assert summary["committee_coverage_rate"] == pytest.approx(1 / 3)
+    assert summary["external_support_scored_count"] == 0
+    assert summary["external_support_abstention_count"] == 1
+    assert summary["investigate_support_composition"] == {
+        "strong": 0, "weak": 0, "ambiguous": 0, "contradicted": 0, "abstain": 1,
+    }
+    assert summary["investigate_support_composition_denominator"] == 0
+    assert summary["support_composition_by_status_denominators"]["Investigate"] == 0
+    assert summary["investigate_contradiction_rate"]["denominator"] == 0
+    assert summary["priority_support_spearman_rho"]["denominator"] == 0
+    assert summary["direct_status_star_rating_spearman_rho"]["denominator"] == 1
+    assert tier_a["screen_scored_count"] == 5
+    assert tier_a["metrics"]["wide_precision"]["value"] == pytest.approx(1 / 3)
+
+
 def test_noise_floor_optional_and_cross_snapshot_bundle_equivalence(synthetic_inputs, tmp_path):
     _, candidate, _, _ = synthetic_inputs
     with ImmutableDatabase(candidate, "candidate-v1") as db:
@@ -1277,9 +1320,14 @@ def test_public_rates_do_not_reveal_a_small_complement_cell():
     public = public_committee({
         "eligible_screen_passer_count": 8, "committee_scored_count": 8,
         "committee_abstention_count": 0, "committee_coverage_rate": 1.0,
+        "external_support_scored_count": 8, "external_support_abstention_count": 0,
         "investigate_support_composition": {},
+        "investigate_support_composition_denominator": 8,
         "investigate_contradiction_rate": {"numerator": 0, "denominator": 8, "value": 0.0, "kind": "descriptive_conservative"},
         "support_composition_by_status": {},
+        "support_composition_by_status_denominators": {
+            "Reject": 8, "Watch": 8, "Investigate": 8,
+        },
         "research_priority_enrichment": enrichment,
         "priority_support_spearman_rho": association,
         "watch_score_external_support_trend": association,

@@ -15,7 +15,13 @@ SUPPORT_CATEGORIES = ("strong", "weak", "ambiguous", "contradicted", "abstain")
 _SUPPORT_ORDINAL = {"contradicted": 0.0, "ambiguous": 1.0, "weak": 2.0, "strong": 3.0}
 
 
-def external_support(moat_label: str | None, valuation_class: str) -> str:
+def external_support(
+    moat_label: str | None,
+    valuation_class: str,
+    coverage_tier: str | None = None,
+) -> str:
+    if coverage_tier == "quantitative":
+        return "abstain"
     if moat_label == "None" or valuation_class == "Expensive":
         return "contradicted"
     if moat_label is None or valuation_class == "Abstain":
@@ -53,7 +59,11 @@ def evaluate_committee(
             or not math.isfinite(verdict["overall_score"])
         ):
             verdict = None
-        support = external_support(source.get("economic_moat") if source else None, benchmark_value["classification"])
+        support = external_support(
+            source.get("economic_moat") if source else None,
+            benchmark_value["classification"],
+            source.get("coverage_tier") if source else None,
+        )
         details.append({
             "ticker": ticker,
             "sector": passers[ticker]["sector"],
@@ -70,7 +80,12 @@ def evaluate_committee(
 
     scored = [row for row in details if row["committee_outcome"] != "Abstain"]
     investigates = [row for row in scored if row["committee_outcome"] == "Investigate"]
-    contradicted = sum(row["external_support"] == "contradicted" for row in investigates)
+    supported_investigates = [
+        row for row in investigates if row["external_support"] != "abstain"
+    ]
+    contradicted = sum(
+        row["external_support"] == "contradicted" for row in supported_investigates
+    )
     by_status = {
         status: {category: sum(row["committee_outcome"] == status and row["external_support"] == category for row in scored) for category in SUPPORT_CATEGORIES}
         for status in ("Reject", "Watch", "Investigate")
@@ -93,14 +108,24 @@ def evaluate_committee(
         "committee_scored_count": len(scored),
         "committee_abstention_count": len(details) - len(scored),
         "committee_coverage_rate": len(scored) / len(details) if details else None,
+        "external_support_scored_count": sum(row["external_support"] != "abstain" for row in scored),
+        "external_support_abstention_count": sum(row["external_support"] == "abstain" for row in scored),
         "investigate_support_composition": {category: sum(row["external_support"] == category for row in investigates) for category in SUPPORT_CATEGORIES},
+        "investigate_support_composition_denominator": len(supported_investigates),
         "investigate_contradiction_rate": {
             "numerator": contradicted,
-            "denominator": len(investigates),
-            "value": contradicted / len(investigates) if investigates else None,
+            "denominator": len(supported_investigates),
+            "value": contradicted / len(supported_investigates) if supported_investigates else None,
             "kind": "descriptive_conservative",
         },
         "support_composition_by_status": by_status,
+        "support_composition_by_status_denominators": {
+            status: sum(
+                row["committee_outcome"] == status and row["external_support"] != "abstain"
+                for row in scored
+            )
+            for status in ("Reject", "Watch", "Investigate")
+        },
         "research_priority_enrichment": enrichment,
         "priority_support_spearman_rho": {
             "denominator": len(ranking),

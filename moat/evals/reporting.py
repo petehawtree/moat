@@ -115,9 +115,14 @@ def public_committee(summary: dict) -> dict:
         "committee_scored_count": summary["committee_scored_count"],
         "committee_abstention_count": summary["committee_abstention_count"],
         "committee_coverage_rate": summary["committee_coverage_rate"],
+        "external_support_scored_count": _suppressed_count(summary["external_support_scored_count"]),
+        "external_support_abstention_count": _suppressed_count(summary["external_support_abstention_count"]),
         "investigate_support_composition": {
             key: _suppressed_count(value) for key, value in summary["investigate_support_composition"].items()
         },
+        "investigate_support_composition_denominator": _suppressed_count(
+            summary["investigate_support_composition_denominator"]
+        ),
         "investigate_contradiction_rate": (
             _public_metric(summary["investigate_contradiction_rate"])
             if investigate_denominator >= PUBLIC_DISCLOSURE_MIN_CELL
@@ -126,6 +131,10 @@ def public_committee(summary: dict) -> dict:
         "support_composition_by_status": {
             status: {key: _suppressed_count(value) for key, value in cells.items()}
             for status, cells in summary["support_composition_by_status"].items()
+        },
+        "support_composition_by_status_denominators": {
+            status: _suppressed_count(value)
+            for status, value in summary["support_composition_by_status_denominators"].items()
         },
         "research_priority_enrichment": {
             status: {

@@ -73,6 +73,13 @@ suppressed. Exceptions and logs contain rule names and counts only.
 Material choices not fixed by the specification are recorded in
 `eval-harness-v1-implementation-choices.md` rather than being hidden in code.
 
+For §8 external-support metrics, quantitative-only benchmark coverage is an
+explicit abstention under Amendment 1. Those records remain in Tier A,
+screen-passer eligibility, committee scored/abstention and coverage accounting,
+and the separate secondary committee-status versus star-rating analysis. The
+support composition, enrichment and trend denominators use only non-abstaining
+external-support records.
+
 An authoritative run is deliberately not implied by the command. Its manifest
 must say `authoritative`, bind both frozen specification documents, bind a clean
 committed harness, and pass all frozen preflight checks.

@@ -8,7 +8,7 @@ from .committee_eval import evaluate_committee, paired_committee
 from .database import ImmutableDatabase
 from .errors import ManifestError
 from .manifest import load_manifest
-from .noise_floor import evaluate_noise_floor
+from .noise_floor import apply_noise_interpretation, evaluate_noise_floor
 from .persona import evaluate_persona_influence
 from .preflight import run_preflight
 from .reporting import write_private_outputs, write_public_report
@@ -130,6 +130,9 @@ def run_evaluation(
                     runtime_provenance=noise_floor["runtime_provenance"],
                     invalid_tickers=set(preflight.record_issues["candidate"]),
                 )
+    committee_paired, noise_summary = apply_noise_interpretation(
+        committee_paired, noise_summary
+    )
     replay_inputs = load_replay_inputs(per_fix_replay_input) if per_fix_replay_input else None
     baseline_config = manifest["run_sets"]["baseline"]
     with ImmutableDatabase(

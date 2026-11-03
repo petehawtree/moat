@@ -136,25 +136,38 @@ def paired_committee(baseline: list[dict], candidate: list[dict]) -> dict:
     after = {row["ticker"]: row for row in candidate if row["committee_outcome"] != "Abstain"}
     common = sorted(set(before) & set(after))
     records = []
+    status_pairs = []
+    severity_pairs = []
     for ticker in common:
         left, right = before[ticker], after[ticker]
+        score_delta = right["overall_score"] - left["overall_score"]
         records.append({
             "ticker": ticker,
             "baseline_score": left["overall_score"],
             "candidate_score": right["overall_score"],
-            "score_delta": right["overall_score"] - left["overall_score"],
-            "baseline_status": left["committee_outcome"],
-            "candidate_status": right["committee_outcome"],
-            "status_ordinal_delta": STATUS_ORDINAL[right["committee_outcome"]] - STATUS_ORDINAL[left["committee_outcome"]],
+            "score_delta": score_delta,
+            "absolute_overall_score_delta": abs(score_delta),
         })
-    transitions = Counter((row["baseline_status"], row["candidate_status"]) for row in records)
+        status_pairs.append((left["committee_outcome"], right["committee_outcome"]))
+        severity_pairs.append((left["bear_case_severity"], right["bear_case_severity"]))
+    transitions = Counter(status_pairs)
+    severity_transitions = Counter(severity_pairs)
+    status_flip_count = sum(left != right for left, right in status_pairs)
+    severity_change_count = sum(left != right for left, right in severity_pairs)
     return {
         "claim_boundary": "combined Phase 1 effect; committee movement is descriptive until compared with the unchanged-input noise floor",
         "paired_common_count": len(records),
         "baseline_only_count": len(set(before) - set(after)),
         "candidate_only_count": len(set(after) - set(before)),
         "status_transitions": {f"{left}_to_{right}": count for (left, right), count in sorted(transitions.items())},
-        "status_flip_count": sum(row["baseline_status"] != row["candidate_status"] for row in records),
+        "status_flip_count": status_flip_count,
+        "status_flip_rate": status_flip_count / len(records) if records else None,
+        "bear_severity_transitions": {
+            f"{left}_to_{right}": count
+            for (left, right), count in sorted(severity_transitions.items())
+        },
+        "bear_severity_change_count": severity_change_count,
+        "bear_severity_change_rate": severity_change_count / len(records) if records else None,
         "mean_overall_score_delta": sum(row["score_delta"] for row in records) / len(records) if records else None,
         "records": records,
     }

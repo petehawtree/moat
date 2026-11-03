@@ -10,6 +10,10 @@ from .benchmark import canonical_ticker
 from .constants import COMMITTEE_BUNDLE_METHOD, COMPONENT_WEIGHTS, RUN_IDS
 from .database import ImmutableDatabase
 
+AT_OR_BELOW_BOUNDARY = "indistinguishable from one-run model variation"
+ABOVE_BOUNDARY = "exceeds the observed practical noise boundary"
+NEAREST_RANK_METHOD = "empirical_95th_percentile_nearest_rank_ceil_0.95_n"
+
 
 def _distribution(values: list[float]) -> dict:
     if not values:
@@ -55,6 +59,78 @@ def _committee_output_is_valid(row: dict) -> bool:
     return math.isclose(
         recomputed_score, row["overall_score"], rel_tol=1e-9, abs_tol=1e-9
     ) and row["status"] == expected_status
+
+
+def nearest_rank_percentile(values: list[float], probability: float) -> float | None:
+    """Return the one-based nearest-rank empirical percentile."""
+    if not values:
+        return None
+    if not 0 < probability <= 1:
+        raise ValueError("nearest-rank probability must be in (0, 1]")
+    ordered = sorted(values)
+    return ordered[math.ceil(probability * len(ordered)) - 1]
+
+
+def apply_noise_interpretation(
+    committee_paired: dict,
+    noise_summary: dict,
+) -> tuple[dict, dict]:
+    """Apply Amendment 1's overall-score-only interpretation rule."""
+    paired = {
+        **committee_paired,
+        "records": [dict(record) for record in committee_paired.get("records", [])],
+    }
+    summary = dict(noise_summary)
+    for record in paired["records"]:
+        record.pop("noise_interpretation", None)
+    if summary.get("status") != "available":
+        return paired, summary
+    boundary = summary["practical_noise_boundary"]["value"]
+    if boundary is None:
+        return paired, summary
+    for record in paired["records"]:
+        absolute_delta = abs(record["score_delta"])
+        record["absolute_overall_score_delta"] = absolute_delta
+        record["noise_interpretation"] = (
+            AT_OR_BELOW_BOUNDARY if absolute_delta <= boundary else ABOVE_BOUNDARY
+        )
+    summary["overall_score_noise_interpretation_counts"] = {
+        AT_OR_BELOW_BOUNDARY: sum(
+            record["noise_interpretation"] == AT_OR_BELOW_BOUNDARY
+            for record in paired["records"]
+        ),
+        ABOVE_BOUNDARY: sum(
+            record["noise_interpretation"] == ABOVE_BOUNDARY
+            for record in paired["records"]
+        ),
+    }
+    baseline_denominator = paired["paired_common_count"]
+    replicate_denominator = summary["paired_company_count"]
+    summary["status_flip_comparison"] = {
+        "baseline_candidate": {
+            "count": paired["status_flip_count"],
+            "denominator": baseline_denominator,
+            "rate": paired["status_flip_count"] / baseline_denominator if baseline_denominator else None,
+        },
+        "candidate_replicate": {
+            "count": summary["status_flip_count"],
+            "denominator": replicate_denominator,
+            "rate": summary["status_flip_count"] / replicate_denominator if replicate_denominator else None,
+        },
+    }
+    summary["bear_severity_change_comparison"] = {
+        "baseline_candidate": {
+            "count": paired["bear_severity_change_count"],
+            "denominator": baseline_denominator,
+            "rate": paired["bear_severity_change_count"] / baseline_denominator if baseline_denominator else None,
+        },
+        "candidate_replicate": {
+            "count": summary["bear_severity_change_count"],
+            "denominator": replicate_denominator,
+            "rate": summary["bear_severity_change_count"] / replicate_denominator if replicate_denominator else None,
+        },
+    }
+    return paired, summary
 
 
 def evaluate_noise_floor(
@@ -206,22 +282,30 @@ def evaluate_noise_floor(
         set(stored) - invalid_tickers - stored_output_invalid - replicate_output_invalid
     )
     records = []
+    status_pairs = []
+    severity_pairs = []
     for ticker in paired_tickers:
         left, right = stored[ticker], replicate[ticker]
         component_deltas = {
             component: right[component] - left[component] for component in COMPONENT_WEIGHTS
         }
+        overall_delta = right["overall_score"] - left["overall_score"]
         records.append({
             "ticker": ticker,
             "component_score_deltas": component_deltas,
-            "overall_score_delta": right["overall_score"] - left["overall_score"],
-            "stored_status": left["status"],
-            "replicate_status": right["status"],
-            "status_flip": left["status"] != right["status"],
-            "stored_bear_severity": left["bear_case_severity"],
-            "replicate_bear_severity": right["bear_case_severity"],
-            "bear_severity_changed": left["bear_case_severity"] != right["bear_case_severity"],
+            "overall_score_delta": overall_delta,
+            "absolute_overall_score_delta": abs(overall_delta),
         })
+        status_pairs.append((left["status"], right["status"]))
+        severity_pairs.append((left["bear_case_severity"], right["bear_case_severity"]))
+    if not records:
+        return [], {
+            "status": "unavailable",
+            "reason": "no_preflight_valid_paired_companies",
+            "interpretation": "committee baseline/candidate movement remains descriptive only",
+        }
+    absolute_deltas = [row["absolute_overall_score_delta"] for row in records]
+    boundary = nearest_rank_percentile(absolute_deltas, 0.95)
     summary = {
         "status": "available",
         "replicate_run_id": replicate_run_id,
@@ -237,12 +321,24 @@ def evaluate_noise_floor(
             for component in COMPONENT_WEIGHTS
         },
         "overall_score_delta_distribution": _distribution([row["overall_score_delta"] for row in records]),
-        "status_flip_count": sum(row["status_flip"] for row in records),
+        "absolute_overall_score_delta_distribution": _distribution(absolute_deltas),
+        "practical_noise_boundary": {
+            "value": boundary,
+            "cohort_size": len(absolute_deltas),
+            "calculation_method": NEAREST_RANK_METHOD,
+        },
+        "status_flip_count": sum(left != right for left, right in status_pairs),
+        "status_flip_rate": sum(left != right for left, right in status_pairs) / len(status_pairs),
         "status_transitions": {
             f"{left}_to_{right}": count
-            for (left, right), count in sorted(Counter((row["stored_status"], row["replicate_status"]) for row in records).items())
+            for (left, right), count in sorted(Counter(status_pairs).items())
         },
-        "bear_severity_change_count": sum(row["bear_severity_changed"] for row in records),
+        "bear_severity_change_count": sum(left != right for left, right in severity_pairs),
+        "bear_severity_change_rate": sum(left != right for left, right in severity_pairs) / len(severity_pairs),
+        "bear_severity_transitions": {
+            f"{left}_to_{right}": count
+            for (left, right), count in sorted(Counter(severity_pairs).items())
+        },
         "limitation": "one replicate estimates a practical cross-company noise floor, not the full model sampling distribution",
     }
     return records, summary

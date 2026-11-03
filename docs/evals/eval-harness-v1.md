@@ -48,6 +48,16 @@ noise calculation; they do not invalidate the cross-snapshot bundle proof.
 The harness does not fall back to selected-input comparisons. A missing or
 invalid experiment is unavailable and committee movement remains descriptive.
 
+When the experiment is available, the harness sorts the preflight-valid
+absolute stored-candidate/replicate overall-score deltas and selects one-based
+rank `ceil(0.95 * n)`. Only paired baseline/candidate overall-score movement
+receives the frozen at-or-below or above-boundary company-level label.
+Component deltas remain diagnostic without labels. Status flips and Bear
+severity changes are emitted only as aggregate baseline/candidate and
+candidate/replicate counts and rates. The private and public aggregate reports
+record the boundary, cohort size, nearest-rank method, counts under each frozen
+overall-score meaning and the one-replicate limitation.
+
 Per-fix replay is also optional. `--per-fix-replay-input` binds a private JSONL
 file by hash. The file supplies isolated screen metric-status states or DCF
 scenario states before and after one fix, supporting evidence, and an explicit

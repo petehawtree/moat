@@ -195,9 +195,17 @@ def public_noise_floor(summary: dict) -> dict:
         "replicate_preflight_invalid_abstention_count": summary["replicate_preflight_invalid_abstention_count"],
         "component_score_delta_distributions": summary["component_score_delta_distributions"],
         "overall_score_delta_distribution": summary["overall_score_delta_distribution"],
+        "absolute_overall_score_delta_distribution": summary["absolute_overall_score_delta_distribution"],
+        "practical_noise_boundary": summary["practical_noise_boundary"],
+        "overall_score_noise_interpretation_counts": summary["overall_score_noise_interpretation_counts"],
         "status_flip_count": summary["status_flip_count"],
+        "status_flip_rate": summary["status_flip_rate"],
         "status_transitions": summary["status_transitions"],
         "bear_severity_change_count": summary["bear_severity_change_count"],
+        "bear_severity_change_rate": summary["bear_severity_change_rate"],
+        "bear_severity_transitions": summary["bear_severity_transitions"],
+        "status_flip_comparison": summary["status_flip_comparison"],
+        "bear_severity_change_comparison": summary["bear_severity_change_comparison"],
         "limitation": summary["limitation"],
     }
 

@@ -88,8 +88,16 @@ specification.
   manifest runtime-provenance statement is also required. Without it the
   experiment is unavailable rather than silently assumed equivalent.
 - Noise distributions report count, minimum, median, mean and maximum for each
-  component and overall score, plus status/severity changes. One replicate is
-  explicitly not treated as a full sampling distribution.
+  component and for signed and absolute overall-score movement. The practical
+  boundary is the Amendment 1 nearest-rank 95th percentile of absolute overall
+  deltas.
+- The two frozen company-level meanings are applied only to paired
+  baseline/candidate overall-score movement. Component deltas have no noise
+  label. Individual status and Bear-severity changes are not emitted by the
+  paired comparison; only aggregate counts, rates and transition tables are
+  retained, with baseline/candidate and candidate/replicate rates shown side
+  by side.
+- One replicate is explicitly not treated as a full sampling distribution.
 - Per-fix replay is never inferred from baseline/candidate differences. An
   optional private, hash-bound JSONL input must provide isolated before and
   counterfactual states, evidence, and `other_inputs_held_constant=true`.

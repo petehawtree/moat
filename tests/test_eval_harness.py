@@ -16,7 +16,14 @@ from moat.evals.constants import PROFILE_COLUMNS, RUN_IDS
 from moat.evals.database import ImmutableDatabase
 from moat.evals.errors import ManifestError, PreflightError
 from moat.evals.manifest import build_manifest, validate_manifest
-from moat.evals.noise_floor import evaluate_noise_floor
+from moat.evals.noise_floor import (
+    ABOVE_BOUNDARY,
+    AT_OR_BELOW_BOUNDARY,
+    NEAREST_RANK_METHOD,
+    apply_noise_interpretation,
+    evaluate_noise_floor,
+    nearest_rank_percentile,
+)
 from moat.evals.persona import evaluate_persona_influence
 from moat.evals.preflight import run_preflight, validate_paths
 from moat.evals.reporting import public_tier_a, public_tier_c
@@ -714,6 +721,112 @@ def test_preflight_marks_missing_bundle_capability_unavailable(synthetic_inputs,
     assert report.checks["noise_floor_experiment"] == (
         "unavailable:committee_bundle_equivalence_failed"
     )
+
+
+def test_nearest_rank_boundary_and_overall_score_labels_are_frozen():
+    assert nearest_rank_percentile([float(value) for value in range(1, 21)], 0.95) == 19.0
+    paired = {
+        "paired_common_count": 2,
+        "status_flip_count": 1,
+        "bear_severity_change_count": 0,
+        "records": [
+            {"ticker": "AAA", "score_delta": -2.0},
+            {"ticker": "BBB", "score_delta": 2.01},
+        ],
+    }
+    noise = {
+        "status": "available",
+        "paired_company_count": 20,
+        "status_flip_count": 2,
+        "bear_severity_change_count": 3,
+        "practical_noise_boundary": {
+            "value": 2.0,
+            "cohort_size": 20,
+            "calculation_method": NEAREST_RANK_METHOD,
+        },
+    }
+    interpreted, summary = apply_noise_interpretation(paired, noise)
+    assert interpreted["records"][0]["noise_interpretation"] == AT_OR_BELOW_BOUNDARY
+    assert interpreted["records"][1]["noise_interpretation"] == ABOVE_BOUNDARY
+    assert summary["status_flip_comparison"] == {
+        "baseline_candidate": {"count": 1, "denominator": 2, "rate": 0.5},
+        "candidate_replicate": {"count": 2, "denominator": 20, "rate": 0.1},
+    }
+    assert summary["overall_score_noise_interpretation_counts"] == {
+        AT_OR_BELOW_BOUNDARY: 1,
+        ABOVE_BOUNDARY: 1,
+    }
+
+
+def test_unavailable_noise_floor_emits_no_company_level_label():
+    paired = {
+        "paired_common_count": 1,
+        "status_flip_count": 0,
+        "bear_severity_change_count": 0,
+        "records": [{"ticker": "AAA", "score_delta": 0.1}],
+    }
+    interpreted, summary = apply_noise_interpretation(
+        paired,
+        {"status": "unavailable", "reason": "synthetic"},
+    )
+    assert "noise_interpretation" not in interpreted["records"][0]
+    assert "status_flip_comparison" not in summary
+
+
+def test_noise_floor_private_and_public_outputs_follow_amendment_interpretation(
+    synthetic_inputs, tmp_path
+):
+    baseline, candidate, benchmark_dir, _ = synthetic_inputs
+    replicate = tmp_path / "replicate.db"
+    _create_replicate_db(candidate, replicate)
+    manifest = build_manifest(
+        repo_root=REPO_ROOT,
+        baseline_db=baseline,
+        candidate_db=candidate,
+        benchmark_dir=benchmark_dir,
+        noise_floor_run_id="noise-run",
+        noise_floor_db=replicate,
+        noise_floor_runtime_provenance="synthetic equivalent runtime",
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    private = tmp_path / "private"
+    public = tmp_path / "public.json"
+    run_evaluation(
+        repo_root=REPO_ROOT,
+        baseline_db=baseline,
+        candidate_db=candidate,
+        benchmark_dir=benchmark_dir,
+        manifest_path=manifest_path,
+        private_output_dir=private,
+        public_output=public,
+        noise_floor_db=replicate,
+        noise_floor_run_id="noise-run",
+        verify_git=False,
+    )
+    paired = json.loads((private / "committee-paired.json").read_text())
+    paired_record = paired["records"][0]
+    assert paired_record["noise_interpretation"] == AT_OR_BELOW_BOUNDARY
+    assert not {"baseline_status", "candidate_status", "status_flip"} & set(paired_record)
+    noise_record = json.loads(
+        (private / "committee-noise-floor-records.jsonl").read_text().splitlines()[0]
+    )
+    assert "noise_interpretation" not in noise_record
+    assert not {
+        "stored_status", "replicate_status", "status_flip",
+        "stored_bear_severity", "replicate_bear_severity", "bear_severity_changed",
+    } & set(noise_record)
+    assert all("noise" not in key for key in noise_record["component_score_deltas"])
+    public_data = json.loads(public.read_text())
+    public_noise = public_data["sensitivity_analyses"]["committee_noise_floor"]
+    assert public_noise["practical_noise_boundary"]["calculation_method"] == NEAREST_RANK_METHOD
+    assert public_noise["status_flip_comparison"]["baseline_candidate"]["count"] == 1
+    assert public_noise["status_flip_comparison"]["candidate_replicate"]["count"] == 1
+    assert public_noise["overall_score_noise_interpretation_counts"] == {
+        AT_OR_BELOW_BOUNDARY: 1,
+        ABOVE_BOUNDARY: 0,
+    }
+    assert "AAA" not in json.dumps(public_noise)
 
 
 @pytest.mark.parametrize(

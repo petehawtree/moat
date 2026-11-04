@@ -32,10 +32,13 @@ Guarantees:
   different or extra. The freeze file is pinned by path and SHA-256. The
   candidate code scope (CANDIDATE_CODE_SCOPE) must be byte-identical to
   CANDIDATE_COMMIT. The working tree must have no tracked changes and no
-  untracked files. Every loaded repository module must equal its HEAD blob,
-  and every one in the candidate scope must also equal its CANDIDATE_COMMIT
-  blob, so an ignored or untracked file cannot shadow candidate code. The
-  loaded-module check runs again after the stage.
+  untracked files. Every loaded module must come from the repository, this
+  interpreter's site-packages or its standard library. Anything else is
+  refused, e.g. a module reached through PYTHONPATH. A repository module must
+  equal its HEAD blob, and one in the candidate scope must also equal its
+  CANDIDATE_COMMIT blob, so an ignored or untracked file cannot shadow
+  candidate code. A site-packages file must match its distribution's RECORD
+  hash. The loaded-module check runs again after the stage.
 - Input validation before any call. After the cache is cleared, the working
   copy is read back immutably and compared with the source. For each stored
   ticker, the committee bundle key is recomputed in both files. It must
@@ -48,8 +51,11 @@ Guarantees:
   run ID are recorded.
 - One shot. There is no resume and no retry: a resumed run would turn
   finished rows into cache hits. Any failure leaves the attempt unusable.
-- Ownership. Every file the runner writes is acquired with O_CREAT|O_EXCL or
-  os.link, so none can overwrite an existing file. That covers the working
+- Ownership. Each attempt works in its own directory under work/. The
+  directory is created with os.mkdir, which fails if it exists, so SQLite
+  sidecars beside the working copy can only be the attempt's own. Every file
+  the runner writes is acquired with O_CREAT|O_EXCL or os.link, so none can
+  overwrite an existing file. That covers the working
   copy, the stage log, the sealed database, the provenance record and the
   operator log. Each owned file is tracked from creation. If the attempt
   fails, every owned file is marked .UNUSABLE, including any already moved
@@ -70,6 +76,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import dataclasses
 import hashlib
@@ -79,9 +86,11 @@ import json
 import os
 import platform
 import re
+import secrets
 import sqlite3
 import subprocess
 import sys
+import sysconfig
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
@@ -124,6 +133,10 @@ CANDIDATE_CODE_SCOPE = ("moat", "scripts/run_pipeline.py", "requirements.txt",
 # Repository files that may differ from CANDIDATE_COMMIT when loaded. They
 # must still equal HEAD.
 NON_CANDIDATE_CODE = ("moat/evals/", "scripts/run_committee_replicate.py")
+# uv's virtualenv shim: the one site-packages file no distribution's RECORD
+# lists. Same content in the candidate and shared venvs.
+VENV_SHIM = "_virtualenv.py"
+VENV_SHIM_SHA256 = "cfb3db86aaa53bb62b5ff764970bec2d71c9228590a0ebec57f6ec926cc0bf1a"
 # Imported lazily inside run_committee_stage. Imported up front so that the
 # loaded-module check sees them before the paid call.
 STAGE_DEPENDENCIES = ("anthropic", "moat.config", "moat.analysis.pricing", "moat.committee.committee",
@@ -228,6 +241,11 @@ def _installed_distributions() -> list[str]:
     return [f"{d.metadata['Name']}=={d.version}" for d in metadata.distributions()]
 
 
+def _attempt_name() -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"attempt-{stamp}-{os.getpid()}-{secrets.token_hex(4)}"
+
+
 def _loaded_modules() -> dict:
     return {name: getattr(m, "__file__", None) for name, m in list(sys.modules.items())}
 
@@ -263,30 +281,79 @@ def _is_repo_module(name: str) -> bool:
     return name in ("moat", "run_pipeline", "run_committee_replicate") or name.startswith("moat.")
 
 
-def code_identity_problems(git: Callable, modules: dict) -> dict:
-    """Count the ways the loaded code could differ from the candidate's.
+def _interpreter_roots() -> dict:
+    """The only places outside the repository that code may load from:
+    this interpreter's site-packages and its standard library."""
+    paths = sysconfig.get_paths()
+    site = sorted({Path(paths[k]).resolve() for k in ("purelib", "platlib")})
+    std = sorted({Path(paths[k]).resolve() for k in ("stdlib", "platstdlib")})
+    return {"site": site, "stdlib": std}
 
-    Every module whose file lies in this repository (and outside the
-    interpreter's prefix) must equal its HEAD blob. Unless it is listed in
-    NON_CANDIDATE_CODE, it must also equal its CANDIDATE_COMMIT blob. A moat
-    module loaded from outside the repository counts as shadowed."""
+
+def _distribution_records() -> dict:
+    """{resolved file path: (hash algorithm, urlsafe-b64 digest)} from every
+    installed distribution's RECORD."""
+    out = {}
+    for d in metadata.distributions():
+        for f in d.files or ():
+            if f.hash:
+                out[Path(d.locate_file(f)).resolve()] = (f.hash.mode, f.hash.value)
+    return out
+
+
+def _record_digest(path: Path, algorithm: str) -> str:
+    return base64.urlsafe_b64encode(hashlib.new(algorithm, path.read_bytes()).digest()).rstrip(b"=").decode()
+
+
+def code_identity_problems(git: Callable, modules: dict, roots: dict | None = None,
+                           records: Callable = _distribution_records) -> dict:
+    """List the ways the loaded code could differ from the candidate's. Every
+    loaded module with a file must come from one of three origins:
+
+    - this repository. The file must equal its HEAD blob and, unless listed
+      in NON_CANDIDATE_CODE, its CANDIDATE_COMMIT blob;
+    - this interpreter's site-packages. The file must be listed in an
+      installed distribution's RECORD with a matching hash. The one
+      exception is the virtualenv shim, which is pinned by hash. Together
+      with the exact freeze match, this means every third-party file that
+      runs is the approved distribution's own file;
+    - this interpreter's standard library (pinned by CANDIDATE_PYTHON).
+
+    Anything else, e.g. a module reached through PYTHONPATH, is refused. A
+    moat module from anywhere but the repository counts as shadowed."""
+    roots = roots or _interpreter_roots()
     head, cand = _tree_blobs(git, "HEAD"), _tree_blobs(git, CANDIDATE_COMMIT)
-    prefixes = {Path(p).resolve() for p in (sys.prefix, sys.base_prefix, sys.exec_prefix)}
     repo = REPO_ROOT.resolve()
     files: dict[str, str] = {}
-    problems = {"shadowed_outside_repository": [], "not_at_head": [], "differs_from_head": [],
+    site_files: list[tuple[str, Path]] = []
+    problems = {"shadowed_outside_repository": [], "loaded_outside_approved_roots": [],
+                "not_in_any_record": [], "differs_from_record": [],
+                "not_at_head": [], "differs_from_head": [],
                 "not_at_candidate": [], "differs_from_candidate": []}
     for name, file in sorted(modules.items()):
         if not file:
             continue
         path = Path(file).resolve()
-        under_prefix = any(_inside(path, p) for p in prefixes if not _inside(repo, p))
-        if _is_repo_module(name) and (under_prefix or not _inside(path, repo)):
+        in_site = any(_inside(path, r) for r in roots["site"])
+        in_std = not in_site and any(_inside(path, r) for r in roots["stdlib"])
+        in_repo = not (in_site or in_std) and _inside(path, repo)
+        if _is_repo_module(name) and not in_repo:
             problems["shadowed_outside_repository"].append(name)
-            continue
-        if under_prefix or not _inside(path, repo):
-            continue
-        files[path.relative_to(repo).as_posix()] = name
+        elif in_site:
+            site_files.append((name, path))
+        elif in_repo:
+            files[path.relative_to(repo).as_posix()] = name
+        elif not in_std:
+            problems["loaded_outside_approved_roots"].append(f"{name}: {path}")
+    if site_files:
+        rec = records()
+        for name, path in site_files:
+            if path.name == VENV_SHIM and path.parent in roots["site"] and sha256_file(path) == VENV_SHIM_SHA256:
+                continue
+            if path not in rec:
+                problems["not_in_any_record"].append(f"{name}: {path}")
+            elif _record_digest(path, rec[path][0]) != rec[path][1]:
+                problems["differs_from_record"].append(f"{name}: {path}")
     rels = sorted(files)
     shas = git("hash-object", "--stdin-paths", stdin="\n".join(str(repo / r) for r in rels) + "\n").split() if rels else []
     for rel, sha in zip(rels, shas):
@@ -363,12 +430,16 @@ class ReplicateRunner:
         self.cfg = cfg
         self.hooks = hooks or Hooks()
         self.base = cfg.out_dir
-        self.work = self.base / "work" / "replicate-working.db"
+        # A directory per attempt, created with os.mkdir, which fails if the
+        # name exists. Nothing else writes into it, so the SQLite sidecars
+        # that appear beside the working copy are this attempt's own.
+        self.attempt_dir = self.base / "work" / _attempt_name()
+        self.work = self.attempt_dir / "replicate-working.db"
         self.sealed_dir = self.base / "sealed"
         self.log_lines: list[str] = []
         # Current paths of every file this runner created, in creation order.
         # The working copy's sidecars are covered by owned_sidecars instead,
-        # because SQLite creates them.
+        # because SQLite creates them inside the owned attempt directory.
         self.owned: list[Path] = []
         self.owned_sidecars = False
         self.sealed = False
@@ -412,6 +483,15 @@ class ReplicateRunner:
         self.owned.append(dst)
         os.unlink(src)
         self.owned.remove(src)
+
+    def _remove_attempt_dir(self) -> None:
+        """Remove the attempt directory once nothing owned is left in it.
+        rmdir fails on a non-empty directory, so nothing is ever deleted with
+        it. A leftover is logged and kept, and is not a failure."""
+        try:
+            os.rmdir(self.attempt_dir)
+        except OSError as exc:
+            self.log(f"note: attempt directory kept: {exc!r}")
 
     def _release(self, path: Path) -> None:
         os.unlink(path)
@@ -566,12 +646,16 @@ class ReplicateRunner:
             self.fail("precondition_tests_failed")
         facts["precondition_tests"] = tests
 
-        if self.work.exists() or _sidecars(self.work):
-            self.fail("working_copy_already_exists")
+        if os.path.lexists(self.attempt_dir):
+            self.fail("attempt_dir_already_exists", path=str(self.attempt_dir))
         return facts
 
     def _create_working_copy(self, src: Path, src_sha: str) -> None:
-        self.work.parent.mkdir(parents=True, exist_ok=True)
+        self.attempt_dir.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.mkdir(self.attempt_dir, 0o700)
+        except FileExistsError:
+            self.fail("attempt_dir_appeared_before_creation", path=str(self.attempt_dir))
         self.hooks.before_create()
         try:
             fd = os.open(self.work, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
@@ -657,6 +741,7 @@ class ReplicateRunner:
 
         if cfg.preflight_only:
             self._release(self.work)
+            self._remove_attempt_dir()
             self.log("preflight only: no API call made")
             self.log("PREFLIGHT PASSED; working copy deleted")
             return
@@ -669,7 +754,7 @@ class ReplicateRunner:
         if taken:
             self.fail("sealed_artifact_path_exists", paths=taken)
         # Acquired before the paid call, so a collision costs nothing.
-        stage_fd = self._open_exclusive(self.base / "work" / f"{run_id}.stage.log")
+        stage_fd = self._open_exclusive(self.attempt_dir / f"{run_id}.stage.log")
         self.stage_log = self.owned[-1]
 
         os.chmod(self.work, 0o644)
@@ -800,6 +885,7 @@ class ReplicateRunner:
         final_sha = sha256_file(final)
         prov = self._provenance(facts, deleted, started, completed, spend, expected, result, final, final_sha)
         self._write_exclusive(names["provenance"], json.dumps(prov, indent=2, sort_keys=True))
+        self._remove_attempt_dir()
         self.log(f"SEALED {final} sha256 {final_sha} bytes {final.stat().st_size}; provenance {names['provenance']}")
         self._write_exclusive(names["operator_log"], "\n".join(self.log_lines) + "\n")
         self.sealed = True

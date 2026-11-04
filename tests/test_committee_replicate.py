@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -186,8 +187,16 @@ def _run(runner, cost=0.01):
     return _with_patches(_fake_persona_patches(cost), runner.run)
 
 
+ATTEMPT = "attempt-test"
+
+
+@pytest.fixture(autouse=True)
+def _fixed_attempt_name(monkeypatch):
+    monkeypatch.setattr(rcr, "_attempt_name", lambda: ATTEMPT)
+
+
 def _work(env):
-    return env.out / "work" / "replicate-working.db"
+    return env.out / "work" / ATTEMPT / "replicate-working.db"
 
 
 def _files(root: Path) -> list[str]:
@@ -529,13 +538,60 @@ def test_cache_reuse_fails_validation(env):
 # Ownership and marking
 # ---------------------------------------------------------------------
 
-def test_preexisting_working_copy_is_never_touched(env):
+def test_preexisting_attempt_dir_is_never_touched(env):
     _work(env).parent.mkdir(parents=True)
     _work(env).write_bytes(b"foreign")
     runner = _runner(env)
     assert runner.run() == 2
     assert _work(env).read_bytes() == b"foreign"
     assert not list(_work(env).parent.glob("*.UNUSABLE*"))
+    assert any("attempt_dir_already_exists" in line for line in runner.log_lines)
+
+
+def test_attempt_dir_appearing_before_creation_is_never_touched(env, monkeypatch):
+    real = rcr.ReplicateRunner._preconditions
+
+    def pre(self):
+        facts = real(self)
+        _work(env).parent.mkdir(parents=True)
+        _work(env).write_bytes(b"foreign-race")
+        return facts
+    monkeypatch.setattr(rcr.ReplicateRunner, "_preconditions", pre)
+    runner = _runner(env)
+    assert runner.run() == 2
+    assert _work(env).read_bytes() == b"foreign-race"
+    assert not list(_work(env).parent.glob("*.UNUSABLE*"))
+    assert any("attempt_dir_appeared_before_creation" in line for line in runner.log_lines)
+
+
+def test_attempt_names_are_distinct_per_runner(monkeypatch):
+    monkeypatch.undo()  # drop the autouse fixed name
+    a = ReplicateRunner(Config(Path("/x"), Path("/y"), 1.0), _hooks())
+    b = ReplicateRunner(Config(Path("/x"), Path("/y"), 1.0), _hooks())
+    assert a.attempt_dir != b.attempt_dir
+    assert a.attempt_dir.parent == Path("/y/work") and a.attempt_dir.name.startswith("attempt-")
+
+
+def test_foreign_sidecars_outside_the_attempt_dir_are_never_renamed(env, monkeypatch):
+    # The reviewer's P2 mutation: a foreign -wal created just before
+    # get_connection fails. Another process's sidecars live beside its own
+    # database, never inside this attempt's freshly made directory.
+    work_root = env.out / "work"
+    foreign = [work_root / "replicate-working.db-wal", work_root / "attempt-other" / "replicate-working.db-wal"]
+
+    def broken_connection(path):
+        for f in foreign:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"foreign-wal")
+        raise sqlite3.OperationalError("stubbed connection failure")
+    monkeypatch.setattr(rcr, "get_connection", broken_connection)
+    runner = _runner(env)
+    assert runner.run() == 2
+    for f in foreign:
+        assert f.read_bytes() == b"foreign-wal"
+        assert not Path(str(f) + ".UNUSABLE").exists()
+    assert Path(str(_work(env)) + ".UNUSABLE").exists()
+    assert not any("MARK_FAILED" in line for line in runner.log_lines)
 
 
 def test_working_copy_appearing_before_creation_is_never_touched(env):
@@ -556,10 +612,9 @@ def test_foreign_sidecar_is_never_renamed(env):
 
 
 def test_stale_unusable_file_is_preserved(env):
-    _work(env).parent.mkdir(parents=True)
     stale = Path(str(_work(env)) + ".UNUSABLE")
-    stale.write_bytes(b"stale")
-    runner = _runner(env, _hooks(run_stage=lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))))
+    runner = _runner(env, _hooks(before_create=lambda: stale.write_bytes(b"stale"),
+                                 run_stage=lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))))
     assert runner.run() == 2
     assert stale.read_bytes() == b"stale"
     assert Path(str(_work(env)) + ".UNUSABLE.1").exists()
@@ -735,11 +790,10 @@ def test_foreign_sealed_artifact_appearing_during_stage_is_never_overwritten(env
 
 
 def test_foreign_working_stage_log_refused_before_the_call(env, fixed_run_id):
-    foreign = env.out / "work" / f"{FIXED_RUN}.stage.log"
-    foreign.parent.mkdir(parents=True)
-    foreign.write_bytes(b"foreign")
+    foreign = _work(env).parent / f"{FIXED_RUN}.stage.log"
     called = []
-    runner = _runner(env, _hooks(run_stage=lambda *a: called.append(a)))
+    runner = _runner(env, _hooks(before_create=lambda: foreign.write_bytes(b"foreign"),
+                                 run_stage=lambda *a: called.append(a)))
     assert runner.run() == 2
     assert called == []
     assert foreign.read_bytes() == b"foreign"
@@ -754,7 +808,7 @@ def test_stage_failure_marks_owned_stage_log(env, fixed_run_id):
         raise RuntimeError("stubbed API failure")
     runner = _runner(env, _hooks(run_stage=boom))
     assert runner.run() == 2
-    stage_log = env.out / "work" / f"{FIXED_RUN}.stage.log"
+    stage_log = _work(env).parent / f"{FIXED_RUN}.stage.log"
     assert not stage_log.exists()
     assert Path(str(stage_log) + ".UNUSABLE").read_text() == "partial stage output\n"
     assert not _work(env).exists()
@@ -804,7 +858,7 @@ def test_owned_auxiliary_marking_failure_exits_3(env, fixed_run_id, monkeypatch)
 
 def test_owned_file_gone_missing_exits_3(env, fixed_run_id):
     def stage(conn, run_id, cap):
-        (env.out / "work" / f"{run_id}.stage.log").unlink()
+        (_work(env).parent / f"{run_id}.stage.log").unlink()
         raise RuntimeError("boom")
     runner = _runner(env, _hooks(run_stage=stage))
     assert runner.run() == 3
@@ -821,3 +875,117 @@ def test_failure_log_write_failure_exits_3(env, monkeypatch):
     monkeypatch.setattr(rcr.os, "open", guarded)
     runner = _runner(env, _hooks(python_version=lambda: "3.9.6"))
     assert runner.run() == 3
+
+
+def test_move_owned_link_succeeds_unlink_fails_marks_both_names(env, fixed_run_id, monkeypatch):
+    real_unlink = os.unlink
+    failed = []
+
+    def unlink(path, *a, **k):
+        if Path(path) == _work(env) and not failed:
+            failed.append(path)
+            raise OSError("stubbed unlink failure")
+        return real_unlink(path, *a, **k)
+    monkeypatch.setattr(rcr.os, "unlink", unlink)
+    runner = _runner(env)
+    assert _run(runner) == 2
+    assert failed
+    assert Path(str(_work(env)) + ".UNUSABLE").exists()
+    assert (env.out / "sealed" / f"moat-replicate-{FIXED_RUN}.db.UNUSABLE").exists()
+    assert not (env.out / "sealed" / f"moat-replicate-{FIXED_RUN}.db").exists()
+    assert not any("MARK_FAILED" in line for line in runner.log_lines)
+
+
+def test_partial_write_after_exclusive_creation_is_marked(env, fixed_run_id, monkeypatch):
+    real_chmod = os.chmod
+
+    def chmod(path, mode, *a, **k):
+        if str(path).endswith(".runtime-provenance.json"):
+            raise OSError("stubbed chmod failure")
+        return real_chmod(path, mode, *a, **k)
+    monkeypatch.setattr(rcr.os, "chmod", chmod)
+    runner = _runner(env)
+    assert _run(runner) == 2
+    sealed = env.out / "sealed"
+    assert (sealed / f"{FIXED_RUN}.runtime-provenance.json.UNUSABLE").exists()
+    assert not (sealed / f"{FIXED_RUN}.runtime-provenance.json").exists()
+    assert not any("MARK_FAILED" in line for line in runner.log_lines)
+
+
+def test_attempt_dir_removed_on_success_and_kept_on_failure(env):
+    ok = _runner(env, preflight_only=True)
+    assert ok.run() == 0
+    assert not _work(env).parent.exists()
+    bad = _runner(env, _hooks(run_stage=lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))))
+    assert bad.run() == 2
+    assert sorted(p.name for p in _work(env).parent.iterdir()) == [
+        f"{bad.run_id}.stage.log.UNUSABLE", "replicate-working.db.UNUSABLE"]
+
+
+# ---------------------------------------------------------------------
+# Module origins: repository, site-packages (RECORD-verified), stdlib
+# ---------------------------------------------------------------------
+
+def test_external_third_party_shadow_is_refused(tmp_path):
+    # The reviewer's P1 mutation: an anthropic module reached through
+    # PYTHONPATH, outside every approved root.
+    shadow = tmp_path / "codex-shadow" / "anthropic.py"
+    shadow.parent.mkdir()
+    shadow.write_text("x = 1\n")
+    problems = rcr.code_identity_problems(rcr._git, {"anthropic": str(shadow)})
+    assert problems == {"loaded_outside_approved_roots": [f"anthropic: {shadow.resolve()}"]}
+
+
+def test_installed_third_party_and_stdlib_modules_pass():
+    import json as stdlib_json
+
+    import anthropic
+    import pytest as installed_pytest
+    mods = {"anthropic": anthropic.__file__, "pytest": installed_pytest.__file__, "json": stdlib_json.__file__}
+    assert rcr.code_identity_problems(rcr._git, mods) == {}
+
+
+def test_site_packages_file_must_match_its_record():
+    import anthropic
+    path = Path(anthropic.__file__).resolve()
+    records = rcr._distribution_records()
+    algo, _ = records[path]
+    tampered = {**records, path: (algo, "not-the-real-digest")}
+    assert rcr.code_identity_problems(rcr._git, {"anthropic": str(path)}, records=lambda: tampered) == {
+        "differs_from_record": [f"anthropic: {path}"]}
+    assert rcr.code_identity_problems(rcr._git, {"anthropic": str(path)}, records=lambda: {}) == {
+        "not_in_any_record": [f"anthropic: {path}"]}
+
+
+def test_unrecorded_site_packages_file_is_refused(tmp_path):
+    site = tmp_path / "site-packages"
+    site.mkdir()
+    stray = site / "anthropic.py"
+    stray.write_text("x = 1\n")
+    roots = {"site": [site.resolve()], "stdlib": []}
+    assert rcr.code_identity_problems(rcr._git, {"anthropic": str(stray)}, roots=roots, records=lambda: {}) == {
+        "not_in_any_record": [f"anthropic: {stray.resolve()}"]}
+
+
+def test_venv_shim_is_accepted_only_with_its_pinned_hash(tmp_path):
+    site = tmp_path / "site-packages"
+    site.mkdir()
+    shim = site / rcr.VENV_SHIM
+    shim.write_text("tampered\n")
+    roots = {"site": [site.resolve()], "stdlib": []}
+    assert "not_in_any_record" in rcr.code_identity_problems(rcr._git, {"_virtualenv": str(shim)}, roots=roots,
+                                                             records=lambda: {})
+    real = Path(sys.prefix) / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages" / rcr.VENV_SHIM
+    if real.exists():
+        assert rcr.sha256_file(real) == rcr.VENV_SHIM_SHA256
+        assert rcr.code_identity_problems(rcr._git, {"_virtualenv": str(real)}) == {}
+
+
+def test_repo_module_inside_site_packages_is_shadowed(tmp_path):
+    site = tmp_path / "site-packages"
+    (site / "moat").mkdir(parents=True)
+    f = site / "moat" / "__init__.py"
+    f.write_text("")
+    roots = {"site": [site.resolve()], "stdlib": []}
+    assert rcr.code_identity_problems(rcr._git, {"moat": str(f)}, roots=roots, records=lambda: {}) == {
+        "shadowed_outside_repository": ["moat"]}

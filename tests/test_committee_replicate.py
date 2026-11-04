@@ -989,3 +989,71 @@ def test_repo_module_inside_site_packages_is_shadowed(tmp_path):
     roots = {"site": [site.resolve()], "stdlib": []}
     assert rcr.code_identity_problems(rcr._git, {"moat": str(f)}, roots=roots, records=lambda: {}) == {
         "shadowed_outside_repository": ["moat"]}
+
+
+# ---------------------------------------------------------------------
+# Startup code: .pth files and the user site directory
+# ---------------------------------------------------------------------
+
+def _site_roots(site_dir: Path, user_site=False):
+    return {"site": [site_dir.resolve()], "stdlib": [], "user_site_enabled": user_site}
+
+
+def test_executed_pth_mutation_is_refused(tmp_path):
+    # The reviewer's round-3 mutation: a .pth whose import line changes
+    # builtins. It runs, no module file appears, and it must still be caught.
+    import builtins
+    import site as site_mod
+    site_dir = tmp_path / "site-packages"
+    site_dir.mkdir()
+    pth = site_dir / "zz_mutation.pth"
+    pth.write_text("import builtins; builtins.CODEX_PTH_MUTATION = 'executed'\n")
+    try:
+        site_mod.addsitedir(str(site_dir))
+        assert builtins.CODEX_PTH_MUTATION == "executed"
+        problems = rcr.code_identity_problems(rcr._git, {}, roots=_site_roots(site_dir), records=lambda: {})
+    finally:
+        if hasattr(builtins, "CODEX_PTH_MUTATION"):
+            del builtins.CODEX_PTH_MUTATION
+        if str(site_dir) in sys.path:
+            sys.path.remove(str(site_dir))
+    assert problems == {"unverified_startup_file": [f"{pth.resolve()}: not_in_any_record"]}
+
+
+def test_tampered_virtualenv_pth_is_refused(tmp_path):
+    site_dir = tmp_path / "site-packages"
+    site_dir.mkdir()
+    pth = site_dir / rcr.VENV_SHIM_PTH
+    pth.write_text("import _virtualenv; import builtins; builtins.x = 1\n")
+    problems = rcr.code_identity_problems(rcr._git, {}, roots=_site_roots(site_dir), records=lambda: {})
+    assert problems == {"unverified_startup_file": [f"{pth.resolve()}: not_in_any_record"]}
+
+
+def test_recorded_pth_passes_only_with_matching_hash(tmp_path):
+    site_dir = tmp_path / "site-packages"
+    site_dir.mkdir()
+    pth = site_dir / "pkg.pth"
+    pth.write_text("/some/path\n")
+    good = {pth.resolve(): ("sha256", rcr._record_digest(pth, "sha256"))}
+    assert rcr.code_identity_problems(rcr._git, {}, roots=_site_roots(site_dir), records=lambda: good) == {}
+    bad = {pth.resolve(): ("sha256", "wrong")}
+    assert rcr.code_identity_problems(rcr._git, {}, roots=_site_roots(site_dir), records=lambda: bad) == {
+        "unverified_startup_file": [f"{pth.resolve()}: differs_from_record"]}
+
+
+def test_user_site_enabled_is_refused(tmp_path):
+    site_dir = tmp_path / "site-packages"
+    site_dir.mkdir()
+    problems = rcr.code_identity_problems(rcr._git, {}, roots=_site_roots(site_dir, user_site=True), records=lambda: {})
+    assert list(problems) == ["user_site_enabled"]
+
+
+def test_real_interpreter_startup_files_verify():
+    # Whatever venv runs the suite: every .pth is recorded or pinned, the
+    # user site is off, and a present uv shim .pth has the pinned hash.
+    roots = rcr._interpreter_roots()
+    assert rcr.code_identity_problems(rcr._git, {}, roots=roots) == {}
+    for d in roots["site"]:
+        shim = d / rcr.VENV_SHIM_PTH
+        if shim.exists():
+            assert rcr.sha256_file(shim) == rcr.VENV_SHIM_PTH_SHA256

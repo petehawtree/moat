@@ -38,7 +38,12 @@ Guarantees:
   equal its HEAD blob, and one in the candidate scope must also equal its
   CANDIDATE_COMMIT blob, so an ignored or untracked file cannot shadow
   candidate code. A site-packages file must match its distribution's RECORD
-  hash. The loaded-module check runs again after the stage.
+  hash. So must every startup .pth file, because these run code without
+  appearing as a loaded module. The per-user site directory must be
+  disabled. uv's two shim files have no RECORD entry and are pinned by
+  hash instead. The loaded-module check runs again after the stage. The
+  standard library is trusted on the pinned Python version alone, as the
+  interpreter's own trust anchor.
 - Input validation before any call. After the cache is cleared, the working
   copy is read back immutably and compared with the source. For each stored
   ticker, the committee bundle key is recomputed in both files. It must
@@ -87,6 +92,7 @@ import os
 import platform
 import re
 import secrets
+import site
 import sqlite3
 import subprocess
 import sys
@@ -133,10 +139,15 @@ CANDIDATE_CODE_SCOPE = ("moat", "scripts/run_pipeline.py", "requirements.txt",
 # Repository files that may differ from CANDIDATE_COMMIT when loaded. They
 # must still equal HEAD.
 NON_CANDIDATE_CODE = ("moat/evals/", "scripts/run_committee_replicate.py")
-# uv's virtualenv shim: the one site-packages file no distribution's RECORD
-# lists. Same content in the candidate and shared venvs.
+# uv's virtualenv shim: the module and the .pth file that imports it at
+# startup. They are the only site-packages files no distribution's RECORD
+# lists, so each is pinned by SHA-256. Same content in the candidate and
+# shared venvs.
 VENV_SHIM = "_virtualenv.py"
 VENV_SHIM_SHA256 = "cfb3db86aaa53bb62b5ff764970bec2d71c9228590a0ebec57f6ec926cc0bf1a"
+VENV_SHIM_PTH = "_virtualenv.pth"
+VENV_SHIM_PTH_SHA256 = "69ac3d8f27e679c81b94ab30b3b56e9cd138219b1ba94a1fa3606d5a76a1433d"
+PINNED_UNRECORDED = {VENV_SHIM: VENV_SHIM_SHA256, VENV_SHIM_PTH: VENV_SHIM_PTH_SHA256}
 # Imported lazily inside run_committee_stage. Imported up front so that the
 # loaded-module check sees them before the paid call.
 STAGE_DEPENDENCIES = ("anthropic", "moat.config", "moat.analysis.pricing", "moat.committee.committee",
@@ -285,9 +296,12 @@ def _interpreter_roots() -> dict:
     """The only places outside the repository that code may load from:
     this interpreter's site-packages and its standard library."""
     paths = sysconfig.get_paths()
-    site = sorted({Path(paths[k]).resolve() for k in ("purelib", "platlib")})
+    site_dirs = {Path(paths[k]).resolve() for k in ("purelib", "platlib")}
+    # Every directory site.py processes .pth files from, including any
+    # system site-packages a venv has been allowed to see.
+    site_dirs |= {Path(d).resolve() for d in site.getsitepackages()}
     std = sorted({Path(paths[k]).resolve() for k in ("stdlib", "platstdlib")})
-    return {"site": site, "stdlib": std}
+    return {"site": sorted(site_dirs), "stdlib": std, "user_site_enabled": bool(site.ENABLE_USER_SITE)}
 
 
 def _distribution_records() -> dict:
@@ -320,13 +334,19 @@ def code_identity_problems(git: Callable, modules: dict, roots: dict | None = No
     - this interpreter's standard library (pinned by CANDIDATE_PYTHON).
 
     Anything else, e.g. a module reached through PYTHONPATH, is refused. A
-    moat module from anywhere but the repository counts as shadowed."""
+    moat module from anywhere but the repository counts as shadowed.
+
+    Startup code is checked as well. .pth files run at interpreter startup
+    without ever appearing in sys.modules. So every .pth file in the
+    site-packages roots must be RECORD-verified or pinned by hash. The
+    per-user site directory, which has no RECORD, must be disabled."""
     roots = roots or _interpreter_roots()
     head, cand = _tree_blobs(git, "HEAD"), _tree_blobs(git, CANDIDATE_COMMIT)
     repo = REPO_ROOT.resolve()
     files: dict[str, str] = {}
     site_files: list[tuple[str, Path]] = []
-    problems = {"shadowed_outside_repository": [], "loaded_outside_approved_roots": [],
+    problems = {"user_site_enabled": [], "unverified_startup_file": [],
+                "shadowed_outside_repository": [], "loaded_outside_approved_roots": [],
                 "not_in_any_record": [], "differs_from_record": [],
                 "not_at_head": [], "differs_from_head": [],
                 "not_at_candidate": [], "differs_from_candidate": []}
@@ -345,15 +365,31 @@ def code_identity_problems(git: Callable, modules: dict, roots: dict | None = No
             files[path.relative_to(repo).as_posix()] = name
         elif not in_std:
             problems["loaded_outside_approved_roots"].append(f"{name}: {path}")
-    if site_files:
-        rec = records()
-        for name, path in site_files:
-            if path.name == VENV_SHIM and path.parent in roots["site"] and sha256_file(path) == VENV_SHIM_SHA256:
-                continue
-            if path not in rec:
-                problems["not_in_any_record"].append(f"{name}: {path}")
-            elif _record_digest(path, rec[path][0]) != rec[path][1]:
-                problems["differs_from_record"].append(f"{name}: {path}")
+    if roots.get("user_site_enabled"):
+        problems["user_site_enabled"].append(site.getusersitepackages())
+    rec_cache: list = []
+
+    def verified(path: Path) -> str | None:
+        """None if the file is RECORD-verified or pinned, else the reason."""
+        pinned = PINNED_UNRECORDED.get(path.name)
+        if pinned and path.parent in roots["site"] and sha256_file(path) == pinned:
+            return None
+        if not rec_cache:
+            rec_cache.append(records())  # built once, only if needed
+        rec = rec_cache[0]
+        if path not in rec:
+            return "not_in_any_record"
+        return None if _record_digest(path, rec[path][0]) == rec[path][1] else "differs_from_record"
+
+    for d in roots["site"]:
+        for pth in sorted(d.glob("*.pth")) if d.is_dir() else ():
+            reason = verified(pth.resolve())
+            if reason:
+                problems["unverified_startup_file"].append(f"{pth.resolve()}: {reason}")
+    for name, path in site_files:
+        reason = verified(path)
+        if reason:
+            problems[reason].append(f"{name}: {path}")
     rels = sorted(files)
     shas = git("hash-object", "--stdin-paths", stdin="\n".join(str(repo / r) for r in rels) + "\n").split() if rels else []
     for rel, sha in zip(rels, shas):

@@ -62,6 +62,12 @@ def _committee_output_is_valid(row: dict) -> bool:
     ) and row["status"] == expected_status
 
 
+# Public name for the structural-validity rule. The committee replicate
+# runner (scripts/run_committee_replicate.py) applies the same rule before
+# sealing, so this is a shared operator/harness contract.
+committee_output_is_valid = _committee_output_is_valid
+
+
 def nearest_rank_percentile(values: list[float], probability: float) -> float | None:
     """Return the one-based nearest-rank empirical percentile."""
     if not values:

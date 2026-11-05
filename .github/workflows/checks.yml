@@ -33,6 +33,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the committee replicate runner and its tests
+          # compare code against the frozen candidate commit 79450dd
+          # (scripts/run_committee_replicate.py CANDIDATE_COMMIT), which a
+          # depth-1 clone does not contain.
+          fetch-depth: 0
 
       # Pinned to match the development environment (3.9.6). Raising this
       # would test a Python nobody actually runs the pipeline on.

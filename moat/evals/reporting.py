@@ -8,8 +8,46 @@ from .constants import PUBLIC_DISCLOSURE_MIN_CELL, TIER_C_OUTCOMES
 from .util import atomic_write_json, atomic_write_jsonl
 
 
+SUPPRESSED_SMALL_CELL = "suppressed_lt_5"
+WITHHELD_SECONDARY = "withheld_secondary_suppression"
+
+
 def _suppressed_count(value: int):
-    return value if value >= PUBLIC_DISCLOSURE_MIN_CELL else "suppressed_lt_5"
+    return value if value >= PUBLIC_DISCLOSURE_MIN_CELL else SUPPRESSED_SMALL_CELL
+
+
+def _secondary_suppressed_count(value: int):
+    """Hide a whole connected count family while retaining the reason."""
+    return SUPPRESSED_SMALL_CELL if value < PUBLIC_DISCLOSURE_MIN_CELL else WITHHELD_SECONDARY
+
+
+def _has_small_count(values) -> bool:
+    if isinstance(values, bool):
+        return False
+    if isinstance(values, int):
+        return values < PUBLIC_DISCLOSURE_MIN_CELL
+    if isinstance(values, dict):
+        return any(_has_small_count(value) for value in values.values())
+    if isinstance(values, (list, tuple)):
+        return any(_has_small_count(value) for value in values)
+    return False
+
+
+def _public_count_tree(values, *, secondary_suppression: bool):
+    if isinstance(values, bool):
+        return values
+    if isinstance(values, int):
+        return (
+            _secondary_suppressed_count(values)
+            if secondary_suppression
+            else _suppressed_count(values)
+        )
+    if isinstance(values, dict):
+        return {
+            key: _public_count_tree(value, secondary_suppression=secondary_suppression)
+            for key, value in values.items()
+        }
+    return values
 
 
 def _small_cell_or_complement(numerator: int, denominator: int) -> bool:
@@ -17,13 +55,28 @@ def _small_cell_or_complement(numerator: int, denominator: int) -> bool:
     return numerator < PUBLIC_DISCLOSURE_MIN_CELL or denominator - numerator < PUBLIC_DISCLOSURE_MIN_CELL
 
 
-def _public_metric(metric: dict) -> dict:
+def _public_metric(metric: dict, *, secondary_suppression: bool = False) -> dict:
     denominator = metric.get("denominator")
     numerator = metric.get("numerator")
+    if secondary_suppression:
+        return {
+            "numerator": (
+                _secondary_suppressed_count(numerator)
+                if isinstance(numerator, int)
+                else None
+            ),
+            "denominator": (
+                _secondary_suppressed_count(denominator)
+                if isinstance(denominator, int)
+                else None
+            ),
+            "value": None,
+            "kind": metric.get("kind"),
+        }
     if isinstance(denominator, int) and denominator < PUBLIC_DISCLOSURE_MIN_CELL:
-        return {"numerator": "suppressed_lt_5", "denominator": "suppressed_lt_5", "value": None, "kind": metric.get("kind")}
+        return {"numerator": SUPPRESSED_SMALL_CELL, "denominator": SUPPRESSED_SMALL_CELL, "value": None, "kind": metric.get("kind")}
     if isinstance(numerator, int) and isinstance(denominator, int) and _small_cell_or_complement(numerator, denominator):
-        return {"numerator": "suppressed_lt_5", "denominator": denominator, "value": None, "kind": metric.get("kind")}
+        return {"numerator": SUPPRESSED_SMALL_CELL, "denominator": denominator, "value": None, "kind": metric.get("kind")}
     return {key: metric[key] for key in ("numerator", "denominator", "value", "kind") if key in metric}
 
 
@@ -37,73 +90,219 @@ def _public_association(metric: dict) -> dict:
     }
 
 
-def public_tier_a(summary: dict) -> dict:
-    table = {
-        outcome: {label: _suppressed_count(count) for label, count in cells.items()}
-        for outcome, cells in summary["pass_fail_abstain_by_moat"].items()
-    }
-    strata = {
-        stratum: {label: _suppressed_count(count) for label, count in cells.items()}
-        for stratum, cells in summary["moat_distribution_by_run_derived_stratum"].items()
-    }
+def _tier_a_suppression(summary: dict) -> tuple[bool, bool]:
+    coverage = _has_small_count({"excluded_count": summary["excluded_count"]})
+    outcomes = _has_small_count(
+        {
+            "pass_fail_abstain_by_moat": summary["pass_fail_abstain_by_moat"],
+            "moat_distribution_by_run_derived_stratum": summary[
+                "moat_distribution_by_run_derived_stratum"
+            ],
+        }
+    )
+    return coverage, outcomes
+
+
+def public_tier_a(
+    summary: dict, *, coverage_secondary: bool | None = None,
+    outcome_secondary: bool | None = None,
+) -> dict:
+    local_coverage, local_outcomes = _tier_a_suppression(summary)
+    coverage_secondary = local_coverage if coverage_secondary is None else coverage_secondary
+    outcome_secondary = local_outcomes if outcome_secondary is None else outcome_secondary
+    table = _public_count_tree(
+        summary["pass_fail_abstain_by_moat"],
+        secondary_suppression=outcome_secondary,
+    )
+    strata = _public_count_tree(
+        summary["moat_distribution_by_run_derived_stratum"],
+        secondary_suppression=outcome_secondary,
+    )
+    benchmark_labelled_secondary = coverage_secondary or outcome_secondary
     return {
         "orientation": summary["orientation"],
-        "universe_count": summary["universe_count"],
-        "benchmark_labelled_count": summary["benchmark_labelled_count"],
-        "screen_scored_count": summary["screen_scored_count"],
-        "screen_abstention_count": summary["screen_abstention_count"],
-        "screen_coverage_rate": summary["screen_coverage_rate"],
-        "excluded_count": summary["excluded_count"],
+        "universe_count": (
+            _secondary_suppressed_count(summary["universe_count"])
+            if coverage_secondary else summary["universe_count"]
+        ),
+        "benchmark_labelled_count": (
+            _secondary_suppressed_count(summary["benchmark_labelled_count"])
+            if benchmark_labelled_secondary else summary["benchmark_labelled_count"]
+        ),
+        "screen_scored_count": (
+            _secondary_suppressed_count(summary["screen_scored_count"])
+            if outcome_secondary else summary["screen_scored_count"]
+        ),
+        "screen_abstention_count": (
+            _secondary_suppressed_count(summary["screen_abstention_count"])
+            if outcome_secondary else summary["screen_abstention_count"]
+        ),
+        "screen_coverage_rate": None if outcome_secondary else summary["screen_coverage_rate"],
+        "excluded_count": (
+            _secondary_suppressed_count(summary["excluded_count"])
+            if coverage_secondary else _suppressed_count(summary["excluded_count"])
+        ),
         "pass_fail_abstain_by_moat": table,
-        "metrics": {name: _public_metric(metric) for name, metric in summary["metrics"].items()},
-        "wide_precision_bootstrap_interval": summary["wide_precision_bootstrap_interval"],
+        "metrics": {
+            name: _public_metric(metric, secondary_suppression=outcome_secondary)
+            for name, metric in summary["metrics"].items()
+        },
+        "wide_precision_bootstrap_interval": (
+            None if outcome_secondary else summary["wide_precision_bootstrap_interval"]
+        ),
         "moat_distribution_by_run_derived_stratum": strata,
     }
 
 
-def public_tier_c(summary: dict) -> dict:
-    return {
-        "lead_finding": summary["lead_finding"],
-        "comparison_count": summary["comparison_count"],
-        "outcome_distribution": {key: _suppressed_count(value) for key, value in summary["outcome_distribution"].items()},
-        "comparable_count": _suppressed_count(summary["comparable_count"]),
-        "comparable_coverage_rate": summary["comparable_coverage_rate"] if summary["comparable_count"] >= PUBLIC_DISCLOSURE_MIN_CELL else None,
-        "extraction_accuracy": (
+def _tier_c_suppression(summary: dict) -> bool:
+    return _has_small_count(
+        {
+            "outcome_distribution": summary["outcome_distribution"],
+            "outcomes_by_field": summary["outcomes_by_field"],
+            "roe_average_equity_hypothesis": summary["roe_average_equity_hypothesis"],
+            "extraction_accuracy": {
+                "numerator": summary["extraction_accuracy"]["numerator_match"],
+                "denominator": summary["extraction_accuracy"][
+                    "denominator_match_plus_probable_defect"
+                ],
+            },
+        }
+    )
+
+
+def public_tier_c(summary: dict, *, secondary_suppression: bool | None = None) -> dict:
+    if secondary_suppression is None:
+        secondary_suppression = _tier_c_suppression(summary)
+    if secondary_suppression:
+        accuracy = {
+            "numerator_match": _secondary_suppressed_count(
+                summary["extraction_accuracy"]["numerator_match"]
+            ),
+            "denominator_match_plus_probable_defect": _secondary_suppressed_count(
+                summary["extraction_accuracy"]["denominator_match_plus_probable_defect"]
+            ),
+            "value": None,
+            "context": summary["extraction_accuracy"]["context"],
+        }
+    else:
+        accuracy = (
             summary["extraction_accuracy"]
             if summary["extraction_accuracy"]["denominator_match_plus_probable_defect"] >= PUBLIC_DISCLOSURE_MIN_CELL
             and summary["extraction_accuracy"]["numerator_match"] >= PUBLIC_DISCLOSURE_MIN_CELL
-            else {"numerator_match": "suppressed_lt_5", "denominator_match_plus_probable_defect": _suppressed_count(summary["extraction_accuracy"]["denominator_match_plus_probable_defect"]), "value": None, "context": summary["extraction_accuracy"]["context"]}
+            else {"numerator_match": SUPPRESSED_SMALL_CELL, "denominator_match_plus_probable_defect": _suppressed_count(summary["extraction_accuracy"]["denominator_match_plus_probable_defect"]), "value": None, "context": summary["extraction_accuracy"]["context"]}
+        )
+    return {
+        "lead_finding": summary["lead_finding"],
+        "comparison_count": (
+            _secondary_suppressed_count(summary["comparison_count"])
+            if secondary_suppression else summary["comparison_count"]
         ),
-        "outcomes_by_field": {
-            field: {outcome: _suppressed_count(counts[outcome]) for outcome in TIER_C_OUTCOMES}
-            for field, counts in summary["outcomes_by_field"].items()
-        },
-        "roe_average_equity_hypothesis": {key: _suppressed_count(value) for key, value in summary["roe_average_equity_hypothesis"].items()},
+        "outcome_distribution": _public_count_tree(
+            summary["outcome_distribution"],
+            secondary_suppression=secondary_suppression,
+        ),
+        "comparable_count": (
+            _secondary_suppressed_count(summary["comparable_count"])
+            if secondary_suppression else _suppressed_count(summary["comparable_count"])
+        ),
+        "comparable_coverage_rate": (
+            None
+            if secondary_suppression or summary["comparable_count"] < PUBLIC_DISCLOSURE_MIN_CELL
+            else summary["comparable_coverage_rate"]
+        ),
+        "extraction_accuracy": accuracy,
+        "outcomes_by_field": _public_count_tree(
+            {
+                field: {outcome: counts[outcome] for outcome in TIER_C_OUTCOMES}
+                for field, counts in summary["outcomes_by_field"].items()
+            },
+            secondary_suppression=secondary_suppression,
+        ),
+        "roe_average_equity_hypothesis": _public_count_tree(
+            summary["roe_average_equity_hypothesis"],
+            secondary_suppression=secondary_suppression,
+        ),
         "formulas": summary["formulas"],
     }
 
 
-def public_valuation(summaries: dict[str, dict]) -> dict:
+def _valuation_suppression(summary: dict) -> bool:
+    return _has_small_count(
+        {
+            "moat_by_benchmark_table": summary["moat_by_benchmark_table"],
+            "benchmark_class_distribution": summary["benchmark_class_distribution"],
+            "moat_class_distribution": summary["moat_class_distribution"],
+            "exact_agreement": {
+                "numerator": summary["exact_agreement"].get("numerator"),
+                "denominator": summary["exact_agreement"].get("denominator"),
+            },
+            "false_cheap_rate": {
+                "numerator": summary["false_cheap_rate"].get("numerator"),
+                "denominator": summary["false_cheap_rate"].get("denominator"),
+            },
+        }
+    )
+
+
+def public_valuation(
+    summaries: dict[str, dict], *, secondary_cohorts: set[str] | None = None,
+) -> dict:
     output = {}
     for key, summary in summaries.items():
+        secondary = (
+            _valuation_suppression(summary)
+            if secondary_cohorts is None
+            else summary["cohort"] in secondary_cohorts
+        )
         output[key] = {
             "cohort": summary["cohort"],
             "view": summary["view"],
             "orientation": summary["orientation"],
-            "eligible_count": summary["eligible_count"],
-            "scored_count": summary["scored_count"],
-            "abstention_count": summary["abstention_count"],
-            "coverage_rate": summary["coverage_rate"],
-            "moat_by_benchmark_table": {
-                moat: {benchmark: _suppressed_count(count) for benchmark, count in cells.items()}
-                for moat, cells in summary["moat_by_benchmark_table"].items()
-            },
-            "exact_agreement": _public_metric(summary["exact_agreement"]),
-            "false_cheap_rate": _public_metric(summary["false_cheap_rate"]),
-            "ordinal_spearman_rho": _public_association(summary["ordinal_spearman_rho"]),
-            "point_fair_value_direction_agreement": _public_metric(summary["point_fair_value_direction_agreement"]),
-            "benchmark_class_distribution": {key: _suppressed_count(value) for key, value in summary["benchmark_class_distribution"].items()},
-            "moat_class_distribution": {key: _suppressed_count(value) for key, value in summary["moat_class_distribution"].items()},
+            "eligible_count": (
+                _secondary_suppressed_count(summary["eligible_count"])
+                if secondary else summary["eligible_count"]
+            ),
+            "scored_count": (
+                _secondary_suppressed_count(summary["scored_count"])
+                if secondary else summary["scored_count"]
+            ),
+            "abstention_count": (
+                _secondary_suppressed_count(summary["abstention_count"])
+                if secondary else summary["abstention_count"]
+            ),
+            "coverage_rate": None if secondary else summary["coverage_rate"],
+            "moat_by_benchmark_table": _public_count_tree(
+                summary["moat_by_benchmark_table"],
+                secondary_suppression=secondary,
+            ),
+            "exact_agreement": _public_metric(
+                summary["exact_agreement"], secondary_suppression=secondary
+            ),
+            "false_cheap_rate": _public_metric(
+                summary["false_cheap_rate"], secondary_suppression=secondary
+            ),
+            "ordinal_spearman_rho": (
+                {
+                    "denominator": _secondary_suppressed_count(
+                        summary["ordinal_spearman_rho"]["denominator"]
+                    ),
+                    "value": None,
+                    "kind": summary["ordinal_spearman_rho"].get("kind"),
+                }
+                if secondary else _public_association(summary["ordinal_spearman_rho"])
+            ),
+            "point_fair_value_direction_agreement": _public_metric(
+                summary["point_fair_value_direction_agreement"],
+                secondary_suppression=secondary,
+            ),
+            "benchmark_class_distribution": _public_count_tree(
+                summary["benchmark_class_distribution"],
+                secondary_suppression=secondary,
+            ),
+            "moat_class_distribution": _public_count_tree(
+                summary["moat_class_distribution"],
+                secondary_suppression=secondary,
+            ),
         }
     return output
 
@@ -271,6 +470,95 @@ def public_noise_floor(summary: dict) -> dict:
     }
 
 
+def _fixed_transitions(transitions: dict, categories: tuple[str, ...]) -> dict:
+    return {
+        f"{left}_to_{right}": transitions.get(f"{left}_to_{right}", 0)
+        for left in categories
+        for right in categories
+    }
+
+
+def public_paired_tier_a(summary: dict, *, force_secondary: bool = False) -> dict:
+    transitions = _fixed_transitions(summary["outcome_transitions"], ("pass", "fail", "abstain"))
+    count_group = {
+        "paired_common_count": summary["paired_common_count"],
+        "entrants": summary["entrants"],
+        "exits": summary["exits"],
+        "score_delta_denominator": summary["score_delta_denominator"],
+        "outcome_transitions": transitions,
+    }
+    secondary = force_secondary or _has_small_count(count_group)
+    public_counts = _public_count_tree(count_group, secondary_suppression=secondary)
+    return {
+        "claim_boundary": summary["claim_boundary"],
+        **public_counts,
+        "mean_composite_score_delta": None if secondary else summary["mean_composite_score_delta"],
+        "pass_rate_delta_paired_bootstrap_interval": (
+            None if secondary else summary["pass_rate_delta_paired_bootstrap_interval"]
+        ),
+        "mean_score_delta_paired_bootstrap_interval": (
+            None if secondary else summary["mean_score_delta_paired_bootstrap_interval"]
+        ),
+    }
+
+
+def public_paired_valuation(
+    summaries: dict, *, secondary_cohorts: set[str] | None = None,
+) -> dict:
+    output = {}
+    categories = ("Cheap", "Fair", "Expensive")
+    for key, summary in summaries.items():
+        if not isinstance(summary, dict):
+            output[key] = summary
+            continue
+        cohort = "analyst" if key.endswith("_analyst") else "quantitative"
+        transitions = _fixed_transitions(summary["class_transitions"], categories)
+        counts = {
+            "paired_scored_count": summary["paired_scored_count"],
+            "class_transitions": transitions,
+        }
+        secondary = (
+            cohort in secondary_cohorts
+            if secondary_cohorts is not None
+            else _has_small_count(counts)
+        )
+        secondary = secondary or _has_small_count(counts)
+        output[key] = {
+            "orientation": summary["orientation"],
+            **_public_count_tree(counts, secondary_suppression=secondary),
+            "mean_base_margin_of_safety_delta": (
+                None if secondary else summary["mean_base_margin_of_safety_delta"]
+            ),
+        }
+    return output
+
+
+def public_paired_committee(summary: dict) -> dict:
+    statuses = ("Reject", "Watch", "Investigate")
+    severities = ("low", "medium", "high")
+    counts = {
+        "paired_common_count": summary["paired_common_count"],
+        "baseline_only_count": summary["baseline_only_count"],
+        "candidate_only_count": summary["candidate_only_count"],
+        "status_transitions": _fixed_transitions(summary["status_transitions"], statuses),
+        "status_flip_count": summary["status_flip_count"],
+        "bear_severity_transitions": _fixed_transitions(
+            summary["bear_severity_transitions"], severities
+        ),
+        "bear_severity_change_count": summary["bear_severity_change_count"],
+    }
+    secondary = _has_small_count(counts)
+    return {
+        "claim_boundary": summary["claim_boundary"],
+        **_public_count_tree(counts, secondary_suppression=secondary),
+        "status_flip_rate": None if secondary else summary["status_flip_rate"],
+        "bear_severity_change_rate": (
+            None if secondary else summary["bear_severity_change_rate"]
+        ),
+        "mean_overall_score_delta": None if secondary else summary["mean_overall_score_delta"],
+    }
+
+
 def write_private_outputs(
     directory: Path, *, manifest: dict, preflight: dict, tier_a_records: dict[str, list[dict]],
     tier_a_summaries: dict[str, dict], exclusions: dict[str, list[dict]],
@@ -312,6 +600,16 @@ def write_public_report(
     noise_summary: dict, replay_summary: dict,
     persona_summaries: dict[str, dict],
 ) -> None:
+    tier_a_suppression = [_tier_a_suppression(summary) for summary in tier_a_summaries.values()]
+    coverage_secondary = any(coverage for coverage, _ in tier_a_suppression)
+    tier_a_outcome_secondary = any(outcomes for _, outcomes in tier_a_suppression)
+    tier_c_secondary = any(_tier_c_suppression(summary) for summary in tier_c_summaries.values())
+    valuation_secondary_cohorts = {
+        summary["cohort"]
+        for run_summaries in valuation_summaries.values()
+        for summary in run_summaries.values()
+        if _valuation_suppression(summary)
+    }
     public = {
         "report_version": "eval-public-tier-a-c-v1",
         "evaluation_mode": manifest["evaluation_mode"],
@@ -324,28 +622,55 @@ def write_public_report(
         "reproducibility_checks": preflight_public,
         "universe_flow": {
             name: {
-                "universe_count": summary["universe_count"],
-                "scored_count": summary["screen_scored_count"],
-                "abstention_count": summary["screen_abstention_count"],
-                "exclusion_count": summary["excluded_count"],
+                "universe_count": (
+                    _secondary_suppressed_count(summary["universe_count"])
+                    if coverage_secondary else summary["universe_count"]
+                ),
+                "scored_count": (
+                    _secondary_suppressed_count(summary["screen_scored_count"])
+                    if tier_a_outcome_secondary else summary["screen_scored_count"]
+                ),
+                "abstention_count": (
+                    _secondary_suppressed_count(summary["screen_abstention_count"])
+                    if tier_a_outcome_secondary else summary["screen_abstention_count"]
+                ),
+                "exclusion_count": (
+                    _secondary_suppressed_count(summary["excluded_count"])
+                    if coverage_secondary else _suppressed_count(summary["excluded_count"])
+                ),
             }
             for name, summary in tier_a_summaries.items()
         },
-        "tier_a": {name: public_tier_a(summary) for name, summary in tier_a_summaries.items()},
-        "valuation": {name: public_valuation(summary) for name, summary in valuation_summaries.items()},
+        "tier_a": {
+            name: public_tier_a(
+                summary,
+                coverage_secondary=coverage_secondary,
+                outcome_secondary=tier_a_outcome_secondary,
+            )
+            for name, summary in tier_a_summaries.items()
+        },
+        "valuation": {
+            name: public_valuation(
+                summary, secondary_cohorts=valuation_secondary_cohorts
+            )
+            for name, summary in valuation_summaries.items()
+        },
         "committee": {name: public_committee(summary) for name, summary in committee_summaries.items()},
-        "tier_c": {name: public_tier_c(summary) for name, summary in tier_c_summaries.items()},
+        "tier_c": {
+            name: public_tier_c(summary, secondary_suppression=tier_c_secondary)
+            for name, summary in tier_c_summaries.items()
+        },
         "tier_b": {"status": "not_run", "reason": "rubric, atomic themes, and frozen 24-company cohort are not decided"},
         "paired_baseline_candidate": {
-            "tier_a": {key: value for key, value in paired.items() if key != "records"},
-            "valuation": {
-                key: (
-                    {inner_key: inner_value for inner_key, inner_value in value.items() if inner_key != "records"}
-                    if isinstance(value, dict) else value
-                )
-                for key, value in valuation_paired.items()
-            },
-            "committee": {key: value for key, value in committee_paired.items() if key != "records"},
+            "tier_a": public_paired_tier_a(
+                paired,
+                force_secondary=coverage_secondary or tier_a_outcome_secondary,
+            ),
+            "valuation": public_paired_valuation(
+                valuation_paired,
+                secondary_cohorts=valuation_secondary_cohorts,
+            ),
+            "committee": public_paired_committee(committee_paired),
         },
         "persona_influence_and_external_alignment": {
             name: public_persona(summary) for name, summary in persona_summaries.items()

@@ -11,6 +11,35 @@ specification.
 - Public disclosure suppresses each benchmark-derived count below five. A rate
   is hidden when its numerator, denominator or complement (denominator minus
   numerator) is below five.
+- Section 16's phrase “cells containing fewer than five benchmark-derived
+  companies” has no zero-cell exception. Zero through four are therefore all
+  protected. `suppressed_lt_5` denotes a protected cell; a large cell hidden
+  to prevent complementary reconstruction is labelled
+  `withheld_secondary_suppression` and carries no numerical bound.
+- Secondary suppression operates on connected disclosure families, not one
+  JSON table at a time. If either run contains a protected Tier A outcome cell,
+  both runs' outcome/stratum tables, linked totals, rates, metrics, intervals
+  and paired aggregates are withheld. Tier A benchmark coverage is a separate
+  cross-run family containing universe, labelled and excluded counts. This
+  prevents cross-run subtraction from undoing suppression.
+- Valuation secondary suppression is connected by analyst/quantitative cohort
+  across both views and both runs. A protected cell withholds that cohort's
+  contingency cells, row and column margins, agreement and other table-derived
+  metrics, coverage totals/rates and paired transitions. Tier C is one
+  cross-run family: a protected field/outcome cell withholds field cells,
+  global outcomes, comparison/comparable totals and rates, extraction
+  accuracy and the ROE diagnostic counts. Labels, orientation, formulas and
+  methodology remain public.
+- Paired transition tables use fixed category grids so an omitted key cannot
+  disclose a zero. If any fixed-grid cell is protected, the whole connected
+  count/rate family receives secondary suppression. The same deterministic
+  private inputs therefore always produce the same public JSON.
+- **Pete decision — material publication reduction:** connected-family
+  suppression intentionally withholds some cells of five or more, and may
+  withhold all numeric results for an affected Tier A, valuation-cohort or
+  Tier C family. This is the conservative §16 choice; publishing more would
+  require a separately reviewed coarsening scheme proven safe across the
+  whole report.
 - Manifest objects and normalized input records reject unknown keys and
   categories. Development manifests may bind synthetic inputs; authoritative
   manifests must bind the two frozen snapshot digests and sizes.

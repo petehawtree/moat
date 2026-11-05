@@ -157,6 +157,13 @@ def env(tmp_path, candidate_template, monkeypatch):
     return SimpleNamespace(source=source, out=out, freeze=freeze, tmp=tmp_path)
 
 
+def HOST_ROOTS():
+    """The running interpreter's real roots, with the user-site verdict
+    removed. Tests about module origins must not depend on whether the host
+    (e.g. CI's system Python) has a user site, which has its own test."""
+    return {**rcr._interpreter_roots(), "user_site_enabled": False}
+
+
 def fake_git(status="", diff="", head="0" * 40):
     """Stands in for git in a clean checkout whose candidate scope equals the
     candidate commit. No module is loaded from the repository (see _hooks),
@@ -432,28 +439,28 @@ def test_status_asks_git_for_untracked_files(env):
 def test_candidate_pipeline_module_passes_code_identity():
     mods = {"run_pipeline": str(rcr.REPO_ROOT / "scripts" / "run_pipeline.py"),
             "moat.committee.committee": str(rcr.REPO_ROOT / "moat" / "committee" / "committee.py")}
-    assert rcr.code_identity_problems(rcr._git, mods) == {}
+    assert rcr.code_identity_problems(rcr._git, mods, roots=HOST_ROOTS()) == {}
 
 
 def test_module_changed_since_candidate_fails_code_identity():
     # moat/dashboard/app.py changed after 79450dd (PR #25). Loaded, it is
     # non-candidate code even though it equals HEAD.
     mods = {"moat.dashboard.app": str(rcr.REPO_ROOT / "moat" / "dashboard" / "app.py")}
-    assert rcr.code_identity_problems(rcr._git, mods) == {"differs_from_candidate": ["moat/dashboard/app.py"]}
+    assert rcr.code_identity_problems(rcr._git, mods, roots=HOST_ROOTS()) == {"differs_from_candidate": ["moat/dashboard/app.py"]}
 
 
 def test_module_added_since_candidate_fails_code_identity():
     mods = {"moat.evals.constants": str(rcr.REPO_ROOT / "moat" / "evals" / "constants.py"),
             "tests.test_eval_harness": str(rcr.REPO_ROOT / "tests" / "test_eval_harness.py")}
     # Harness code is exempt from the candidate comparison; anything else new is not.
-    assert rcr.code_identity_problems(rcr._git, mods) == {"not_at_candidate": ["tests/test_eval_harness.py"]}
+    assert rcr.code_identity_problems(rcr._git, mods, roots=HOST_ROOTS()) == {"not_at_candidate": ["tests/test_eval_harness.py"]}
 
 
 def test_untracked_module_in_repository_fails_code_identity():
     shadow = rcr.REPO_ROOT / "moat" / "committee" / "_shadow_for_test.py"
     shadow.write_text("x = 1\n")
     try:
-        problems = rcr.code_identity_problems(rcr._git, {"moat.committee._shadow_for_test": str(shadow)})
+        problems = rcr.code_identity_problems(rcr._git, {"moat.committee._shadow_for_test": str(shadow)}, roots=HOST_ROOTS())
     finally:
         shadow.unlink()
     assert problems == {"not_at_head": ["moat/committee/_shadow_for_test.py"],
@@ -463,7 +470,7 @@ def test_untracked_module_in_repository_fails_code_identity():
 def test_repo_module_loaded_from_elsewhere_is_shadowed(tmp_path):
     fake = tmp_path / "committee.py"
     fake.write_text("x = 1\n")
-    problems = rcr.code_identity_problems(rcr._git, {"moat.committee.committee": str(fake)})
+    problems = rcr.code_identity_problems(rcr._git, {"moat.committee.committee": str(fake)}, roots=HOST_ROOTS())
     assert problems == {"shadowed_outside_repository": ["moat.committee.committee"]}
 
 
@@ -955,7 +962,7 @@ def test_external_third_party_shadow_is_refused(tmp_path):
     shadow = tmp_path / "codex-shadow" / "anthropic.py"
     shadow.parent.mkdir()
     shadow.write_text("x = 1\n")
-    problems = rcr.code_identity_problems(rcr._git, {"anthropic": str(shadow)})
+    problems = rcr.code_identity_problems(rcr._git, {"anthropic": str(shadow)}, roots=HOST_ROOTS())
     assert problems == {"loaded_outside_approved_roots": [f"anthropic: {shadow.resolve()}"]}
 
 
@@ -967,8 +974,7 @@ def test_installed_third_party_and_stdlib_modules_pass():
     mods = {"anthropic": anthropic.__file__, "pytest": installed_pytest.__file__, "json": stdlib_json.__file__}
     # Module origins only; the startup-file and user-site checks of whatever
     # interpreter runs the suite are covered by their own tests.
-    problems = rcr.code_identity_problems(rcr._git, mods)
-    problems.pop("user_site_enabled", None)
+    problems = rcr.code_identity_problems(rcr._git, mods, roots=HOST_ROOTS())
     problems.pop("unverified_startup_file", None)
     assert problems == {}
 
@@ -979,9 +985,9 @@ def test_site_packages_file_must_match_its_record():
     records = rcr._distribution_records()
     algo, _ = records[path]
     tampered = {**records, path: (algo, "not-the-real-digest")}
-    assert rcr.code_identity_problems(rcr._git, {"anthropic": str(path)}, records=lambda: tampered) == {
+    assert rcr.code_identity_problems(rcr._git, {"anthropic": str(path)}, roots=HOST_ROOTS(), records=lambda: tampered) == {
         "differs_from_record": [f"anthropic: {path}"]}
-    assert rcr.code_identity_problems(rcr._git, {"anthropic": str(path)}, records=lambda: {}) == {
+    assert rcr.code_identity_problems(rcr._git, {"anthropic": str(path)}, roots=HOST_ROOTS(), records=lambda: {}) == {
         "not_in_any_record": [f"anthropic: {path}"]}
 
 
@@ -1006,7 +1012,7 @@ def test_venv_shim_is_accepted_only_with_its_pinned_hash(tmp_path):
     real = Path(sys.prefix) / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages" / rcr.VENV_SHIM
     if real.exists():
         assert rcr.sha256_file(real) == rcr.VENV_SHIM_SHA256
-        assert rcr.code_identity_problems(rcr._git, {"_virtualenv": str(real)}) == {}
+        assert rcr.code_identity_problems(rcr._git, {"_virtualenv": str(real)}, roots=HOST_ROOTS()) == {}
 
 
 def test_repo_module_inside_site_packages_is_shadowed(tmp_path):

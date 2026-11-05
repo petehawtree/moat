@@ -198,6 +198,7 @@ class Hooks:
     before_create: Callable = None      # () -> None, called just before O_EXCL creation
     git: Callable = None                # (*args) -> stdout; raises on a non-zero exit
     loaded_modules: Callable = None     # () -> {module name: file path or None}
+    interpreter_roots: Callable = None  # () -> {"site": [...], "stdlib": [...], "user_site_enabled": bool}
 
     def __post_init__(self):
         self.run_stage = self.run_stage or (lambda conn, run_id, cap: rp.run_committee_stage(conn, run_id, cost_cap_usd=cap))
@@ -207,6 +208,7 @@ class Hooks:
         self.before_create = self.before_create or (lambda: None)
         self.git = self.git or _git
         self.loaded_modules = self.loaded_modules or _loaded_modules
+        self.interpreter_roots = self.interpreter_roots or _interpreter_roots
 
 
 # ---------------------------------------------------------------------
@@ -626,6 +628,10 @@ class ReplicateRunner:
         dirty = git("status", "--porcelain", "--untracked-files=all")
         if not head or dirty:
             self.fail("repository_not_clean", has_head=int(bool(head)), dirty_or_untracked=len(dirty.splitlines()))
+        try:
+            git("cat-file", "-e", f"{CANDIDATE_COMMIT}^{{commit}}")
+        except subprocess.CalledProcessError:
+            self.fail("candidate_commit_unavailable", commit=CANDIDATE_COMMIT, hint="fetch full history")
         diff = git("diff", "--name-only", CANDIDATE_COMMIT, "HEAD", "--", *CANDIDATE_CODE_SCOPE).split()
         if diff:
             self.fail("candidate_code_differs", files=diff)
@@ -633,7 +639,7 @@ class ReplicateRunner:
         for mod in STAGE_DEPENDENCIES:
             importlib.import_module(mod)
         modules = self.hooks.loaded_modules()
-        problems = code_identity_problems(git, modules)
+        problems = code_identity_problems(git, modules, roots=self.hooks.interpreter_roots())
         if problems:
             self.fail("loaded_code_not_candidate", **problems)
         checked = sum(1 for n, f in modules.items() if f and _inside(Path(f), REPO_ROOT))
@@ -827,7 +833,8 @@ class ReplicateRunner:
         os.chmod(self.work, 0o444)
 
         # The stage imported its own dependencies; none may be non-candidate.
-        problems = code_identity_problems(self.hooks.git, self.hooks.loaded_modules())
+        problems = code_identity_problems(self.hooks.git, self.hooks.loaded_modules(),
+                                          roots=self.hooks.interpreter_roots())
         if problems:
             self.fail("loaded_code_not_candidate_after_stage", **problems)
 

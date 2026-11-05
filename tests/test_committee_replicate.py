@@ -162,7 +162,7 @@ def fake_git(status="", diff="", head="0" * 40):
     candidate commit. No module is loaded from the repository (see _hooks),
     so the tree listings are never consulted."""
     def git(*args, stdin=None):
-        return {"rev-parse": head + "\n", "status": status, "diff": diff, "ls-tree": ""}[args[0]]
+        return {"rev-parse": head + "\n", "status": status, "diff": diff, "ls-tree": "", "cat-file": ""}[args[0]]
     return git
 
 
@@ -173,6 +173,9 @@ def _hooks(**overrides):
         python_version=lambda: rcr.CANDIDATE_PYTHON,
         git=fake_git(),
         loaded_modules=lambda: {},
+        # Never the real interpreter: the suite runs in environments (e.g. CI's
+        # system Python with a user site) that the runner rightly refuses.
+        interpreter_roots=lambda: {"site": [], "stdlib": [], "user_site_enabled": False},
     )
     base.update(overrides)
     return Hooks(**base)
@@ -386,6 +389,26 @@ def test_unclean_or_untracked_repository_is_refused(env, status, rule):
     assert runner.run() == 2
     assert any(f"UNUSABLE: {rule}" in line for line in runner.log_lines)
     assert not _work(env).exists()
+
+
+def test_missing_candidate_commit_is_refused(env):
+    base = fake_git()
+
+    def git(*args, stdin=None):
+        if args[0] == "cat-file":
+            raise rcr.subprocess.CalledProcessError(128, ["git", *args])
+        return base(*args, stdin=stdin)
+    runner = _runner(env, _hooks(git=git))
+    assert runner.run() == 2
+    assert any("candidate_commit_unavailable" in line for line in runner.log_lines)
+    assert not _work(env).exists()
+
+
+def test_runner_checks_use_injected_interpreter_roots(env):
+    # A refused interpreter (user site on) reaches the verdict via the hook.
+    runner = _runner(env, _hooks(interpreter_roots=lambda: {"site": [], "stdlib": [], "user_site_enabled": True}))
+    assert runner.run() == 2
+    assert any("user_site_enabled" in line for line in runner.log_lines if "UNUSABLE" in line)
 
 
 def test_candidate_code_diff_is_refused(env):
@@ -942,7 +965,12 @@ def test_installed_third_party_and_stdlib_modules_pass():
     import anthropic
     import pytest as installed_pytest
     mods = {"anthropic": anthropic.__file__, "pytest": installed_pytest.__file__, "json": stdlib_json.__file__}
-    assert rcr.code_identity_problems(rcr._git, mods) == {}
+    # Module origins only; the startup-file and user-site checks of whatever
+    # interpreter runs the suite are covered by their own tests.
+    problems = rcr.code_identity_problems(rcr._git, mods)
+    problems.pop("user_site_enabled", None)
+    problems.pop("unverified_startup_file", None)
+    assert problems == {}
 
 
 def test_site_packages_file_must_match_its_record():
@@ -1048,6 +1076,7 @@ def test_user_site_enabled_is_refused(tmp_path):
     assert list(problems) == ["user_site_enabled"]
 
 
+@pytest.mark.skipif(sys.prefix == sys.base_prefix, reason="the runner is only ever run from a venv")
 def test_real_interpreter_startup_files_verify():
     # Whatever venv runs the suite: every .pth is recorded or pinned, the
     # user site is off, and a present uv shim .pth has the pinned hash.

@@ -987,8 +987,11 @@ def test_site_packages_file_must_match_its_record():
     tampered = {**records, path: (algo, "not-the-real-digest")}
     assert rcr.code_identity_problems(rcr._git, {"anthropic": str(path)}, roots=HOST_ROOTS(), records=lambda: tampered) == {
         "differs_from_record": [f"anthropic: {path}"]}
-    assert rcr.code_identity_problems(rcr._git, {"anthropic": str(path)}, roots=HOST_ROOTS(), records=lambda: {}) == {
-        "not_in_any_record": [f"anthropic: {path}"]}
+    # With no RECORDs at all, the host's own .pth files are unverified too;
+    # that is the startup-file check's business, not this test's.
+    problems = rcr.code_identity_problems(rcr._git, {"anthropic": str(path)}, roots=HOST_ROOTS(), records=lambda: {})
+    problems.pop("unverified_startup_file", None)
+    assert problems == {"not_in_any_record": [f"anthropic: {path}"]}
 
 
 def test_unrecorded_site_packages_file_is_refused(tmp_path):

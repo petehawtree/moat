@@ -110,11 +110,12 @@ def public_tier_a(
     local_coverage, local_outcomes = _tier_a_suppression(summary)
     coverage_secondary = local_coverage if coverage_secondary is None else coverage_secondary
     outcome_secondary = local_outcomes if outcome_secondary is None else outcome_secondary
-    # Screen totals and both classification tables reconstruct the labelled
-    # cohort, and screen totals reconstruct the universe. Coverage suppression
-    # must therefore flow into the outcome family even if all outcome cells are
-    # individually large enough to publish.
-    outcome_secondary = coverage_secondary or outcome_secondary
+    # Screen totals reconstruct the universe, either classification table
+    # reconstructs the labelled cohort, and universe - excluded reconstructs
+    # that same labelled total. Suppression therefore flows in both directions.
+    tier_a_secondary = coverage_secondary or outcome_secondary
+    coverage_secondary = tier_a_secondary
+    outcome_secondary = tier_a_secondary
     table = _public_count_tree(
         summary["pass_fail_abstain_by_moat"],
         secondary_suppression=outcome_secondary,
@@ -416,6 +417,11 @@ def public_committee(summary: dict) -> dict:
     return result
 
 
+def _committee_status_transitions_need_suppression(summary: dict) -> bool:
+    """Status margins constrain benchmark-derived support cells by status."""
+    return _has_small_count(summary["support_composition_by_status"])
+
+
 def public_persona(summary: dict) -> dict:
     counterfactuals = {}
     for name, values in summary["counterfactuals"].items():
@@ -492,8 +498,14 @@ def public_paired_tier_a(summary: dict, *, force_secondary: bool = False) -> dic
         "score_delta_denominator": summary["score_delta_denominator"],
         "outcome_transitions": transitions,
     }
-    secondary = force_secondary or _has_small_count(count_group)
-    public_counts = _public_count_tree(count_group, secondary_suppression=secondary)
+    # These are model-only screen outcomes. Publish small/zero transitions
+    # unless a benchmark-derived Tier A family is suppressed, in which case
+    # their universe-linked margins become complementary disclosures.
+    secondary = force_secondary
+    public_counts = (
+        _public_count_tree(count_group, secondary_suppression=True)
+        if secondary else count_group
+    )
     return {
         "claim_boundary": summary["claim_boundary"],
         **public_counts,
@@ -538,29 +550,29 @@ def public_paired_valuation(
     return output
 
 
-def public_paired_committee(summary: dict) -> dict:
+def public_paired_committee(
+    summary: dict, *, suppress_status_transitions: bool = False,
+) -> dict:
     statuses = ("Reject", "Watch", "Investigate")
     severities = ("low", "medium", "high")
-    counts = {
+    status_transitions = _fixed_transitions(summary["status_transitions"], statuses)
+    return {
+        "claim_boundary": summary["claim_boundary"],
         "paired_common_count": summary["paired_common_count"],
         "baseline_only_count": summary["baseline_only_count"],
         "candidate_only_count": summary["candidate_only_count"],
-        "status_transitions": _fixed_transitions(summary["status_transitions"], statuses),
+        "status_transitions": (
+            _public_count_tree(status_transitions, secondary_suppression=True)
+            if suppress_status_transitions else status_transitions
+        ),
         "status_flip_count": summary["status_flip_count"],
+        "status_flip_rate": summary["status_flip_rate"],
         "bear_severity_transitions": _fixed_transitions(
             summary["bear_severity_transitions"], severities
         ),
         "bear_severity_change_count": summary["bear_severity_change_count"],
-    }
-    secondary = _has_small_count(counts)
-    return {
-        "claim_boundary": summary["claim_boundary"],
-        **_public_count_tree(counts, secondary_suppression=secondary),
-        "status_flip_rate": None if secondary else summary["status_flip_rate"],
-        "bear_severity_change_rate": (
-            None if secondary else summary["bear_severity_change_rate"]
-        ),
-        "mean_overall_score_delta": None if secondary else summary["mean_overall_score_delta"],
+        "bear_severity_change_rate": summary["bear_severity_change_rate"],
+        "mean_overall_score_delta": summary["mean_overall_score_delta"],
     }
 
 
@@ -606,10 +618,11 @@ def write_public_report(
     persona_summaries: dict[str, dict],
 ) -> None:
     tier_a_suppression = [_tier_a_suppression(summary) for summary in tier_a_summaries.values()]
-    coverage_secondary = any(coverage for coverage, _ in tier_a_suppression)
-    tier_a_outcome_secondary = coverage_secondary or any(
-        outcomes for _, outcomes in tier_a_suppression
+    tier_a_secondary = any(
+        coverage or outcomes for coverage, outcomes in tier_a_suppression
     )
+    coverage_secondary = tier_a_secondary
+    tier_a_outcome_secondary = tier_a_secondary
     tier_c_secondary = any(_tier_c_suppression(summary) for summary in tier_c_summaries.values())
     valuation_secondary_cohorts = {
         summary["cohort"]
@@ -617,6 +630,10 @@ def write_public_report(
         for summary in run_summaries.values()
         if _valuation_suppression(summary)
     }
+    suppress_committee_status_transitions = any(
+        _committee_status_transitions_need_suppression(summary)
+        for summary in committee_summaries.values()
+    )
     public = {
         "report_version": "eval-public-tier-a-c-v1",
         "evaluation_mode": manifest["evaluation_mode"],
@@ -677,7 +694,10 @@ def write_public_report(
                 valuation_paired,
                 secondary_cohorts=valuation_secondary_cohorts,
             ),
-            "committee": public_paired_committee(committee_paired),
+            "committee": public_paired_committee(
+                committee_paired,
+                suppress_status_transitions=suppress_committee_status_transitions,
+            ),
         },
         "persona_influence_and_external_alignment": {
             name: public_persona(summary) for name, summary in persona_summaries.items()

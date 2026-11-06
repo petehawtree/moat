@@ -8,6 +8,7 @@ and enumerates feasible integer values for every protected source cell.
 
 from __future__ import annotations
 
+import itertools
 import random
 from dataclasses import dataclass, field
 
@@ -15,6 +16,9 @@ import pytest
 
 from moat.evals.constants import TIER_C_OUTCOMES
 from moat.evals.reporting import (
+    _committee_status_transitions_need_suppression,
+    public_committee,
+    public_paired_committee,
     public_paired_tier_a,
     public_tier_a,
     public_tier_c,
@@ -187,6 +191,52 @@ def test_tier_a_coverage_exclusion_is_not_recoverable_by_subtraction():
                 public["moat_distribution_by_run_derived_stratum"][stratum][label],
             )
     audit.equality({"labelled": -1, **stratum_cells})
+
+    paired_private = {
+        "claim_boundary": "synthetic",
+        "paired_common_count": private["universe_count"],
+        "entrants": 0,
+        "exits": 0,
+        "outcome_transitions": {
+            "pass_to_pass": 48,
+            "fail_to_fail": 32,
+            "abstain_to_abstain": 20,
+        },
+        "mean_composite_score_delta": 0.0,
+        "score_delta_denominator": private["screen_scored_count"],
+        "pass_rate_delta_paired_bootstrap_interval": None,
+        "mean_score_delta_paired_bootstrap_interval": None,
+    }
+    paired_public = public_paired_tier_a(paired_private, force_secondary=True)
+    for name in ("paired_common_count", "entrants", "exits", "score_delta_denominator"):
+        audit.variable(f"paired.{name}", paired_public[name])
+    transition_names = []
+    for name, published in paired_public["outcome_transitions"].items():
+        variable = f"paired.transition.{name}"
+        transition_names.append(variable)
+        audit.variable(variable, published)
+    audit.equality(
+        {"paired.paired_common_count": -1, **{name: 1 for name in transition_names}}
+    )
+    audit.equality(
+        {"universe": 1, "paired.paired_common_count": -1, "paired.exits": -1}
+    )
+    audit.equality({
+        "scored": -1,
+        **{
+            f"paired.transition.{name}": 1
+            for name in paired_public["outcome_transitions"]
+            if name.startswith("pass_to_") or name.startswith("fail_to_")
+        },
+    })
+    audit.equality({
+        "abstention": -1,
+        **{
+            f"paired.transition.{name}": 1
+            for name in paired_public["outcome_transitions"]
+            if name.startswith("abstain_to_")
+        },
+    })
     _assert_each_small_cell_ambiguous(audit, values)
 
 
@@ -201,6 +251,8 @@ def test_tier_a_two_hidden_abstention_cells_are_not_jointly_recoverable():
             public["pass_fail_abstain_by_moat"]["abstain"][label],
         )
     audit.variable("abstention_total", public["screen_abstention_count"])
+    assert public["universe_count"] == SECONDARY
+    assert public["excluded_count"] == SECONDARY
     audit.equality(
         {
             "abstention_total": -1,
@@ -334,8 +386,8 @@ def test_tier_c_zero_is_not_recoverable_from_global_outcome_total():
     _assert_each_small_cell_ambiguous(audit, values)
 
 
-def test_paired_missing_transition_keys_are_fixed_zero_suppressed():
-    public = public_paired_tier_a({
+def test_model_only_paired_tier_a_zeros_publish_only_without_benchmark_suppression():
+    private = {
         "claim_boundary": "synthetic",
         "paired_common_count": 12,
         "entrants": 0,
@@ -345,12 +397,182 @@ def test_paired_missing_transition_keys_are_fixed_zero_suppressed():
         "score_delta_denominator": 12,
         "pass_rate_delta_paired_bootstrap_interval": None,
         "mean_score_delta_paired_bootstrap_interval": None,
-    })
+    }
+    public = public_paired_tier_a(private)
     assert len(public["outcome_transitions"]) == 9
-    assert public["outcome_transitions"]["fail_to_abstain"] == SMALL
-    assert public["outcome_transitions"]["pass_to_pass"] == SECONDARY
-    assert public["entrants"] == SMALL
-    assert public["mean_composite_score_delta"] is None
+    assert public["outcome_transitions"]["fail_to_abstain"] == 0
+    assert public["outcome_transitions"]["pass_to_pass"] == 12
+    assert public["entrants"] == 0
+    assert public["mean_composite_score_delta"] == 0.0
+
+    protected = public_paired_tier_a(private, force_secondary=True)
+    assert protected["outcome_transitions"]["fail_to_abstain"] == SMALL
+    assert protected["outcome_transitions"]["pass_to_pass"] == SECONDARY
+    assert protected["entrants"] == SMALL
+    assert protected["mean_composite_score_delta"] is None
+
+
+def _committee_summary(support_by_status: dict[str, dict[str, int]]) -> dict:
+    support_categories = ("strong", "weak", "ambiguous", "contradicted", "abstain")
+    scored = sum(sum(cells.values()) for cells in support_by_status.values())
+    external_abstentions = sum(cells["abstain"] for cells in support_by_status.values())
+    investigate = support_by_status["Investigate"]
+    investigate_supported = sum(
+        investigate[category] for category in support_categories if category != "abstain"
+    )
+    association = {"denominator": 0, "value": None, "kind": "exploratory"}
+    return {
+        "eligible_screen_passer_count": scored,
+        "committee_scored_count": scored,
+        "committee_abstention_count": 0,
+        "committee_coverage_rate": 1.0,
+        "external_support_scored_count": scored - external_abstentions,
+        "external_support_abstention_count": external_abstentions,
+        "investigate_support_composition": investigate,
+        "investigate_support_composition_denominator": investigate_supported,
+        "investigate_contradiction_rate": {
+            "numerator": investigate["contradicted"],
+            "denominator": investigate_supported,
+            "value": (
+                investigate["contradicted"] / investigate_supported
+                if investigate_supported else None
+            ),
+            "kind": "descriptive_conservative",
+        },
+        "support_composition_by_status": support_by_status,
+        "support_composition_by_status_denominators": {
+            status: sum(value for category, value in cells.items() if category != "abstain")
+            for status, cells in support_by_status.items()
+        },
+        "research_priority_enrichment": {
+            status: {
+                "supported_numerator": cells["strong"] + cells["weak"],
+                "denominator": sum(
+                    value for category, value in cells.items() if category != "abstain"
+                ),
+                "supported_rate": None,
+                "composition": {
+                    category: cells[category]
+                    for category in ("strong", "weak", "ambiguous", "contradicted")
+                },
+            }
+            for status, cells in support_by_status.items()
+        },
+        "priority_support_spearman_rho": association,
+        "watch_score_external_support_trend": association,
+        "direct_status_star_rating_spearman_rho": association,
+    }
+
+
+def _paired_committee_summary() -> dict:
+    return {
+        "claim_boundary": "synthetic",
+        "paired_common_count": 2,
+        "baseline_only_count": 0,
+        "candidate_only_count": 0,
+        "status_transitions": {
+            "Reject_to_Reject": 1,
+            "Investigate_to_Investigate": 1,
+        },
+        "status_flip_count": 0,
+        "status_flip_rate": 0.0,
+        "bear_severity_transitions": {"low_to_low": 2},
+        "bear_severity_change_count": 0,
+        "bear_severity_change_rate": 0.0,
+        "mean_overall_score_delta": 0.0,
+    }
+
+
+def test_model_only_paired_committee_small_cells_are_public():
+    public = public_paired_committee(_paired_committee_summary())
+    assert public["paired_common_count"] == 2
+    assert public["baseline_only_count"] == 0
+    assert public["candidate_only_count"] == 0
+    assert public["status_transitions"]["Watch_to_Watch"] == 0
+    assert public["status_flip_count"] == 0
+    assert public["status_flip_rate"] == 0.0
+    assert public["bear_severity_transitions"]["high_to_high"] == 0
+    assert public["bear_severity_change_count"] == 0
+    assert public["bear_severity_change_rate"] == 0.0
+    assert public["mean_overall_score_delta"] == 0.0
+
+
+def _status_support_feasible_values(
+    paired_public: dict, run_public: dict, *, run: str, status: str, category: str,
+) -> set[int]:
+    statuses = ("Reject", "Watch", "Investigate")
+    transition_names = [
+        f"{left}_to_{right}" for left in statuses for right in statuses
+    ]
+    audit = LinearDisclosureAudit(upper=run_public["committee_scored_count"])
+    for name in transition_names:
+        audit.variable(name, paired_public["status_transitions"][name])
+    audit.equality(
+        {name: 1 for name in transition_names},
+        paired_public["paired_common_count"],
+    )
+    audit.equality(
+        {
+            name: 1
+            for name in transition_names
+            if name.split("_to_")[0] != name.split("_to_")[1]
+        },
+        paired_public["status_flip_count"],
+    )
+
+    target = f"support.{run}.{status}.{category}"
+    audit.variable(target, run_public["support_composition_by_status"][status][category])
+    other = f"support.{run}.{status}.other"
+    audit.domains[other] = tuple(range(17))  # four other protected cells, each 0..4
+    only_total = paired_public[
+        "baseline_only_count" if run == "baseline" else "candidate_only_count"
+    ]
+    only_status = f"{run}.only.{status}"
+    audit.domains[only_status] = tuple(range(only_total + 1))
+    if run == "baseline":
+        margin = {
+            f"{status}_to_{right}": 1 for right in statuses
+        }
+    else:
+        margin = {
+            f"{left}_to_{status}": 1 for left in statuses
+        }
+    audit.equality({**margin, only_status: 1, target: -1, other: -1})
+    return audit.feasible_values(target)
+
+
+def test_whole_report_auditor_includes_restored_committee_fields():
+    support = {
+        "Reject": {"strong": 1, "weak": 0, "ambiguous": 0, "contradicted": 0, "abstain": 0},
+        "Watch": {"strong": 0, "weak": 0, "ambiguous": 0, "contradicted": 0, "abstain": 0},
+        "Investigate": {"strong": 0, "weak": 1, "ambiguous": 0, "contradicted": 0, "abstain": 0},
+    }
+    private_run = _committee_summary(support)
+    assert _committee_status_transitions_need_suppression(private_run)
+    public_runs = {
+        run: public_committee(private_run) for run in ("baseline", "candidate")
+    }
+    paired = public_paired_committee(
+        _paired_committee_summary(), suppress_status_transitions=True
+    )
+
+    # Model-only aggregates remain exact; only the status table whose margins
+    # touch benchmark support cells receives complementary suppression.
+    assert paired["paired_common_count"] == 2
+    assert paired["status_flip_count"] == 0
+    assert paired["bear_severity_change_count"] == 0
+    assert paired["mean_overall_score_delta"] == 0.0
+    assert set(paired["status_transitions"].values()) == {SMALL}
+
+    for run, status, category in itertools.product(
+        ("baseline", "candidate"), support, next(iter(support.values()))
+    ):
+        actual = support[status][category]
+        feasible = _status_support_feasible_values(
+            paired, public_runs[run], run=run, status=status, category=category
+        )
+        assert actual in feasible
+        assert len(feasible) > 1, f"{run}.{status}.{category} recovered as {actual}"
 
 
 @pytest.mark.parametrize(

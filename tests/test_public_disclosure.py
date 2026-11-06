@@ -17,9 +17,11 @@ import pytest
 from moat.evals.constants import TIER_C_OUTCOMES
 from moat.evals.reporting import (
     _committee_status_transitions_need_suppression,
+    _persona_external_alignment_suppression,
     public_committee,
     public_paired_committee,
     public_paired_tier_a,
+    public_persona,
     public_tier_a,
     public_tier_c,
     public_valuation,
@@ -575,6 +577,88 @@ def test_whole_report_auditor_includes_restored_committee_fields():
         )
         assert actual in feasible
         assert len(feasible) > 1, f"{run}.{status}.{category} recovered as {actual}"
+
+
+def test_committee_external_support_family_suppresses_linked_margins():
+    support = {
+        "Reject": {"strong": 10, "weak": 10, "ambiguous": 10, "contradicted": 2, "abstain": 0},
+        "Watch": {"strong": 5, "weak": 5, "ambiguous": 5, "contradicted": 5, "abstain": 5},
+        "Investigate": {"strong": 5, "weak": 5, "ambiguous": 5, "contradicted": 5, "abstain": 0},
+    }
+    private = _committee_summary(support)
+    public = public_committee(private)
+    audit = LinearDisclosureAudit(upper=private["committee_scored_count"])
+    row_names = {}
+    for category in ("strong", "weak", "ambiguous", "contradicted"):
+        name = f"reject.{category}"
+        row_names[name] = 1
+        audit.variable(
+            name, public["support_composition_by_status"]["Reject"][category]
+        )
+        alias = f"enrichment.reject.{category}"
+        audit.variable(
+            alias,
+            public["research_priority_enrichment"]["Reject"]["composition"][category],
+        )
+        audit.equality({name: 1, alias: -1})
+    audit.variable(
+        "reject.denominator",
+        public["support_composition_by_status_denominators"]["Reject"],
+    )
+    audit.equality({"reject.denominator": -1, **row_names})
+    audit.variable(
+        "reject.enrichment_denominator",
+        public["research_priority_enrichment"]["Reject"]["denominator"],
+    )
+    audit.equality({"reject.denominator": 1, "reject.enrichment_denominator": -1})
+    audit.variable(
+        "reject.supported",
+        public["research_priority_enrichment"]["Reject"]["supported_numerator"],
+    )
+    audit.equality({"reject.supported": -1, "reject.strong": 1, "reject.weak": 1})
+
+    feasible = audit.feasible_values("reject.contradicted")
+    assert support["Reject"]["contradicted"] in feasible
+    assert len(feasible) > 1
+
+
+def _persona_summary(*, valid: int, alignment_denominator: int) -> dict:
+    return {
+        "role": "synthetic",
+        "valid_verdict_count": valid,
+        "invalid_or_missing_numeric_count": 0,
+        "preflight_invalid_abstention_count": 0,
+        "component_medians": {},
+        "median_cohort": {},
+        "score_distribution": {},
+        "severity_distribution": {},
+        "high_severity_pipeline_diagnostic": {},
+        "weighted_score_point_contributions": {},
+        "counterfactuals": {},
+        "external_alignment": {
+            "synthetic_benchmark_alignment": {
+                "denominator": alignment_denominator,
+                "spearman_rho": 0.25,
+            },
+        },
+        "interpretation_boundary": "synthetic",
+        "designed_weights_note": "synthetic",
+    }
+
+
+@pytest.mark.parametrize(
+    ("valid", "denominator", "expected"),
+    [(10, 2, SMALL), (10, 8, SECONDARY), (12, 6, 6)],
+)
+def test_persona_external_alignment_suppresses_small_denominator_or_complement(
+    valid, denominator, expected,
+):
+    private = _persona_summary(valid=valid, alignment_denominator=denominator)
+    public = public_persona(private)
+    alignment = public["external_alignment"]["synthetic_benchmark_alignment"]
+    assert alignment["denominator"] == expected
+    assert alignment["spearman_rho"] == (0.25 if isinstance(expected, int) else None)
+    assert _persona_external_alignment_suppression(private) == (not isinstance(expected, int))
 
 
 @pytest.mark.parametrize(

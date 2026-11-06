@@ -1443,16 +1443,14 @@ def test_public_rates_do_not_reveal_a_small_complement_cell():
         "direct_status_star_rating_spearman_rho": association,
     })
     watch = public["research_priority_enrichment"]["Watch"]
-    assert watch["supported_numerator"] == "suppressed_lt_5"
+    assert watch["supported_numerator"] == "withheld_secondary_suppression"
+    assert watch["denominator"] == "withheld_secondary_suppression"
     assert watch["supported_rate"] is None
 
 
-@pytest.mark.parametrize(
-    ("scored", "abstained", "published"),
-    [(37, 3, False), (3, 37, False), (35, 5, True), (40, 0, False)],
-)
+@pytest.mark.parametrize(("scored", "abstained"), [(37, 3), (3, 37), (35, 5), (40, 0)])
 def test_public_external_support_split_does_not_reveal_a_small_cell_by_subtraction(
-    scored, abstained, published,
+    scored, abstained,
 ):
     from moat.evals.reporting import public_committee
 
@@ -1477,14 +1475,17 @@ def test_public_external_support_split_does_not_reveal_a_small_cell_by_subtracti
         "watch_score_external_support_trend": association,
         "direct_status_star_rating_spearman_rho": association,
     })
-    # committee_scored_count is public, so the split is published whole or not at all.
+    # Another protected cell anywhere in the connected external-support family
+    # suppresses this split too, even when both split cells are at least five.
     assert public["committee_scored_count"] == scored + abstained
-    if published:
-        assert public["external_support_scored_count"] == scored
-        assert public["external_support_abstention_count"] == abstained
-    else:
-        assert public["external_support_scored_count"] == "suppressed_lt_5"
-        assert public["external_support_abstention_count"] == "suppressed_lt_5"
+    expected_scored = (
+        "suppressed_lt_5" if scored < 5 else "withheld_secondary_suppression"
+    )
+    expected_abstained = (
+        "suppressed_lt_5" if abstained < 5 else "withheld_secondary_suppression"
+    )
+    assert public["external_support_scored_count"] == expected_scored
+    assert public["external_support_abstention_count"] == expected_abstained
 
 
 def test_public_external_support_aggregates_do_not_reconstruct_a_suppressed_split():
@@ -1527,25 +1528,30 @@ def test_public_external_support_aggregates_do_not_reconstruct_a_suppressed_spli
         "direct_status_star_rating_spearman_rho": association,
     })
 
-    assert public["external_support_scored_count"] == "suppressed_lt_5"
-    assert set(public["investigate_support_composition"].values()) == {"suppressed_lt_5"}
-    assert public["investigate_support_composition_denominator"] == "suppressed_lt_5"
-    assert public["investigate_contradiction_rate"]["denominator"] == "suppressed_lt_5"
+    assert public["external_support_scored_count"] == "withheld_secondary_suppression"
+    assert public["external_support_abstention_count"] == "suppressed_lt_5"
+    assert set(public["investigate_support_composition"].values()) == {
+        "suppressed_lt_5", "withheld_secondary_suppression",
+    }
+    assert public["investigate_support_composition_denominator"] == "withheld_secondary_suppression"
+    assert public["investigate_contradiction_rate"]["denominator"] == "withheld_secondary_suppression"
     assert public["investigate_contradiction_rate"]["value"] is None
     for cells in public["support_composition_by_status"].values():
-        assert set(cells.values()) == {"suppressed_lt_5"}
+        assert "withheld_secondary_suppression" in set(cells.values())
+        assert "suppressed_lt_5" in set(cells.values())
     assert set(public["support_composition_by_status_denominators"].values()) == {
-        "suppressed_lt_5"
+        "withheld_secondary_suppression"
     }
     for values in public["research_priority_enrichment"].values():
-        assert values["supported_numerator"] == "suppressed_lt_5"
-        assert values["denominator"] == "suppressed_lt_5"
+        assert values["supported_numerator"] == "withheld_secondary_suppression"
+        assert values["denominator"] == "withheld_secondary_suppression"
         assert values["supported_rate"] is None
-        assert set(values["composition"].values()) == {"suppressed_lt_5"}
-    assert public["priority_support_spearman_rho"]["denominator"] == "suppressed_lt_5"
+        assert "withheld_secondary_suppression" in set(values["composition"].values())
+        assert "suppressed_lt_5" in set(values["composition"].values())
+    assert public["priority_support_spearman_rho"]["denominator"] == "withheld_secondary_suppression"
     assert public["priority_support_spearman_rho"]["value"] is None
-    assert public["watch_score_external_support_trend"]["denominator"] == "suppressed_lt_5"
-    assert public["direct_status_star_rating_spearman_rho"]["denominator"] == 37
+    assert public["watch_score_external_support_trend"]["denominator"] == "withheld_secondary_suppression"
+    assert public["direct_status_star_rating_spearman_rho"]["denominator"] == "withheld_secondary_suppression"
 
 
 def test_paired_valuation_keeps_cohorts_separate_and_requires_benchmark_eligibility():

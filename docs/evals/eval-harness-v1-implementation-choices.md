@@ -49,12 +49,18 @@ specification.
   and persona/committee external-support figures that use benchmark data.
   Paired committee cohort counts, flip/change counts and rates, Bear-severity
   transitions and mean score movement are public even when zero or below five.
-  Status transitions are withheld only when their run-specific margins would
-  constrain protected external-support-by-status cells. Paired Tier A
-  transitions are public only when no Tier A benchmark family is suppressed;
-  otherwise their shared-universe counts, denominator and margins remain
-  withheld. Model-only mean score movement and bootstrap intervals remain
-  public because they add no count equality.
+  Committee external support is one connected cross-run disclosure family:
+  its overall split, by-status and Investigate compositions, margins,
+  enrichment numerators/denominators/rates, contradiction rate and support
+  associations receive secondary suppression together. Status transitions are
+  withheld only when their run-specific margins would constrain that protected
+  family. The direct star-rating association and all persona external-
+  alignment associations are suppressed across runs when either their
+  benchmark denominator or its complement to the public model cohort is below
+  five. Paired Tier A transitions are public only when no Tier A benchmark
+  family is suppressed; otherwise their shared-universe counts, denominator
+  and margins remain withheld. Model-only mean score movement and bootstrap
+  intervals remain public because they add no count equality.
 - **Pete decision — material benchmark publication reduction:** connected-
   family suppression intentionally withholds some cells of five or more, and
   may withhold all numeric results for an affected Tier A, valuation-cohort or

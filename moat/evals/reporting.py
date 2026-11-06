@@ -80,12 +80,30 @@ def _public_metric(metric: dict, *, secondary_suppression: bool = False) -> dict
     return {key: metric[key] for key in ("numerator", "denominator", "value", "kind") if key in metric}
 
 
-def _public_association(metric: dict) -> dict:
+def _association_needs_suppression(metric: dict, cohort_total: int | None = None) -> bool:
+    denominator = metric.get("denominator", 0)
+    return denominator < PUBLIC_DISCLOSURE_MIN_CELL or (
+        cohort_total is not None
+        and cohort_total - denominator < PUBLIC_DISCLOSURE_MIN_CELL
+    )
+
+
+def _public_association(
+    metric: dict, *, secondary_suppression: bool = False,
+    cohort_total: int | None = None,
+) -> dict:
     denominator = metric.get("denominator", 0)
     value_key = "value" if "value" in metric else "spearman_rho"
+    suppress = secondary_suppression or _association_needs_suppression(
+        metric, cohort_total
+    )
     return {
-        "denominator": denominator if denominator >= PUBLIC_DISCLOSURE_MIN_CELL else "suppressed_lt_5",
-        value_key: metric.get(value_key) if denominator >= PUBLIC_DISCLOSURE_MIN_CELL else None,
+        "denominator": (
+            denominator
+            if not suppress
+            else _secondary_suppressed_count(denominator)
+        ),
+        value_key: metric.get(value_key) if not suppress else None,
         **({"kind": metric["kind"]} if "kind" in metric else {}),
     }
 
@@ -313,116 +331,149 @@ def public_valuation(
     return output
 
 
-def public_committee(summary: dict) -> dict:
-    investigate_denominator = summary["investigate_contradiction_rate"]["denominator"]
-    hide_external_support = _small_cell_or_complement(
-        summary["external_support_abstention_count"],
-        summary["committee_scored_count"],
-    )
+def _committee_external_support_suppression(summary: dict) -> bool:
+    contradiction = summary["investigate_contradiction_rate"]
+    enrichment = summary["research_priority_enrichment"]
+    protected_counts = {
+        "external_support_scored_count": summary["external_support_scored_count"],
+        "external_support_abstention_count": summary["external_support_abstention_count"],
+        "investigate_support_composition": summary["investigate_support_composition"],
+        "investigate_support_composition_denominator": summary[
+            "investigate_support_composition_denominator"
+        ],
+        "investigate_contradiction_rate": {
+            "numerator": contradiction["numerator"],
+            "denominator": contradiction["denominator"],
+            "complement": contradiction["denominator"] - contradiction["numerator"],
+        },
+        "support_composition_by_status": summary["support_composition_by_status"],
+        "support_composition_by_status_denominators": summary[
+            "support_composition_by_status_denominators"
+        ],
+        "research_priority_enrichment": {
+            status: {
+                "supported_numerator": values["supported_numerator"],
+                "denominator": values["denominator"],
+                "unsupported_complement": (
+                    values["denominator"] - values["supported_numerator"]
+                ),
+                "composition": values["composition"],
+            }
+            for status, values in enrichment.items()
+        },
+        "priority_support_denominator": summary["priority_support_spearman_rho"][
+            "denominator"
+        ],
+        "watch_support_denominator": summary[
+            "watch_score_external_support_trend"
+        ]["denominator"],
+    }
+    return _has_small_count(protected_counts)
+
+
+def public_committee(
+    summary: dict, *, external_support_secondary: bool | None = None,
+    direct_star_secondary: bool | None = None,
+) -> dict:
+    if external_support_secondary is None:
+        external_support_secondary = _committee_external_support_suppression(summary)
+    if direct_star_secondary is None:
+        direct_star_secondary = _association_needs_suppression(
+            summary["direct_status_star_rating_spearman_rho"],
+            summary["committee_scored_count"],
+        )
     result = {
         "eligible_screen_passer_count": summary["eligible_screen_passer_count"],
         "committee_scored_count": summary["committee_scored_count"],
         "committee_abstention_count": summary["committee_abstention_count"],
         "committee_coverage_rate": summary["committee_coverage_rate"],
-        # The two counts partition the public committee_scored_count, so one
-        # small cell would be recoverable by subtraction from the other.
-        **(
-            {
-                "external_support_scored_count": "suppressed_lt_5",
-                "external_support_abstention_count": "suppressed_lt_5",
-            }
-            if hide_external_support
-            else {
-                "external_support_scored_count": summary["external_support_scored_count"],
-                "external_support_abstention_count": summary["external_support_abstention_count"],
-            }
+        "external_support_scored_count": _public_count_tree(
+            summary["external_support_scored_count"],
+            secondary_suppression=external_support_secondary,
         ),
-        "investigate_support_composition": {
-            key: _suppressed_count(value) for key, value in summary["investigate_support_composition"].items()
-        },
-        "investigate_support_composition_denominator": _suppressed_count(
-            summary["investigate_support_composition_denominator"]
+        "external_support_abstention_count": _public_count_tree(
+            summary["external_support_abstention_count"],
+            secondary_suppression=external_support_secondary,
         ),
-        "investigate_contradiction_rate": (
-            _public_metric(summary["investigate_contradiction_rate"])
-            if investigate_denominator >= PUBLIC_DISCLOSURE_MIN_CELL
-            else {"numerator": "suppressed_lt_5", "denominator": "suppressed_lt_5", "value": None, "kind": summary["investigate_contradiction_rate"]["kind"], "analysis_status": "ran_but_publicly_suppressed"}
+        "investigate_support_composition": _public_count_tree(
+            summary["investigate_support_composition"],
+            secondary_suppression=external_support_secondary,
         ),
-        "support_composition_by_status": {
-            status: {key: _suppressed_count(value) for key, value in cells.items()}
-            for status, cells in summary["support_composition_by_status"].items()
-        },
-        "support_composition_by_status_denominators": {
-            status: _suppressed_count(value)
-            for status, value in summary["support_composition_by_status_denominators"].items()
-        },
+        "investigate_support_composition_denominator": _public_count_tree(
+            summary["investigate_support_composition_denominator"],
+            secondary_suppression=external_support_secondary,
+        ),
+        "investigate_contradiction_rate": _public_metric(
+            summary["investigate_contradiction_rate"],
+            secondary_suppression=external_support_secondary,
+        ),
+        "support_composition_by_status": _public_count_tree(
+            summary["support_composition_by_status"],
+            secondary_suppression=external_support_secondary,
+        ),
+        "support_composition_by_status_denominators": _public_count_tree(
+            summary["support_composition_by_status_denominators"],
+            secondary_suppression=external_support_secondary,
+        ),
         "research_priority_enrichment": {
             status: {
-                "supported_numerator": (
-                    "suppressed_lt_5"
-                    if _small_cell_or_complement(values["supported_numerator"], values["denominator"])
-                    else values["supported_numerator"]
+                "supported_numerator": _public_count_tree(
+                    values["supported_numerator"],
+                    secondary_suppression=external_support_secondary,
                 ),
-                "denominator": _suppressed_count(values["denominator"]),
+                "denominator": _public_count_tree(
+                    values["denominator"],
+                    secondary_suppression=external_support_secondary,
+                ),
                 "supported_rate": (
-                    None
-                    if values["denominator"] < PUBLIC_DISCLOSURE_MIN_CELL
-                    or _small_cell_or_complement(values["supported_numerator"], values["denominator"])
-                    else values["supported_rate"]
+                    None if external_support_secondary else values["supported_rate"]
                 ),
-                "composition": {key: _suppressed_count(value) for key, value in values["composition"].items()},
+                "composition": _public_count_tree(
+                    values["composition"],
+                    secondary_suppression=external_support_secondary,
+                ),
             }
             for status, values in summary["research_priority_enrichment"].items()
         },
-        "priority_support_spearman_rho": _public_association(summary["priority_support_spearman_rho"]),
-        "watch_score_external_support_trend": _public_association(summary["watch_score_external_support_trend"]),
-        "direct_status_star_rating_spearman_rho": _public_association(summary["direct_status_star_rating_spearman_rho"]),
+        "priority_support_spearman_rho": _public_association(
+            summary["priority_support_spearman_rho"],
+            secondary_suppression=external_support_secondary,
+        ),
+        "watch_score_external_support_trend": _public_association(
+            summary["watch_score_external_support_trend"],
+            secondary_suppression=external_support_secondary,
+        ),
+        "direct_status_star_rating_spearman_rho": _public_association(
+            summary["direct_status_star_rating_spearman_rho"],
+            secondary_suppression=direct_star_secondary,
+            cohort_total=summary["committee_scored_count"],
+        ),
     }
-    if hide_external_support:
-        # These fields are all derived from the same external-support cohort.
-        # Their denominators and count partitions would otherwise reconstruct
-        # the suppressed split, either directly or by summing across statuses.
-        result["investigate_support_composition"] = {
-            key: "suppressed_lt_5" for key in summary["investigate_support_composition"]
-        }
-        result["investigate_support_composition_denominator"] = "suppressed_lt_5"
+    if external_support_secondary:
         result["investigate_contradiction_rate"] = {
-            "numerator": "suppressed_lt_5",
-            "denominator": "suppressed_lt_5",
-            "value": None,
-            "kind": summary["investigate_contradiction_rate"]["kind"],
+            **result["investigate_contradiction_rate"],
             "analysis_status": "ran_but_publicly_suppressed",
         }
-        result["support_composition_by_status"] = {
-            status: {key: "suppressed_lt_5" for key in cells}
-            for status, cells in summary["support_composition_by_status"].items()
-        }
-        result["support_composition_by_status_denominators"] = {
-            status: "suppressed_lt_5"
-            for status in summary["support_composition_by_status_denominators"]
-        }
-        result["research_priority_enrichment"] = {
-            status: {
-                "supported_numerator": "suppressed_lt_5",
-                "denominator": "suppressed_lt_5",
-                "supported_rate": None,
-                "composition": {key: "suppressed_lt_5" for key in values["composition"]},
-            }
-            for status, values in summary["research_priority_enrichment"].items()
-        }
-        for field in ("priority_support_spearman_rho", "watch_score_external_support_trend"):
-            association = result[field]
-            association["denominator"] = "suppressed_lt_5"
-            association["value"] = None
     return result
 
 
 def _committee_status_transitions_need_suppression(summary: dict) -> bool:
     """Status margins constrain benchmark-derived support cells by status."""
-    return _has_small_count(summary["support_composition_by_status"])
+    return _committee_external_support_suppression(summary)
 
 
-def public_persona(summary: dict) -> dict:
+def _persona_external_alignment_suppression(summary: dict) -> bool:
+    return any(
+        _association_needs_suppression(values, summary["valid_verdict_count"])
+        for values in summary["external_alignment"].values()
+    )
+
+
+def public_persona(
+    summary: dict, *, external_alignment_secondary: bool | None = None,
+) -> dict:
+    if external_alignment_secondary is None:
+        external_alignment_secondary = _persona_external_alignment_suppression(summary)
     counterfactuals = {}
     for name, values in summary["counterfactuals"].items():
         counterfactuals[name] = {
@@ -443,7 +494,12 @@ def public_persona(summary: dict) -> dict:
         "weighted_score_point_contributions": summary["weighted_score_point_contributions"],
         "counterfactuals": counterfactuals,
         "external_alignment": {
-            name: _public_association(values) for name, values in summary["external_alignment"].items()
+            name: _public_association(
+                values,
+                secondary_suppression=external_alignment_secondary,
+                cohort_total=summary["valid_verdict_count"],
+            )
+            for name, values in summary["external_alignment"].items()
         },
         "interpretation_boundary": summary["interpretation_boundary"],
         "designed_weights_note": summary["designed_weights_note"],
@@ -630,9 +686,20 @@ def write_public_report(
         for summary in run_summaries.values()
         if _valuation_suppression(summary)
     }
-    suppress_committee_status_transitions = any(
-        _committee_status_transitions_need_suppression(summary)
+    suppress_committee_external_support = any(
+        _committee_external_support_suppression(summary)
         for summary in committee_summaries.values()
+    )
+    suppress_committee_direct_star = any(
+        _association_needs_suppression(
+            summary["direct_status_star_rating_spearman_rho"],
+            summary["committee_scored_count"],
+        )
+        for summary in committee_summaries.values()
+    )
+    suppress_persona_external_alignment = any(
+        _persona_external_alignment_suppression(summary)
+        for summary in persona_summaries.values()
     )
     public = {
         "report_version": "eval-public-tier-a-c-v1",
@@ -679,7 +746,14 @@ def write_public_report(
             )
             for name, summary in valuation_summaries.items()
         },
-        "committee": {name: public_committee(summary) for name, summary in committee_summaries.items()},
+        "committee": {
+            name: public_committee(
+                summary,
+                external_support_secondary=suppress_committee_external_support,
+                direct_star_secondary=suppress_committee_direct_star,
+            )
+            for name, summary in committee_summaries.items()
+        },
         "tier_c": {
             name: public_tier_c(summary, secondary_suppression=tier_c_secondary)
             for name, summary in tier_c_summaries.items()
@@ -696,11 +770,15 @@ def write_public_report(
             ),
             "committee": public_paired_committee(
                 committee_paired,
-                suppress_status_transitions=suppress_committee_status_transitions,
+                suppress_status_transitions=suppress_committee_external_support,
             ),
         },
         "persona_influence_and_external_alignment": {
-            name: public_persona(summary) for name, summary in persona_summaries.items()
+            name: public_persona(
+                summary,
+                external_alignment_secondary=suppress_persona_external_alignment,
+            )
+            for name, summary in persona_summaries.items()
         },
         "sensitivity_analyses": {
             "committee_noise_floor": public_noise_floor(noise_summary),

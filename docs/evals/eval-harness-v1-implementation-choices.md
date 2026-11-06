@@ -53,8 +53,10 @@ specification.
   its overall split, by-status and Investigate compositions, margins,
   enrichment numerators/denominators/rates, contradiction rate and support
   associations receive secondary suppression together. Status transitions are
-  withheld only when their run-specific margins would constrain that protected
-  family. The direct star-rating association and all persona external-
+  withheld in both the baseline/candidate and candidate/replicate tables when
+  their run-specific margins would constrain that protected family; aggregate
+  status-flip counts and rates remain public as Amendment 1 requires. The
+  direct star-rating association and all persona external-
   alignment associations are suppressed across runs when either their
   benchmark denominator or its complement to the public model cohort is below
   five. Paired Tier A transitions are public only when no Tier A benchmark

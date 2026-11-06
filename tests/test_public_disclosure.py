@@ -19,6 +19,7 @@ from moat.evals.reporting import (
     _committee_status_transitions_need_suppression,
     _persona_external_alignment_suppression,
     public_committee,
+    public_noise_floor,
     public_paired_committee,
     public_paired_tier_a,
     public_persona,
@@ -487,6 +488,34 @@ def _paired_committee_summary() -> dict:
     }
 
 
+def _noise_floor_summary() -> dict:
+    return {
+        "status": "available",
+        "replicate_run_id": "synthetic-replicate",
+        "input_equivalence_method": "synthetic",
+        "paired_company_count": 2,
+        "stored_preflight_invalid_abstention_count": 0,
+        "replicate_preflight_invalid_abstention_count": 0,
+        "component_score_delta_distributions": {},
+        "overall_score_delta_distribution": {},
+        "absolute_overall_score_delta_distribution": {},
+        "practical_noise_boundary": {},
+        "overall_score_noise_interpretation_counts": {},
+        "status_flip_count": 0,
+        "status_flip_rate": 0.0,
+        "status_transitions": {
+            "Reject_to_Reject": 1,
+            "Investigate_to_Investigate": 1,
+        },
+        "bear_severity_change_count": 0,
+        "bear_severity_change_rate": 0.0,
+        "bear_severity_transitions": {},
+        "status_flip_comparison": {},
+        "bear_severity_change_comparison": {},
+        "limitation": "synthetic",
+    }
+
+
 def test_model_only_paired_committee_small_cells_are_public():
     public = public_paired_committee(_paired_committee_summary())
     assert public["paired_common_count"] == 2
@@ -499,6 +528,20 @@ def test_model_only_paired_committee_small_cells_are_public():
     assert public["bear_severity_change_count"] == 0
     assert public["bear_severity_change_rate"] == 0.0
     assert public["mean_overall_score_delta"] == 0.0
+
+
+def test_noise_status_transitions_publish_only_without_benchmark_margin_risk():
+    private = _noise_floor_summary()
+    public = public_noise_floor(private)
+    assert len(public["status_transitions"]) == 9
+    assert public["status_transitions"]["Watch_to_Watch"] == 0
+    assert public["status_flip_count"] == 0
+    assert public["status_flip_rate"] == 0.0
+
+    protected = public_noise_floor(private, suppress_status_transitions=True)
+    assert set(protected["status_transitions"].values()) == {SMALL}
+    assert protected["status_flip_count"] == 0
+    assert protected["status_flip_rate"] == 0.0
 
 
 def _status_support_feasible_values(
@@ -545,6 +588,40 @@ def _status_support_feasible_values(
     return audit.feasible_values(target)
 
 
+def _noise_support_feasible_values(
+    noise_public: dict, run_public: dict, *, status: str, category: str,
+) -> set[int]:
+    statuses = ("Reject", "Watch", "Investigate")
+    transition_names = [
+        f"{left}_to_{right}" for left in statuses for right in statuses
+    ]
+    audit = LinearDisclosureAudit(upper=run_public["committee_scored_count"])
+    for name in transition_names:
+        audit.variable(name, noise_public["status_transitions"][name])
+    audit.equality(
+        {name: 1 for name in transition_names},
+        noise_public["paired_company_count"],
+    )
+    audit.equality(
+        {
+            name: 1
+            for name in transition_names
+            if name.split("_to_")[0] != name.split("_to_")[1]
+        },
+        noise_public["status_flip_count"],
+    )
+    target = f"noise_support.{status}.{category}"
+    audit.variable(target, run_public["support_composition_by_status"][status][category])
+    other = f"noise_support.{status}.other"
+    audit.domains[other] = tuple(range(17))
+    audit.equality({
+        **{f"{status}_to_{right}": 1 for right in statuses},
+        target: -1,
+        other: -1,
+    })
+    return audit.feasible_values(target)
+
+
 def test_whole_report_auditor_includes_restored_committee_fields():
     support = {
         "Reject": {"strong": 1, "weak": 0, "ambiguous": 0, "contradicted": 0, "abstain": 0},
@@ -559,6 +636,9 @@ def test_whole_report_auditor_includes_restored_committee_fields():
     paired = public_paired_committee(
         _paired_committee_summary(), suppress_status_transitions=True
     )
+    noise = public_noise_floor(
+        _noise_floor_summary(), suppress_status_transitions=True
+    )
 
     # Model-only aggregates remain exact; only the status table whose margins
     # touch benchmark support cells receives complementary suppression.
@@ -567,6 +647,9 @@ def test_whole_report_auditor_includes_restored_committee_fields():
     assert paired["bear_severity_change_count"] == 0
     assert paired["mean_overall_score_delta"] == 0.0
     assert set(paired["status_transitions"].values()) == {SMALL}
+    assert noise["status_flip_count"] == 0
+    assert noise["status_flip_rate"] == 0.0
+    assert set(noise["status_transitions"].values()) == {SMALL}
 
     for run, status, category in itertools.product(
         ("baseline", "candidate"), support, next(iter(support.values()))
@@ -577,6 +660,14 @@ def test_whole_report_auditor_includes_restored_committee_fields():
         )
         assert actual in feasible
         assert len(feasible) > 1, f"{run}.{status}.{category} recovered as {actual}"
+        if run == "candidate":
+            noise_feasible = _noise_support_feasible_values(
+                noise, public_runs[run], status=status, category=category
+            )
+            assert actual in noise_feasible
+            assert len(noise_feasible) > 1, (
+                f"noise.{status}.{category} recovered as {actual}"
+            )
 
 
 def test_committee_external_support_family_suppresses_linked_margins():

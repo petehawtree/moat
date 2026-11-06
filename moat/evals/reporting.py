@@ -506,13 +506,18 @@ def public_persona(
     }
 
 
-def public_noise_floor(summary: dict) -> dict:
+def public_noise_floor(
+    summary: dict, *, suppress_status_transitions: bool = False,
+) -> dict:
     if summary.get("status") != "available":
         return {
             "status": summary.get("status"),
             "reason": summary.get("reason"),
             "interpretation": summary.get("interpretation"),
         }
+    status_transitions = _fixed_transitions(
+        summary["status_transitions"], ("Reject", "Watch", "Investigate")
+    )
     return {
         "status": "available",
         "replicate_run_id": summary["replicate_run_id"],
@@ -527,7 +532,10 @@ def public_noise_floor(summary: dict) -> dict:
         "overall_score_noise_interpretation_counts": summary["overall_score_noise_interpretation_counts"],
         "status_flip_count": summary["status_flip_count"],
         "status_flip_rate": summary["status_flip_rate"],
-        "status_transitions": summary["status_transitions"],
+        "status_transitions": (
+            _public_count_tree(status_transitions, secondary_suppression=True)
+            if suppress_status_transitions else status_transitions
+        ),
         "bear_severity_change_count": summary["bear_severity_change_count"],
         "bear_severity_change_rate": summary["bear_severity_change_rate"],
         "bear_severity_transitions": summary["bear_severity_transitions"],
@@ -781,7 +789,10 @@ def write_public_report(
             for name, summary in persona_summaries.items()
         },
         "sensitivity_analyses": {
-            "committee_noise_floor": public_noise_floor(noise_summary),
+            "committee_noise_floor": public_noise_floor(
+                noise_summary,
+                suppress_status_transitions=suppress_committee_external_support,
+            ),
             "deterministic_per_fix_replay": replay_summary,
         },
         "limitations": [

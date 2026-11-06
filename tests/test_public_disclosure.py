@@ -395,8 +395,8 @@ def test_model_only_paired_tier_a_zeros_publish_only_without_benchmark_suppressi
         "outcome_transitions": {"pass_to_pass": 12},
         "mean_composite_score_delta": 0.0,
         "score_delta_denominator": 12,
-        "pass_rate_delta_paired_bootstrap_interval": None,
-        "mean_score_delta_paired_bootstrap_interval": None,
+        "pass_rate_delta_paired_bootstrap_interval": [-0.1, 0.1],
+        "mean_score_delta_paired_bootstrap_interval": [-1.0, 1.0],
     }
     public = public_paired_tier_a(private)
     assert len(public["outcome_transitions"]) == 9
@@ -409,7 +409,9 @@ def test_model_only_paired_tier_a_zeros_publish_only_without_benchmark_suppressi
     assert protected["outcome_transitions"]["fail_to_abstain"] == SMALL
     assert protected["outcome_transitions"]["pass_to_pass"] == SECONDARY
     assert protected["entrants"] == SMALL
-    assert protected["mean_composite_score_delta"] is None
+    assert protected["mean_composite_score_delta"] == 0.0
+    assert protected["pass_rate_delta_paired_bootstrap_interval"] == [-0.1, 0.1]
+    assert protected["mean_score_delta_paired_bootstrap_interval"] == [-1.0, 1.0]
 
 
 def _committee_summary(support_by_status: dict[str, dict[str, int]]) -> dict:

@@ -509,13 +509,13 @@ def public_paired_tier_a(summary: dict, *, force_secondary: bool = False) -> dic
     return {
         "claim_boundary": summary["claim_boundary"],
         **public_counts,
-        "mean_composite_score_delta": None if secondary else summary["mean_composite_score_delta"],
-        "pass_rate_delta_paired_bootstrap_interval": (
-            None if secondary else summary["pass_rate_delta_paired_bootstrap_interval"]
-        ),
-        "mean_score_delta_paired_bootstrap_interval": (
-            None if secondary else summary["mean_score_delta_paired_bootstrap_interval"]
-        ),
+        "mean_composite_score_delta": summary["mean_composite_score_delta"],
+        "pass_rate_delta_paired_bootstrap_interval": summary[
+            "pass_rate_delta_paired_bootstrap_interval"
+        ],
+        "mean_score_delta_paired_bootstrap_interval": summary[
+            "mean_score_delta_paired_bootstrap_interval"
+        ],
     }
 
 

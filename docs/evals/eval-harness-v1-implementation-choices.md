@@ -52,7 +52,9 @@ specification.
   Status transitions are withheld only when their run-specific margins would
   constrain protected external-support-by-status cells. Paired Tier A
   transitions are public only when no Tier A benchmark family is suppressed;
-  otherwise their shared-universe margins remain withheld.
+  otherwise their shared-universe counts, denominator and margins remain
+  withheld. Model-only mean score movement and bootstrap intervals remain
+  public because they add no count equality.
 - **Pete decision — material benchmark publication reduction:** connected-
   family suppression intentionally withholds some cells of five or more, and
   may withhold all numeric results for an affected Tier A, valuation-cohort or

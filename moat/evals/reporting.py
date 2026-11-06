@@ -110,6 +110,11 @@ def public_tier_a(
     local_coverage, local_outcomes = _tier_a_suppression(summary)
     coverage_secondary = local_coverage if coverage_secondary is None else coverage_secondary
     outcome_secondary = local_outcomes if outcome_secondary is None else outcome_secondary
+    # Screen totals and both classification tables reconstruct the labelled
+    # cohort, and screen totals reconstruct the universe. Coverage suppression
+    # must therefore flow into the outcome family even if all outcome cells are
+    # individually large enough to publish.
+    outcome_secondary = coverage_secondary or outcome_secondary
     table = _public_count_tree(
         summary["pass_fail_abstain_by_moat"],
         secondary_suppression=outcome_secondary,
@@ -602,7 +607,9 @@ def write_public_report(
 ) -> None:
     tier_a_suppression = [_tier_a_suppression(summary) for summary in tier_a_summaries.values()]
     coverage_secondary = any(coverage for coverage, _ in tier_a_suppression)
-    tier_a_outcome_secondary = any(outcomes for _, outcomes in tier_a_suppression)
+    tier_a_outcome_secondary = coverage_secondary or any(
+        outcomes for _, outcomes in tier_a_suppression
+    )
     tier_c_secondary = any(_tier_c_suppression(summary) for summary in tier_c_summaries.values())
     valuation_secondary_cohorts = {
         summary["cohort"]

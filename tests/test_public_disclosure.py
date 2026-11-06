@@ -105,44 +105,88 @@ def _assert_each_small_cell_ambiguous(
         assert len(feasible) > 1, f"{name} is recoverable as {next(iter(feasible))}"
 
 
-def _tier_a_summary(*, excluded: int, abstentions: tuple[int, int, int]) -> dict:
+def _tier_a_summary(
+    *, excluded: int, abstentions: tuple[int, int, int],
+    pass_counts: tuple[int, int, int] = (5, 5, 5),
+    fail_counts: tuple[int, int, int] = (5, 5, 5),
+) -> dict:
     labels = ("Wide", "Narrow", "None")
     table = {
-        "pass": dict(zip(labels, (5, 5, 5))),
-        "fail": dict(zip(labels, (5, 5, 5))),
+        "pass": dict(zip(labels, pass_counts)),
+        "fail": dict(zip(labels, fail_counts)),
         "abstain": dict(zip(labels, abstentions)),
     }
     labelled = sum(sum(cells.values()) for cells in table.values())
+    universe = labelled + excluded
+    screen_abstentions = sum(abstentions)
+    label_margins = {
+        label: sum(cells[label] for cells in table.values())
+        for label in labels
+    }
     return {
         "orientation": "primary",
-        "universe_count": labelled + excluded,
+        "universe_count": universe,
         "benchmark_labelled_count": labelled,
-        "screen_scored_count": labelled - sum(abstentions),
-        "screen_abstention_count": sum(abstentions),
-        "screen_coverage_rate": (labelled - sum(abstentions)) / labelled,
+        "screen_scored_count": universe - screen_abstentions,
+        "screen_abstention_count": screen_abstentions,
+        "screen_coverage_rate": (universe - screen_abstentions) / universe,
         "excluded_count": excluded,
         "pass_fail_abstain_by_moat": table,
         "metrics": {},
         "wide_precision_bootstrap_interval": None,
         "moat_distribution_by_run_derived_stratum": {
-            "pass": dict(zip(labels, (5, 5, 5))),
+            "synthetic_all": label_margins,
         },
     }
 
 
 def test_tier_a_coverage_exclusion_is_not_recoverable_by_subtraction():
-    private = _tier_a_summary(excluded=2, abstentions=(5, 5, 5))
+    private = _tier_a_summary(
+        excluded=3,
+        pass_counts=(20, 15, 10),
+        fail_counts=(15, 12, 5),
+        abstentions=(10, 5, 5),
+    )
     public = public_tier_a(private)
     audit = LinearDisclosureAudit(upper=private["universe_count"])
     values = {
         "universe": private["universe_count"],
         "labelled": private["benchmark_labelled_count"],
         "excluded": private["excluded_count"],
+        "scored": private["screen_scored_count"],
+        "abstention": private["screen_abstention_count"],
     }
     audit.variable("universe", public["universe_count"])
     audit.variable("labelled", public["benchmark_labelled_count"])
     audit.variable("excluded", public["excluded_count"])
+    audit.variable("scored", public["screen_scored_count"])
+    audit.variable("abstention", public["screen_abstention_count"])
     audit.equality({"universe": 1, "labelled": -1, "excluded": -1})
+    audit.equality({"universe": 1, "scored": -1, "abstention": -1})
+
+    table_cells = {}
+    for outcome, cells in private["pass_fail_abstain_by_moat"].items():
+        for label, value in cells.items():
+            name = f"outcome.{outcome}.{label}"
+            values[name] = value
+            table_cells[name] = 1
+            audit.variable(
+                name,
+                public["pass_fail_abstain_by_moat"][outcome][label],
+            )
+    audit.equality({"labelled": -1, **table_cells})
+
+    stratum_cells = {}
+    for stratum, cells in private["moat_distribution_by_run_derived_stratum"].items():
+        for label, value in cells.items():
+            name = f"stratum.{stratum}.{label}"
+            values[name] = value
+            stratum_cells[name] = 1
+            audit.variable(
+                name,
+                public["moat_distribution_by_run_derived_stratum"][stratum][label],
+            )
+    audit.equality({"labelled": -1, **stratum_cells})
     _assert_each_small_cell_ambiguous(audit, values)
 
 

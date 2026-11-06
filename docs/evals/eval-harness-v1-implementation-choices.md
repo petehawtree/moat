@@ -19,9 +19,12 @@ specification.
 - Secondary suppression operates on connected disclosure families, not one
   JSON table at a time. If either run contains a protected Tier A outcome cell,
   both runs' outcome/stratum tables, linked totals, rates, metrics, intervals
-  and paired aggregates are withheld. Tier A benchmark coverage is a separate
-  cross-run family containing universe, labelled and excluded counts. This
-  prevents cross-run subtraction from undoing suppression.
+  and paired aggregates are withheld. Tier A benchmark coverage starts with a
+  cross-run family containing universe, labelled and excluded counts, but a
+  protected coverage cell also suppresses the outcome family: screen totals
+  reconstruct the universe while either classification table reconstructs the
+  labelled cohort. This transitive rule prevents within-run and cross-run
+  subtraction from undoing suppression.
 - Valuation secondary suppression is connected by analyst/quantitative cohort
   across both views and both runs. A protected cell withholds that cohort's
   contingency cells, row and column margins, agreement and other table-derived

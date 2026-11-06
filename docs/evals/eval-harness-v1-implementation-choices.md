@@ -11,6 +11,63 @@ specification.
 - Public disclosure suppresses each benchmark-derived count below five. A rate
   is hidden when its numerator, denominator or complement (denominator minus
   numerator) is below five.
+- Section 16's phrase “cells containing fewer than five benchmark-derived
+  companies” has no zero-cell exception. Zero through four are therefore all
+  protected. `suppressed_lt_5` denotes a protected cell; a large cell hidden
+  to prevent complementary reconstruction is labelled
+  `withheld_secondary_suppression` and carries no numerical bound.
+- Secondary suppression operates on connected disclosure families, not one
+  JSON table at a time. If either run contains a protected Tier A outcome cell,
+  both runs' outcome/stratum tables, linked totals, rates, metrics, intervals
+  and paired aggregates are withheld. Tier A benchmark coverage starts with a
+  cross-run family containing universe, labelled and excluded counts, but a
+  protected coverage cell also suppresses the outcome family, and a protected
+  outcome cell suppresses coverage: screen totals reconstruct the universe,
+  either classification table reconstructs the labelled cohort, and universe
+  minus exclusions reconstructs that same labelled total. This bidirectional
+  rule prevents within-run and cross-run subtraction from undoing suppression.
+- Valuation secondary suppression is connected by analyst/quantitative cohort
+  across both views and both runs. A protected cell withholds that cohort's
+  contingency cells, row and column margins, agreement and other table-derived
+  metrics, coverage totals/rates and paired transitions. Tier C is one
+  cross-run family: a protected field/outcome cell withholds field cells,
+  global outcomes, comparison/comparable totals and rates, extraction
+  accuracy and the ROE diagnostic counts. Labels, orientation, formulas and
+  methodology remain public.
+- Paired transition tables use fixed category grids so an omitted key cannot
+  disclose a zero. Benchmark-derived transition families receive secondary
+  suppression when a protected cell is present. Model-only transition zeros
+  remain publishable unless their margins constrain a protected benchmark
+  family. The same deterministic private inputs therefore always produce the
+  same public JSON.
+- **Pete decision 2026-11-06 — benchmark-derived scope:** §16 prohibits
+  “cells containing fewer than five benchmark-derived companies,” while
+  Amendment 1 says, “The report shows the baseline/candidate counts and rates
+  beside the unchanged-input replicate counts and rates” and freezes status
+  and Bear-severity changes as “aggregate comparison only.” Small-cell and
+  secondary suppression therefore apply only to Tier A, valuation, Tier C,
+  and persona/committee external-support figures that use benchmark data.
+  Paired committee cohort counts, flip/change counts and rates, Bear-severity
+  transitions and mean score movement are public even when zero or below five.
+  Committee external support is one connected cross-run disclosure family:
+  its overall split, by-status and Investigate compositions, margins,
+  enrichment numerators/denominators/rates, contradiction rate and support
+  associations receive secondary suppression together. Status transitions are
+  withheld in both the baseline/candidate and candidate/replicate tables when
+  their run-specific margins would constrain that protected family; aggregate
+  status-flip counts and rates remain public as Amendment 1 requires. The
+  direct star-rating association and all persona external-
+  alignment associations are suppressed across runs when either their
+  benchmark denominator or its complement to the public model cohort is below
+  five. Paired Tier A transitions are public only when no Tier A benchmark
+  family is suppressed; otherwise their shared-universe counts, denominator
+  and margins remain withheld. Model-only mean score movement and bootstrap
+  intervals remain public because they add no count equality.
+- **Pete decision — material benchmark publication reduction:** connected-
+  family suppression intentionally withholds some cells of five or more, and
+  may withhold all numeric results for an affected Tier A, valuation-cohort or
+  Tier C family. Publishing more benchmark-derived detail would require a
+  separately reviewed coarsening scheme proven safe across the whole report.
 - Manifest objects and normalized input records reject unknown keys and
   categories. Development manifests may bind synthetic inputs; authoritative
   manifests must bind the two frozen snapshot digests and sizes.

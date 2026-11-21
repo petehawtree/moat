@@ -257,6 +257,13 @@ def render_block(metrics: dict) -> str:
     spend = v("ai_spend_total")
     spend_str = f"~${spend:,.1f}" if isinstance(spend, (int, float)) else "spend unavailable"
 
+    # The render date below is the newest as_of, which a repo-only refresh
+    # (commits, tests, issues) moves forward even when data/moat.db isn't
+    # present. State the database figures' own date so a fresh render date
+    # can't be read as "these numbers were checked against the DB today".
+    db_dates = [metrics[k]["as_of"] for k in DB_METRIC_SOURCES if k in metrics]
+    db_as_of = min(db_dates) if db_dates else "unknown"
+
     lines = [
         MARKER_START,
         "| | | |",
@@ -268,9 +275,12 @@ def render_block(metrics: dict) -> str:
         f"| {issues_line} | | |",
         "",
         "Sources: commit count is `git rev-list --count HEAD`. Universe/fundamentals "
-        "coverage and the screen result are cross-checked live against `data/moat.db` "
-        "(Sprint 1 / Sprint 3.1 retros give the history). The AI-analyzed/citation figures "
-        "are the Sprint 3.1 batch run. Spend is the analysis-stage total from "
+        "coverage, the screen result, the AI-analyzed/citation figures and analysis-stage "
+        "spend are read from `data/moat.db`, which is gitignored, so they only refresh on "
+        f"the development machine: these are as of {db_as_of}. The Sprint 1, Sprint 3.1 and "
+        "Sprint 5 retros give the screen result's history. The AI-analyzed/citation figures "
+        "count current analyses: the Sprint 3.1 batch run analyzed the first 70 companies "
+        "and later runs added the rest. Spend is the analysis-stage total from "
         "`analysis_attempts.cost_estimate` (data-derived, all outcomes — a failed attempt "
         "still cost real money) plus the Sprint 5 committee pilot's spend, which the "
         "committee stage computes but doesn't persist, so that one figure stays "

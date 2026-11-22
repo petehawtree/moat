@@ -10,14 +10,14 @@
     "value": 22.806
   },
   "ai_spend_committee_pilot": {
-    "as_of": "2026-09-23",
-    "source": "manual \u2014 every Sprint 5 committee run: the 21-company pilot (~$1.90), the full 69-company run on refreshed prices ($4.33), the 80-company run after GitHub #9 ($6.47, incl. ~$1.70 of an accidental duplicate run) and CHD ($0.07). The committee stage computes cost_estimate per call but never persists it (committee_verdicts has no cost column), so this figure can't be recomputed from data/moat.db. Update by hand from a real run's logged spend and revise as_of. See docs/sprints/sprint-5.md.",
-    "value": 12.77
+    "as_of": "2026-11-22",
+    "source": "manual. Every committee run that spent money, $27.57 in all. Sprint 5 ($12.77): the 21-company pilot (~$1.90), the full 69-company run on refreshed prices ($4.33), the 80-company run after GitHub #9 ($6.47, incl. ~$1.70 of an accidental duplicate run) and CHD ($0.07); see docs/sprints/sprint-5.md. Sprint 6.0 re-run (~$7.46): runs 20260930T123721Z, 20260930T125628Z, 20260930T133528Z and 20260930T133537Z, 118 fresh verdicts. The figure was recorded in the operator's notes when the run finished on 2026-09-30; the run logs were not kept. Cross-check: 118 x the replicate's measured $0.0628 per verdict = ~$7.41. Amendment 1 committee replicate ($7.34): run 20261103T182532Z, 117 fresh verdicts on a DB copy, from the stage's own 'total cost estimate: $7.343' line in the sealed stage log (kept outside the repo); attempt 1 (20261103T181804Z) failed on a revoked key, $0. The committee stage computes cost_estimate per call but never persists it (committee_verdicts has no cost column), so this figure can't be recomputed from data/moat.db. Update by hand from a real run's logged spend and revise as_of.",
+    "value": 27.57
   },
   "ai_spend_total": {
     "as_of": "2026-11-22",
-    "source": "ai_spend_analysis_stage + ai_spend_committee_pilot (oldest input: 2026-09-23)",
-    "value": 35.58
+    "source": "ai_spend_analysis_stage + ai_spend_committee_pilot (oldest input: 2026-11-22)",
+    "value": 50.38
   },
   "citations_total": {
     "as_of": "2026-11-22",
@@ -27,7 +27,7 @@
   "commits": {
     "as_of": "2026-11-22",
     "source": "git rev-list --count HEAD",
-    "value": 205
+    "value": 206
   },
   "filings_rows": {
     "as_of": "2026-11-22",

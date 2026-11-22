@@ -415,3 +415,37 @@ def test_dashboard_brief_flags_verdicts_with_no_recorded_inputs(dashboard_db):
     at = _run_app_against(dashboard_db)
     assert not at.exception
     assert any("predates input provenance" in w.value for w in at.warning)
+
+
+def test_dashboard_committee_view_picks_the_run_that_finished_last(dashboard_db):
+    """Sprint 6.0 ran the committee as a main A-to-Z run plus a Z-to-A worker
+    started seconds later. The main run absorbs the worker's verdicts as
+    cache hits and finishes last, so it holds the full set. Ordering by
+    started_at picked the worker's subset (49 of 117 on the live DB)."""
+    conn = get_connection(db_path=dashboard_db)
+    for t in ("AAA", "ZZZ"):
+        conn.execute(
+            "INSERT INTO companies (ticker, name, sector, universe, is_active, added_date) "
+            "VALUES (?, ?, 'Technology', 'sp500', 1, ?)", (t, f"{t} Co", NOW),
+        )
+    conn.execute(
+        "INSERT INTO pipeline_runs (run_id, started_at, completed_at, status) VALUES "
+        "('main', '2026-01-01T10:00:00+00:00', '2026-01-01T10:30:00+00:00', 'partial')"
+    )
+    conn.execute(
+        "INSERT INTO pipeline_runs (run_id, started_at, completed_at, status) VALUES "
+        "('worker', '2026-01-01T10:00:09+00:00', '2026-01-01T10:29:30+00:00', 'partial')"
+    )
+    rows = [("main", "AAA", "Investigate"), ("main", "ZZZ", "Watch"), ("worker", "ZZZ", "Watch")]
+    for run_id, ticker, status in rows:
+        conn.execute(
+            "INSERT INTO committee_verdicts (run_id, ticker, quality_analyst_view, bear_analyst_view, "
+            "valuation_analyst_view, overall_score, status, data_confidence, created_at) "
+            "VALUES (?, ?, 'q', 'b', 'v', 75, ?, 'high', ?)", (run_id, ticker, status, NOW),
+        )
+    conn.commit()
+    conn.close()
+
+    at = _run_app_against(dashboard_db)
+    assert not at.exception
+    assert any("Run `main` — 2 companies" in c.value for c in at.caption)

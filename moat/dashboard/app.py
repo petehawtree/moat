@@ -389,12 +389,19 @@ else:
         )
         val = _filter_by_sector(val)
 
+    # Ordered by when a run finished, not when it started. Sprint 6.0 split
+    # the committee across a main A-to-Z run and a Z-to-A worker started
+    # seconds later. The worker stops on meeting the main run, and the main
+    # run then takes the worker's verdicts as cache hits, so the main run
+    # finishes last and holds the full set. Ordered by start time, the worker
+    # (49 of the 117 verdicts) won. A run with no completed_at falls back to
+    # its start time.
     latest_committee_run = conn.execute(
         """
         SELECT run_id FROM pipeline_runs
         WHERE run_id IN (SELECT DISTINCT run_id FROM committee_verdicts)
           AND status != 'failed'
-        ORDER BY started_at DESC LIMIT 1
+        ORDER BY COALESCE(completed_at, started_at) DESC, started_at DESC LIMIT 1
         """
     ).fetchone()
     committee = pd.DataFrame()
